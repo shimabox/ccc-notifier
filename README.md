@@ -10,7 +10,9 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 
 上が通知の例です(1行目がタイトル、2〜3行目が本文)。応答が完了するたびに OS 通知(任意で Slack 通知も)としてこれが届きます。
 
-<!-- TODO: screenshot -->
+![ダッシュボード](docs/images/dashboard.png)
+
+<!-- TODO: OS通知のスクリーンショット(docs/images/notification.png)を撮って差し込む -->
 
 ## 特徴 / Features
 
@@ -203,6 +205,10 @@ npx agent-cost-notifier dashboard --no-open --out ./cost.html  # 開かずに任
 npx agent-cost-notifier dashboard --refresh 10   # 自動リロード間隔を10秒に上書き
 npx agent-cost-notifier dashboard --no-refresh   # 自動リロードを無効化して生成
 ```
+
+検索・行クリックでプロンプト全文を確認できます([ページ全体のスクリーンショット](docs/images/dashboard-full.png)):
+
+![ターン履歴(検索と全文展開)](docs/images/history-expand.png)
 
 `--days` はダッシュボード全体(チャート・内訳・履歴テーブル・サマリーカード)が対象とする期間です(既定30、不正値は30)。すべての集計はこの期間内に記録されたターンから計算されます。
 
