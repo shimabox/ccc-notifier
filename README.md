@@ -23,16 +23,113 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 
 ## 必要環境 / Requirements
 
-- Node.js 20 以上
+- Node.js 20 以上(未導入の場合は下の「Node.js の用意」を参照してください)
 - Claude Code(インストール・利用中であること)
+
+## Node.js の用意(まだ入っていない方へ)/ Installing Node.js
+
+すでに Node.js 20 以上をお使いの方は、この節を読み飛ばして次の「インストール / Install」に進んでください。
+
+### 推奨: mise
+
+このリポジトリには [mise](https://mise.jdx.dev)(プログラミング言語のバージョン管理ツール)用の設定ファイル `mise.toml` が同梱されています。mise を使うとプロジェクトごとのバージョン切り替えが楽になり、`mise install` の1コマンドで本リポジトリが必要とする Node.js 20 が入ります。
+
+1. **mise をインストールする**
+
+   macOS・Linux 共通(公式インストールスクリプト):
+
+   ```bash
+   curl https://mise.run | sh
+   ```
+
+   macOS で Homebrew を使っている場合はこちらでも構いません。
+
+   ```bash
+   brew install mise
+   ```
+
+2. **シェルに mise を認識させる(activate)**
+
+   お使いのシェルの設定ファイルに1行追記し、シェルを再読み込みします。
+
+   zsh の場合:
+
+   ```bash
+   echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc && source ~/.zshrc
+   ```
+
+   bash の場合:
+
+   ```bash
+   echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc && source ~/.bashrc
+   ```
+
+3. **Node.js 20 を入れる**
+
+   本リポジトリを clone する前でも実行できるように、まずはグローバルの既定バージョンとして Node.js 20 を入れます。
+
+   ```bash
+   mise use -g node@20
+   ```
+
+   (この後「インストール / Install」で本リポジトリを clone すると、同梱の `mise.toml` を使って `mise install` を実行する手順が出てきます。リポジトリのディレクトリ内で `mise install` を実行した場合も、`mise.toml` が指定する Node.js 20 が同様に入ります。)
+
+4. **確認する**
+
+   ```bash
+   node -v
+   ```
+
+   `v20.x.x` のように表示されれば成功です。
+
+補足: Windows での mise は、公式ドキュメントによると現時点では shim 経由の実行のみのサポートで、`mise.toml` の内容が素直に反映されない場合があります。Windows をお使いの方は下の「代替」の方法をおすすめします。
+
+### 代替: 公式インストーラ
+
+mise を使わない場合は、[nodejs.org](https://nodejs.org/en/download) の公式インストーラ(macOS・Windows・Linux 共通)から Node.js 20 以上を入れてください。
+
+- **Windows**: winget が使える場合は次のコマンドでも入ります(LTS版が入ります)。
+
+  ```powershell
+  winget install -e --id OpenJS.NodeJS.LTS
+  ```
+
+  winget が使えない場合は [nodejs.org](https://nodejs.org/en/download) から公式インストーラをダウンロードしてください。
+
+## インストール / Install
+
+### 方法A: ソースから(現時点ではこちらをご利用ください)
+
+```bash
+git clone https://github.com/shimabox/agent-cost-notifier.git
+cd agent-cost-notifier
+mise install          # mise 利用時(Node.js 20 が自動で入ります)。mise が無ければ上の「Node.js の用意」を参考に Node.js 20 以上を用意してください
+npm ci
+npm run build
+node dist/cli.js init
+```
+
+最後の `node dist/cli.js init` が次の「セットアップ / Setup」の内容(対話形式のセットアップ)です。
+
+### 方法B: npm から(公開後に有効)
+
+```bash
+npm install -g agent-cost-notifier
+agent-cost-notifier init
+```
+
+※ 現在 npm 公開準備中です。公開されるまでは方法Aをご利用ください。
 
 ## セットアップ / Setup
 
+このセクション以降に出てくる `npx agent-cost-notifier <command>` や `npm install -g agent-cost-notifier` は、npm 公開後(上記「インストール / Install」の方法B)を前提にした表記です。まだ方法A(ソースから)を使っている場合は、`npx agent-cost-notifier <command>` を `node dist/cli.js <command>` に読み替えてください。
+
 1. **セットアップコマンドを実行**
 
-   ```bash
-   npx agent-cost-notifier@latest init
-   ```
+   「インストール / Install」で行った方法に応じて `init` を実行します。
+
+   - 方法A(ソースから)の場合: `node dist/cli.js init`
+   - 方法B(npm、公開後)の場合: `npx agent-cost-notifier@latest init`
 
 2. **質問に答える**
 
@@ -209,6 +306,22 @@ npx agent-cost-notifier doctor
 - hook が未登録 → `npx agent-cost-notifier init` を再実行してください
 - `config.json` の `notify.os` が `false` → 意図的に無効化されています
 - そのターンの金額が `minNotifyUSD` 未満 → 通知は来ませんが、履歴(`report`)には記録されています
+
+**Node を更新・削除したら通知が来なくなった**
+
+hook には `init` を実行した時点の Node.js の絶対パスがそのまま記録されています。mise などで Node.js のバージョンを切り替えたり、そのバージョン自体をアンインストールしたりすると、記録されていたパスが無効になり通知が届かなくなることがあります。
+
+対処: リポジトリのディレクトリで `init` を再実行してください。hook の登録が今使っている Node.js のパスで上書きされます。
+
+```bash
+node dist/cli.js init          # グローバルインストール済みなら agent-cost-notifier init
+```
+
+あわせて次を実行すると、他に問題が無いかも確認できます。
+
+```bash
+node dist/cli.js doctor        # グローバルインストール済みなら agent-cost-notifier doctor
+```
 
 **通知の送信元表示が「スクリプトエディタ」「Windows PowerShell」になっている**
 
