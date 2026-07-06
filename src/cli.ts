@@ -30,9 +30,9 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Print an aggregated cost report",
   },
   {
-    cmd: "dashboard",
-    ja: "HTMLダッシュボードを開く(次のリリースで実装予定)",
-    en: "Open the HTML dashboard (coming in the next release)",
+    cmd: "dashboard [--days N] [--no-open] [--out <path>]",
+    ja: "HTMLダッシュボードを生成してブラウザで開く",
+    en: "Generate and open the HTML dashboard",
   },
   {
     cmd: "track",
@@ -155,9 +155,10 @@ export async function main(argv: string[]): Promise<number> {
         return await runDoctor();
       case "report":
         return await runReport(rest);
-      case "dashboard":
-        console.log("dashboard は次のリリースで実装されます / dashboard is coming in the next release");
-        return 1;
+      case "dashboard": {
+        const { runDashboard } = await import("./dashboard");
+        return await runDashboard(rest);
+      }
       case "--version":
       case "-v":
         console.log(readVersion());
