@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,15 +10,28 @@ import { acnHome, appendNotifyError, writeDryRun } from "../src/notify/util";
 import { notifyOS } from "../src/notify/os";
 import { notifySlack } from "../src/notify/slack";
 
-// node-notifier は実通知を出さないようモック化する。vi.mock は静的にホイストされるため、
+// notifyOS は node:child_process の spawn で OS ネイティブ通知コマンドを起動する。
+// 実通知を出さないよう spawn 自体をモック化する。vi.mock は静的にホイストされるため、
 // モック内で使う関数は vi.hoisted で用意する。
-const { mockNotify } = vi.hoisted(() => ({ mockNotify: vi.fn() }));
+const { mockSpawn } = vi.hoisted(() => ({ mockSpawn: vi.fn() }));
 
-vi.mock("node-notifier", () => ({
-  default: {
-    notify: mockNotify,
-  },
+vi.mock("node:child_process", () => ({
+  spawn: mockSpawn,
 }));
+
+/** spawn の戻り値(ChildProcess)を模した偽 child。"exit"/"error" をテストから発火できる。 */
+type FakeChild = EventEmitter & { kill: ReturnType<typeof vi.fn> };
+
+function createFakeChild(): FakeChild {
+  const child = new EventEmitter() as FakeChild;
+  child.kill = vi.fn();
+  return child;
+}
+
+/** notifyOS 内の分岐に使う process.platform を一時的に上書きする。afterEach で必ず元に戻すこと。 */
+function setPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+}
 
 // ============ 共有フィクスチャ ============
 // GOLDEN.md (test/fixtures/transcript-basic.jsonl の正解値) 相当の TurnRecord。
@@ -185,21 +199,23 @@ describe("notify/util", () => {
 
 describe("notifyOS", () => {
   let tmpHome: string;
+  let fakeChild: FakeChild;
+  const originalPlatform = process.platform;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), "acn-notify-os-"));
     process.env.ACN_HOME = tmpHome;
     delete process.env.ACN_DRY_RUN;
-    mockNotify.mockReset();
-    mockNotify.mockImplementation((_opts: unknown, cb?: (err: Error | null, response?: string) => void) => {
-      cb?.(null, "ok");
-    });
+    mockSpawn.mockReset();
+    fakeChild = createFakeChild();
+    mockSpawn.mockImplementation(() => fakeChild);
   });
 
   afterEach(() => {
     rmSync(tmpHome, { recursive: true, force: true });
     delete process.env.ACN_HOME;
     delete process.env.ACN_DRY_RUN;
+    setPlatform(originalPlatform);
   });
 
   it("writes title/body under the 'os' key in last-notify.json during DRY_RUN", async () => {
@@ -210,7 +226,7 @@ describe("notifyOS", () => {
     expect(parsed.os.title).toBe("💰 API換算 $0.267(¥40)| Fable 5 +1");
     expect(typeof parsed.os.body).toBe("string");
     expect(typeof parsed.os.ts).toBe("string");
-    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it("does nothing when cfg.notify.os is false", async () => {
@@ -218,27 +234,98 @@ describe("notifyOS", () => {
     await notifyOS(baseRecord, cfgDisabled);
 
     expect(existsSync(join(tmpHome, "last-notify.json"))).toBe(false);
-    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("resolves even when node-notifier reports an error", async () => {
-    mockNotify.mockImplementation((_opts: unknown, cb?: (err: Error | null, response?: string) => void) => {
-      cb?.(new Error("native notifier boom"), "");
-    });
+  it("spawns osascript with title/body passed as argv (not embedded in the script) on darwin", async () => {
+    setPlatform("darwin");
 
-    await expect(notifyOS(baseRecord, baseConfig)).resolves.toBeUndefined();
+    const pending = notifyOS(baseRecord, baseConfig);
+    fakeChild.emit("exit", 0);
+    await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [command, args, options] = mockSpawn.mock.calls[0] as [string, string[], Record<string, unknown>];
+    const expected = formatSummary(baseRecord, baseConfig);
+
+    expect(command).toBe("osascript");
+    expect(args).toEqual([
+      "-e", "on run argv",
+      "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+      "-e", "end run",
+      expected.title,
+      expected.body,
+    ]);
+    expect(options).toMatchObject({ stdio: "ignore" });
+  });
+
+  it("spawns powershell with an EncodedCommand toast script and env-based title/body on win32", async () => {
+    setPlatform("win32");
+
+    const pending = notifyOS(baseRecord, baseConfig);
+    fakeChild.emit("exit", 0);
+    await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [command, args, options] = mockSpawn.mock.calls[0] as [
+      string,
+      string[],
+      { env?: Record<string, string | undefined> },
+    ];
+    const expected = formatSummary(baseRecord, baseConfig);
+
+    expect(command).toBe("powershell.exe");
+    expect(args).toContain("-EncodedCommand");
+
+    const encoded = args[args.indexOf("-EncodedCommand") + 1];
+    const decoded = Buffer.from(encoded, "base64").toString("utf16le");
+    expect(decoded).toContain("ToastNotificationManager");
+
+    expect(options.env?.ACN_TITLE).toBe(expected.title);
+    expect(options.env?.ACN_BODY).toBe(expected.body);
+  });
+
+  it("resolves (and logs) when spawn reports an error on darwin/win32", async () => {
+    setPlatform("darwin");
+
+    const pending = notifyOS(baseRecord, baseConfig);
+    fakeChild.emit("error", new Error("spawn osascript ENOENT"));
+    await expect(pending).resolves.toBeUndefined();
 
     const errLog = readFileSync(join(tmpHome, "error.log"), "utf8");
     expect(errLog).toContain("notifyOS");
-    expect(errLog).toContain("native notifier boom");
+    expect(errLog).toContain("spawn osascript ENOENT");
   });
 
-  it("resolves after the 3s timeout if node-notifier never calls back", async () => {
+  it("resolves (and logs) when the child exits with a non-zero code", async () => {
+    setPlatform("darwin");
+
+    const pending = notifyOS(baseRecord, baseConfig);
+    fakeChild.emit("exit", 1);
+    await expect(pending).resolves.toBeUndefined();
+
+    const errLog = readFileSync(join(tmpHome, "error.log"), "utf8");
+    expect(errLog).toContain("notifyOS");
+    expect(errLog).toContain("exit code 1");
+  });
+
+  it("uses notify-send on other platforms and swallows a missing-command error", async () => {
+    setPlatform("linux");
+
+    const pending = notifyOS(baseRecord, baseConfig);
+    fakeChild.emit("error", new Error("spawn notify-send ENOENT"));
+    await expect(pending).resolves.toBeUndefined();
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [command] = mockSpawn.mock.calls[0] as [string, string[], Record<string, unknown>];
+    expect(command).toBe("notify-send");
+    expect(existsSync(join(tmpHome, "error.log"))).toBe(false);
+  });
+
+  it("kills the child and resolves after a 3s timeout if it never exits", async () => {
     vi.useFakeTimers();
     try {
-      mockNotify.mockImplementation(() => {
-        // コールバックを一切呼ばないことでハングを再現する。
-      });
+      setPlatform("darwin");
       const pending = notifyOS(baseRecord, baseConfig);
       await vi.advanceTimersByTimeAsync(3000);
       await expect(pending).resolves.toBeUndefined();
@@ -246,8 +333,7 @@ describe("notifyOS", () => {
       vi.useRealTimers();
     }
 
-    const errLog = readFileSync(join(tmpHome, "error.log"), "utf8");
-    expect(errLog).toContain("notifyOS");
+    expect(fakeChild.kill).toHaveBeenCalledTimes(1);
   });
 });
 

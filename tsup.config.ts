@@ -6,5 +6,5 @@ export default defineConfig({
   target: "node20",
   clean: true,
   banner: { js: "#!/usr/bin/env node" },
-  external: ["node-notifier", "@clack/prompts"],
+  external: ["@clack/prompts"],
 });

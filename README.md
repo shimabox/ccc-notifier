@@ -18,7 +18,7 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 - **$ と ¥ を併記** — USD と JPY の両方を毎回表示します(為替レートは自動取得 + キャッシュ + 固定フォールバックの三段構え)
 - **プロンプト全文をローカルに履歴保存** — `~/.agent-cost-notifier/history.jsonl` にそのターンのプロンプト全文を保存します(外部には送信されません)
 - **HTMLダッシュボード** — `dashboard` コマンドで、サマリー・日別コストの積み上げ棒グラフ・モデル別/プロジェクト別内訳・検索できるターン履歴を1枚の HTML(完全自己完結・ライト/ダーク対応)に書き出してブラウザで開きます
-- **Mac・Windows 両対応** — [node-notifier](https://github.com/mikaelbr/node-notifier) 経由の OS ネイティブ通知に対応しています
+- **OS 標準の通知機構のみ使用・追加依存ゼロ** — 通知は macOS では `osascript`、Windows では PowerShell 標準のトースト通知機能のみで送信します(node-notifier 等の外部通知ライブラリには一切依存しません)
 - **全処理ローカル・フェイルセーフ設計** — 通知や集計の処理が失敗しても、Claude Code 本体の応答は絶対にブロックしません
 
 ## 必要環境 / Requirements
@@ -202,6 +202,10 @@ npx agent-cost-notifier doctor
 - hook が未登録 → `npx agent-cost-notifier init` を再実行してください
 - `config.json` の `notify.os` が `false` → 意図的に無効化されています
 - そのターンの金額が `minNotifyUSD` 未満 → 通知は来ませんが、履歴(`report`)には記録されています
+
+**通知の送信元表示が「スクリプトエディタ」「Windows PowerShell」になっている**
+
+これは正常な動作です。OS通知は追加ライブラリなしで OS 標準の仕組み(macOS: `osascript` / Windows: PowerShell 標準のトースト通知)を直接呼び出して表示しているため、通知の送信元(表示名義)はそれぞれ macOS では「スクリプトエディタ」、Windows では「Windows PowerShell」になります。通知がすぐ消えて見逃しがちな場合は、OS 側の通知設定でその名義の通知スタイルを変更してください(例: macOS はシステム設定 → 通知 →「スクリプトエディタ」→ 通知スタイルを「通知パネル」に変更すると、自動的に消えず手動で閉じるまで表示され続けます)。
 
 **金額が Claude Code の `/cost` と少し違う**
 
