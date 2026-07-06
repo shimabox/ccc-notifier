@@ -64,6 +64,7 @@ export interface TurnRecord {
   fxRate: number;
   fxSource: 'live' | 'cache' | 'fixed';
   prompt: string;            // 全文(ローカルのみ)。null 時は ""
+  ingest?: 'sweep';          // sweep(過去分の一括回収)由来の記録の目印。hook 経由は付与しない(undefined)
   unknownModels?: string[];
   subagents?: {              // サブエージェント枠(旧レコード後方互換のため optional)
     costUSD: number;                     // サブエージェント合計(丸めない)

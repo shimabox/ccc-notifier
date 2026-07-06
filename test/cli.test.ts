@@ -11,7 +11,15 @@
 // 失敗し、report/doctor 系の無関係なテストまで巻き込まれてしまうため)。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -395,5 +403,105 @@ describe("runDoctor", () => {
 
     expect(code).toBe(1);
     expect((output.match(/❌/g) ?? []).length).toBeGreaterThan(0);
+  });
+
+  /** settings-existing.json を基に、Stop の hook command を差し替えた settings ファイルを書く。 */
+  function writeSettingsWithCommand(name: string, command: string): string {
+    const rawFixture = readFileSync(
+      fileURLToPath(new URL("./fixtures/settings-existing.json", import.meta.url)),
+      "utf8",
+    );
+    const parsed = JSON.parse(rawFixture) as Record<string, unknown>;
+    const existingHooks = (parsed.hooks ?? {}) as Record<string, unknown>;
+    parsed.hooks = {
+      ...existingHooks,
+      Stop: [{ hooks: [{ type: "command", command, timeout: 15 }] }],
+    };
+    const p = join(tmpHome, name);
+    writeFileSync(p, JSON.stringify(parsed, null, 2), "utf8");
+    return p;
+  }
+
+  it("hook の第1トークンが存在しない絶対パスの Node なら ⚠️ を出すが ❌ にせず 0 を返す", async () => {
+    // scriptPath は beforeEach が実在させたダミー(存在チェックは ✅ のまま)。第1トークンだけ無効化。
+    const scriptPath = join(tmpHome, "agent-cost-notifier-dist", "cli.js");
+    const p = writeSettingsWithCommand(
+      "settings-nodepath.json",
+      `"/no/such/mise/node/bin/node" "${scriptPath}" track`,
+    );
+    process.env.ACN_CLAUDE_SETTINGS = p;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(0);
+    expect((output.match(/❌/g) ?? []).length).toBe(0);
+    expect(output).toContain("hook の Node 実行パスが見つかりません");
+    expect(output).toContain("/no/such/mise/node/bin/node");
+  });
+
+  it("hook の第1トークンがベア名 'node' なら Node 実行パス警告を出さない", async () => {
+    const scriptPath = join(tmpHome, "agent-cost-notifier-dist", "cli.js");
+    const p = writeSettingsWithCommand("settings-barenode.json", `node "${scriptPath}" track`);
+    process.env.ACN_CLAUDE_SETTINGS = p;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(0);
+    expect(output).not.toContain("hook の Node 実行パスが見つかりません");
+  });
+});
+
+// ============ main sweep 配線 ============
+// main() が "sweep" を runSweep に配線し、rest 引数(--dry-run)を渡すことを検証する。
+
+describe("main sweep", () => {
+  let tmpHome: string;
+  let projectsRoot: string;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "acn-cli-test-sweep-"));
+    projectsRoot = mkdtempSync(join(tmpdir(), "acn-cli-test-sweep-proj-"));
+    process.env.ACN_HOME = tmpHome;
+    process.env.ACN_CLAUDE_PROJECTS = projectsRoot;
+    // 実ネットワークに出ない保険(単価 builtin / fx fixed 150 に決定的にフォールバック)。
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+
+    mkdirSync(join(projectsRoot, "projA"), { recursive: true });
+    copyFileSync(
+      fileURLToPath(new URL("./fixtures/transcript-multiturn.jsonl", import.meta.url)),
+      join(projectsRoot, "projA", "t1.jsonl"),
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.ACN_HOME;
+    delete process.env.ACN_CLAUDE_PROJECTS;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(projectsRoot, { recursive: true, force: true });
+  });
+
+  it("main(['sweep','--dry-run']) は 0 を返しサマリを表示するが history を書かない", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main(["sweep", "--dry-run"]));
+
+    expect(code).toBe(0);
+    expect(output).toContain("dry-run: 書き込みは行っていません");
+    expect(output).toContain("走査:");
+    expect(existsSync(join(tmpHome, "history.jsonl"))).toBe(false);
+  });
+
+  it("main(['sweep']) は rest を runSweep に渡し history に ingest:'sweep' を2行書く", async () => {
+    const { main } = await import("../src/cli");
+    const { code } = await captureLogs(() => main(["sweep"]));
+
+    expect(code).toBe(0);
+    const rows = readFileSync(join(tmpHome, "history.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as TurnRecord);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.ingest === "sweep")).toBe(true);
   });
 });

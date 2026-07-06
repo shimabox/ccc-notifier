@@ -560,4 +560,25 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(html).toContain("Sonnet 5");
     expect(html).toContain("うちサブエージェント");
   });
+
+  // ---- 11. sweep: dry-run はサマリのみ、本実行で ingest:"sweep" の履歴が入る ----
+  it('11. sweep: --dry-run prints a summary without writing, then a real run backfills ingest:"sweep" history', async () => {
+    // 走査対象 = ACN_CLAUDE_PROJECTS(projectsDir)/proj/session.jsonl(transcript-basic フィクスチャ)。
+    const dry = await runCli(["sweep", "--dry-run"], { env: sb.env });
+    expect(dry.code).toBe(0);
+    expect(dry.stdout).toContain("dry-run: 書き込みは行っていません");
+    expect(dry.stdout).toContain("走査:");
+    // dry-run では history を書かない。
+    expect(readHistory(sb.acnHome)).toHaveLength(0);
+
+    const real = await runCli(["sweep"], { env: sb.env });
+    expect(real.code).toBe(0);
+    expect(real.stdout).toContain("走査:");
+
+    const rows = readHistory(sb.acnHome);
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows.every((r) => r.ingest === "sweep")).toBe(true);
+    // transcript-basic を1ターンに復元(GOLDEN 0.267)。
+    expect(rows[0].costUSD).toBeCloseTo(0.267, 10);
+  });
 });

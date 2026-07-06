@@ -43,7 +43,9 @@ function addToModel(target: UsageByModel, model: string, b: TokenBuckets): void 
   target[model] = cur;
 }
 
-function extractBucket(usage: Record<string, unknown>): TokenBuckets {
+// Exported so src/sweep.ts can reuse the exact same token-extraction rule
+// (behaviour and signature unchanged).
+export function extractBucket(usage: Record<string, unknown>): TokenBuckets {
   const input = numOf(usage.input_tokens);
   const output = numOf(usage.output_tokens);
   const cacheRead = numOf(usage.cache_read_input_tokens);
@@ -69,8 +71,11 @@ function extractBucket(usage: Record<string, unknown>): TokenBuckets {
  *  - string content  -> itself
  *  - array content   -> excluded entirely if it contains any tool_result block;
  *                       otherwise the text blocks joined with "\n"
+ *
+ * Exported so src/sweep.ts can reuse the exact same prompt rule (behaviour and
+ * signature unchanged).
  */
-function promptCandidate(content: unknown): string | null {
+export function promptCandidate(content: unknown): string | null {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     let hasToolResult = false;

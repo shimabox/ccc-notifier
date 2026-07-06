@@ -112,6 +112,31 @@ subagents?: {
     perModel にマージする。新規なし(null)はスキップ。1ファイルの失敗は握りつぶして次へ。
   - **カーソル保存はここでは行わない**(track.ts が履歴追記後に SA 分を saveCursor する)。
 
+## 2026-07-07 追加: TurnRecord.ingest / sweep コマンド(オーケストレーター認可)
+TurnRecord に optional の `ingest?: 'sweep'` を追加した(schemaVersion は 1 のまま、後方互換)。
+- `sweep`(過去分の一括回収)由来の記録に `ingest: 'sweep'` を付与する。hook(track)経由の
+  記録には付与しない(= undefined)。読む側は無視してよい(表示・集計には影響しない)。
+
+### src/transcript.ts — export 追加(挙動不変)
+sweep がメイン(aggregateNewTurn)とパース規約を完全に踏襲するため、既存 private ヘルパー
+`extractBucket` / `promptCandidate` を export に変更した(**実装・シグネチャは不変**)。
+
+### src/sweep.ts(2026-07-07 追加)
+- `runSweep(argv: string[]): Promise<number>`
+  - `~/.claude/projects`(既定・`ACN_CLAUDE_PROJECTS` または `--projects <dir>` で上書き)配下の
+    各プロジェクトディレクトリ内の `*.jsonl`(1階層のみ)を走査し、hook のカーソルで「未計上分」を
+    **ターン単位に復元**して history へ取り込む。サブエージェント(`<main>/subagents/agent-*.jsonl`)も
+    `collectSubagentUsage` で回収する。二重計上はカーソル + message.id 去重で防ぐ。
+  - フラグ: `--dry-run`(書き込みなしで集計表示)/ `--days <N>`(N 日より古いターンは取り込まない。
+    カーソルは進める)/ `--projects <dir>`(走査ルート上書き)。
+  - 円換算は sweep 実行時のレート(`getUsdJpy`)。単価は `loadPriceTable(cacheDir, { offline: false })`。
+  - 実行後サマリ(`SweepSummary`)の `totalUSD` / `byModel` は**メイン基準**(SA を含めない)。SA の回収額は
+    `subagentsUSD` に別枠で集計し、新規があるとき(`newRecords > 0 && subagentsUSD > 0`)はコンソールにも
+    「うちサブエージェント: $X(¥Y)」(¥ は fx.rate 換算)として1行表示する。
+  - `splitIntoTurnDrafts(path, cursor)`: aggregateNewTurn と同一のパース規約(開始位置・改行終端・破損行
+    スキップ・rescan ガード・去重・コンテキスト採取)で、実ユーザープロンプト行をターン境界に分割する。
+    戻り値の newCursor は同一ウィンドウに対する aggregateNewTurn の newCursor と互換(hook ↔ sweep 相互運用)。
+
 ## src/store.ts に sanitizeCursor を移設(2026-07-07)
 `sanitizeCursor(raw: unknown): Cursor | null` を track.ts の private 関数から store.ts の export へ
 移設した(挙動不変)。track.ts と subagents.ts の双方から使う。

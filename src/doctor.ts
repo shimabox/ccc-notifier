@@ -141,6 +141,22 @@ async function checkHookRegistration(): Promise<boolean> {
     );
   }
 
+  // Node 実行パスの死活チェック: 各 command の第1トークンを Node 実行パス候補とみなす。
+  // 絶対パス風("/" または Windows の ":\\" を含む)のに存在しなければ ⚠️(mise 等で Node を更新・
+  // 削除するとここが無効化される)。ベア名("node" 等)はチェックしない。❌ にはしない(exit code 不変)。
+  for (const command of matchedCommands) {
+    const first = tokenizeCommand(command).filter((t) => t.length > 0)[0];
+    if (first === undefined) continue;
+    const looksAbsolute = first.includes("/") || first.includes(":\\");
+    if (!looksAbsolute) continue; // "node" のようなベア名は PATH 解決なのでチェックしない
+    if (!existsSync(first)) {
+      log(
+        "warn",
+        `hook の Node 実行パスが見つかりません(mise 等での更新が原因の可能性)。init を再実行してください: ${first}`,
+      );
+    }
+  }
+
   return true;
 }
 

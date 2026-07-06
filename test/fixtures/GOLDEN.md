@@ -31,3 +31,22 @@
 - メイン(transcript-basic.jsonl)と合わせた**総額 = 0.267 + 0.033 = 0.300 USD**
 - 固定レート150円時の SA 分 JPY = 0.033 × 150 = 4.95(表示は ¥5)、総額 JPY = 40.05 + 4.95 = 45.0(表示は ¥45)
 - **通知金額はメインのみ(0.267)** — SA は通知に混入しない(通知は一切変えない)
+
+## sweep 用マルチターン(test/fixtures/transcript-multiturn.jsonl に対する正解値)
+
+実プロンプト2ターン構成(先行プロンプトあり)。sweep はこれを **ターン単位** に分割して取り込む
+(track/aggregateNewTurn は窓を1レコードに集約するのに対し、sweep は境界=実ユーザープロンプト行で分割)。
+
+- ターン1: prompt "ターン1のプロンプト" / assistant `msg_M1`+`req_M1` claude-fable-5 output 100 →
+  100×50/1e6 = **0.005 USD** / ts = 2026-07-06T10:00:05.000Z(= lastTs)
+- ターン2: prompt "ターン2のプロンプト" / assistant `msg_M2`+`req_M2` claude-sonnet-5 output 1000 →
+  1000×15/1e6 = **0.015 USD** / ts = 2026-07-06T10:01:05.000Z
+- **sweep 合計 = 0.005 + 0.015 = 0.020 USD**(summary.totalUSD)。両レコードとも `ingest: "sweep"`。
+- subagent-basic.jsonl を併用(`<main>/subagents/agent-x.jsonl`)した場合、**最終ターン(ターン2)の record に
+  SA 0.033**(claude-sonnet-5 / apiCalls 1 / agentFiles 1)が `subagents` ブロックとして添付される。
+  SA は summary.totalUSD(0.020)には**含めない**(GOLDEN のメイン基準)。SA 回収額は
+  **summary.subagentsUSD = 0.033** として別枠で集計され、コンソールに
+  「うちサブエージェント: $0.033(¥5)」(固定レート150円時)と1行表示される。
+- splitIntoTurnDrafts の newCursor は、同一ウィンドウに対する aggregateNewTurn の newCursor と互換
+  (seenMessageKeys = `["msg_M1:req_M1","msg_M2:req_M2"]`、offset = ファイル末尾)。hook ↔ sweep は
+  互いのカーソルを尊重し、二重計上しない。

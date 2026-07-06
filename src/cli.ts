@@ -35,6 +35,11 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Generate and open the HTML dashboard",
   },
   {
+    cmd: "sweep [--dry-run] [--days N]",
+    ja: "過去の未計上分を一括で履歴に取り込む",
+    en: "Backfill uncounted history",
+  },
+  {
     cmd: "track",
     ja: "Stop hook から呼ばれる内部コマンド(手動実行は不要)",
     en: "Internal command invoked by the Stop hook (not for manual use)",
@@ -158,6 +163,10 @@ export async function main(argv: string[]): Promise<number> {
       case "dashboard": {
         const { runDashboard } = await import("./dashboard");
         return await runDashboard(rest);
+      }
+      case "sweep": {
+        const { runSweep } = await import("./sweep");
+        return await runSweep(rest);
       }
       case "--version":
       case "-v":
