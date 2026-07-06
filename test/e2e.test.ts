@@ -196,8 +196,9 @@ function cleanupSandbox(sb: Sandbox): void {
 /** stop-hook-stdin.json の __TRANSCRIPT_PATH__ を実パスへ置換した stdin 文字列を返す。 */
 function stdinFor(transcriptPath: string): string {
   const raw = readFileSync(FIXTURE_STDIN, "utf8");
-  // 関数置換にして、パス中に "$" 等が含まれても特殊展開されないようにする。
-  return raw.replace("__TRANSCRIPT_PATH__", () => transcriptPath);
+  // JSON 文字列リテラルごと置換する(Windows パスの \ を JSON.stringify で正しくエスケープ。
+  // 生文字列の埋め込みは不正な JSON になり、track のフェイルセーフに黙殺される)。
+  return raw.replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(transcriptPath));
 }
 
 function readHistory(acnHome: string): TurnRecord[] {

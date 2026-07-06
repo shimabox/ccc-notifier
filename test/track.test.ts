@@ -60,8 +60,9 @@ afterEach(() => {
 /** stop-hook-stdin.json の __TRANSCRIPT_PATH__ を実パスへ置換した stdin 文字列を返す。 */
 function stdinFor(path: string): string {
   const raw = readFileSync(FIXTURE_STDIN, "utf8");
-  // 関数置換で $ 等の特殊パターン展開を避ける。
-  return raw.replace("__TRANSCRIPT_PATH__", () => path);
+  // JSON 文字列リテラルごと置換する(Windows パスの \ を JSON.stringify で正しくエスケープ。
+  // 生文字列の埋め込みは不正な JSON になり、track のフェイルセーフに黙殺される)。
+  return raw.replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(path));
 }
 
 function historyFile(): string {
