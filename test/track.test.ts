@@ -3,6 +3,7 @@ import {
   appendFileSync,
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -15,11 +16,13 @@ import { fileURLToPath } from "node:url";
 import { runTrack } from "../src/track";
 import * as store from "../src/store";
 import * as dashboard from "../src/dashboard";
+import * as subagents from "../src/subagents";
 import type { TurnRecord } from "../src/types";
 
 // 読み取り専用のゴールデン fixture。実行のたびに一時 dir へコピーして使う(fixture を汚さない)。
 const FIXTURE_TRANSCRIPT = fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url));
 const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
+const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
 
 let tmpHome: string;
 let transcriptPath: string;
@@ -75,6 +78,19 @@ function readHistory(): TurnRecord[] {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as TurnRecord);
+}
+
+/** transcriptPath の兄弟 subagents ディレクトリに SA フィクスチャを配置し、その絶対パスを返す。 */
+function subagentsDir(): string {
+  // transcriptPath = <tmpHome>/transcript.jsonl → SA dir = <tmpHome>/transcript/subagents
+  return join(tmpHome, "transcript", "subagents");
+}
+function placeSubagent(name = "agent-x.jsonl"): string {
+  const dir = subagentsDir();
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, name);
+  copyFileSync(FIXTURE_SUBAGENT, p);
+  return p;
 }
 
 // ---- suite ----------------------------------------------------------------
@@ -302,5 +318,186 @@ describe("runTrack", () => {
     const errLog = join(tmpHome, "error.log");
     expect(existsSync(errLog)).toBe(true);
     expect(readFileSync(errLog, "utf8")).toContain("[track:dashboard]");
+  });
+});
+
+// ============ サブエージェント usage の取り込み ============
+// transcript の兄弟 <transcript(.jsonl除去)>/subagents/agent-*.jsonl を増分集計し、
+// record.subagents(GOLDEN: costUSD 0.033 / claude-sonnet-5 / apiCalls 1 / agentFiles 1)に記録する。
+
+describe("runTrack — subagents", () => {
+  // 1. SA を集計して record.subagents に GOLDEN 値どおり記録する(メインは不変)。
+  it("1. collects subagent usage into record.subagents (GOLDEN 0.033 / sonnet-5 / 1 call / 1 file)", async () => {
+    placeSubagent();
+
+    await runTrack(stdinFor(transcriptPath));
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    const rec = rows[0];
+
+    // メインは従来どおり(SA は costUSD に混入しない)。
+    expect(rec.costUSD).toBeCloseTo(0.267, 10);
+
+    expect(rec.subagents).toBeDefined();
+    expect(rec.subagents!.costUSD).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.costByModel["claude-sonnet-5"]).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.apiCalls).toBe(1);
+    expect(rec.subagents!.agentFiles).toBe(1);
+    expect(rec.subagents!.tokens).toEqual({
+      input: 1000,
+      output: 2000,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0,
+    });
+  });
+
+  // 2. 冪等性: 新規メターンが無ければ SA も再計上されない(record 追加自体なし)。
+  it("2. does not re-count subagents on a second run with no new main turn", async () => {
+    placeSubagent();
+    const stdin = stdinFor(transcriptPath);
+
+    await runTrack(stdin);
+    expect(readHistory()).toHaveLength(1);
+
+    await runTrack(stdin);
+    // メインに新規行が無いので新規ターン自体が発生せず、SA も再計上されない。
+    expect(readHistory()).toHaveLength(1);
+  });
+
+  // 3. SA ファイルに新規行を追記 → 次ターンで SA 差分のみが計上される。
+  it("3. records only the newly-appended subagent delta on the next turn", async () => {
+    const saPath = placeSubagent();
+    const stdin = stdinFor(transcriptPath);
+
+    await runTrack(stdin);
+    expect(readHistory()).toHaveLength(1);
+
+    // 新しいメイン行(新規ターンのトリガ)。
+    const newMain = {
+      parentUuid: "u3",
+      isSidechain: false,
+      cwd: "/tmp/proj",
+      sessionId: "sess-1",
+      gitBranch: "main",
+      type: "assistant",
+      requestId: "req_C",
+      message: {
+        id: "msg_C",
+        type: "message",
+        role: "assistant",
+        model: "claude-fable-5",
+        content: [{ type: "text", text: "追記応答" }],
+        usage: {
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: 1000,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+        },
+      },
+      uuid: "c1",
+      timestamp: "2026-07-06T10:05:00.000Z",
+    };
+    appendFileSync(transcriptPath, "\n" + JSON.stringify(newMain) + "\n", "utf8");
+
+    // 新しい SA 行(別 message.id / requestId)。sonnet-5 output 1000 → 0.015 USD。
+    const newSa = {
+      parentUuid: "sa2",
+      isSidechain: true,
+      cwd: "/tmp/proj",
+      sessionId: "sess-1",
+      gitBranch: "main",
+      type: "assistant",
+      requestId: "req_SA2",
+      message: {
+        id: "msg_SA2",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-5",
+        content: [{ type: "text", text: "追加のサブエージェント応答" }],
+        usage: {
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: 1000,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+        },
+      },
+      uuid: "sa3",
+      timestamp: "2026-07-06T10:05:10.000Z",
+    };
+    appendFileSync(saPath, JSON.stringify(newSa) + "\n", "utf8");
+
+    await runTrack(stdin);
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(2);
+    const added = rows[1];
+    // メインは追記行のみ(0.05)。
+    expect(added.costUSD).toBeCloseTo(0.05, 10);
+    // SA は差分のみ: 1000 output × $15/1e6 = 0.015。
+    expect(added.subagents).toBeDefined();
+    expect(added.subagents!.costUSD).toBeCloseTo(0.015, 10);
+    expect(added.subagents!.apiCalls).toBe(1);
+    expect(added.subagents!.agentFiles).toBe(1);
+  });
+
+  // 4. subagents ディレクトリが無ければ record.subagents は undefined。
+  it("4. leaves record.subagents undefined when there is no subagents directory", async () => {
+    await runTrack(stdinFor(transcriptPath));
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subagents).toBeUndefined();
+  });
+
+  // 5. collectSubagentUsage が throw してもメイン記録は成功する(フェイルセーフ)。
+  it("5. still records the main turn when collectSubagentUsage throws", async () => {
+    placeSubagent();
+    vi.spyOn(subagents, "collectSubagentUsage").mockRejectedValue(new Error("boom"));
+
+    await expect(runTrack(stdinFor(transcriptPath))).resolves.toBeUndefined();
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    // SA は付かないがメインは記録される。
+    expect(rows[0].costUSD).toBeCloseTo(0.267, 10);
+    expect(rows[0].subagents).toBeUndefined();
+    // フェイルセーフ: error.log に track:subagents が残る。
+    const errLog = join(tmpHome, "error.log");
+    expect(existsSync(errLog)).toBe(true);
+    expect(readFileSync(errLog, "utf8")).toContain("[track:subagents]");
+  });
+
+  // 6a. 通知はメイン基準: minNotifyUSD=0.1 で メイン0.267 が閾値超えのため通知は出る。
+  //     ただし通知金額は SA を含まないメインのみ($0.267)であることを検証する。
+  it("6a. notifies on the main cost (title shows main-only $, SA excluded from the amount)", async () => {
+    placeSubagent();
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ minNotifyUSD: 0.1 }), "utf8");
+
+    await runTrack(stdinFor(transcriptPath));
+
+    expect(readHistory()[0].subagents!.costUSD).toBeCloseTo(0.033, 10);
+    // 通知は発火する(メイン 0.267 >= 0.1)。
+    expect(existsSync(lastNotifyFile())).toBe(true);
+    const notify = JSON.parse(readFileSync(lastNotifyFile(), "utf8"));
+    // 通知金額はメインのみ($0.267)。総額 $0.300 は通知に現れない。
+    expect(notify.os.title).toContain("$0.267");
+    expect(notify.os.title).not.toContain("$0.300");
+  });
+
+  // 6b. 通知はメイン基準: メイン(0.267)< 閾値(0.28)なら、総額(0.300)が閾値超でも通知は出ない。
+  it("6b. does not notify when the main cost is below the threshold even if main+SA exceeds it", async () => {
+    placeSubagent();
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ minNotifyUSD: 0.28 }), "utf8");
+
+    await runTrack(stdinFor(transcriptPath));
+
+    // 記録はされ、SA も付く。
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subagents!.costUSD).toBeCloseTo(0.033, 10);
+    // が、通知はメイン(0.267 < 0.28)基準でスキップされる(総額 0.300 > 0.28 でも出ない)。
+    expect(existsSync(lastNotifyFile())).toBe(false);
   });
 });

@@ -71,3 +71,47 @@ TurnRecord に `costByModel?: Record<string, number>` を追加した(schemaVers
   「主モデルに全額帰属」の簡易方式から「実配分」に変わった。複数モデルを使ったターンは
   各モデルの行に1ずつ計上される(参加カウント)ため、モデル別のターン数合計は総ターン数を
   超えうる。
+
+## 2026-07-07 追加: TurnRecord.subagents(オーケストレーター認可)
+サブエージェント(バックグラウンド/サブエージェント)usage の取り込みを認可した。
+TurnRecord に optional の `subagents` を追加(schemaVersion は 1 のまま、旧レコード後方互換):
+```ts
+subagents?: {
+  costUSD: number;                     // サブエージェント合計(丸めない)
+  costByModel: Record<string, number>; // モデルID → USD
+  tokens: TokenBuckets;                // 全エージェント合算
+  apiCalls: number;                    // 重複排除後メッセージ数
+  agentFiles: number;                  // 今回集計対象になったファイル数
+};
+```
+- サブエージェントの usage は、メイン transcript の兄弟ディレクトリ
+  `<mainTranscriptPath(.jsonl 除去)>/subagents/agent-*.jsonl` に恒久保存される
+  (メインとほぼ同一スキーマ・全行 isSidechain:true)。これを増分集計して SA 枠に記録する。
+- **通知は一切変えない**: 通知のしきい値判定・通知金額は従来どおり `record.costUSD`(メインのみ)。
+  `record.costUSD` に SA を加算しない。
+- 表示側(dashboard / report)は「総額 = costUSD + subagents.costUSD」を表示の基準にする
+  (ヒーロー合計・KPI・日別・プロジェクト・byModel・total)。byModel は `subagents.costByModel` の
+  各モデルもマージする(参加カウント +1)。トークン列(in/out)は従来どおり main+sidechain のみ。
+
+## src/subagents.ts(2026-07-07 追加)
+- `collectSubagentUsage(mainTranscriptPath: string): Promise<SubagentUsage | null>`
+  ```ts
+  interface SubagentUsage {
+    perModel: UsageByModel;                        // 全ファイル合算(main+sidechain をマージ)
+    apiCalls: number;                              // 全ファイル合算(重複排除後)
+    agentFiles: number;                            // 今回新規 usage があったファイル数
+    newCursors: Array<{ path: string; cursor: Cursor }>; // 各ファイルの新カーソル(保存は呼び出し側)
+  }
+  ```
+  - 対象ディレクトリ = mainTranscriptPath の末尾 `.jsonl` を除いたパス + `/subagents`
+    (例: `/x/abc.jsonl` → `/x/abc/subagents`)。ディレクトリが無い/読めない → **null**(旧形式環境)。
+  - `agent-` で始まり `.jsonl` で終わる通常ファイルのみ対象(`.meta.json` は読まない・symlink は辿らない)。
+    ファイル数が 200 超なら更新時刻の新しい順に 200 件で打ち切る(異常系ガード)。
+  - 各ファイル: `loadCursor` → `sanitizeCursor` → `aggregateNewTurn`(transcript.ts をそのまま再利用)。
+    全行 isSidechain だが、将来フラグが変わっても取りこぼさないよう main と sidechain の両方を
+    perModel にマージする。新規なし(null)はスキップ。1ファイルの失敗は握りつぶして次へ。
+  - **カーソル保存はここでは行わない**(track.ts が履歴追記後に SA 分を saveCursor する)。
+
+## src/store.ts に sanitizeCursor を移設(2026-07-07)
+`sanitizeCursor(raw: unknown): Cursor | null` を track.ts の private 関数から store.ts の export へ
+移設した(挙動不変)。track.ts と subagents.ts の双方から使う。

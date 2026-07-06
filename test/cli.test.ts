@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runDoctor } from "../src/doctor";
+import { formatUSD } from "../src/format";
 import { runReport } from "../src/report";
 import { appendTurn } from "../src/store";
 import type { TurnRecord } from "../src/types";
@@ -66,7 +67,14 @@ interface ReportJson {
     costJPY: number;
   }>;
   byModel: Record<string, { turns: number; costUSD: number; costJPY: number }>;
-  total: { turns: number; inputTokens: number; outputTokens: number; costUSD: number; costJPY: number };
+  total: {
+    turns: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUSD: number;
+    costJPY: number;
+    subagentsUSD: number;
+  };
 }
 
 // ============ main() ============
@@ -221,6 +229,57 @@ describe("runReport", () => {
     expect(json.total.turns).toBe(2);
     const sumTurns = Object.values(json.byModel).reduce((s, m) => s + m.turns, 0);
     expect(sumTurns).toBe(3);
+  });
+
+  it("--json の total は SA 込み・subagentsUSD キーを持ち、byModel は SA モデルもマージする", async () => {
+    // メイン fable 0.267 + SA sonnet 0.033(GOLDEN 相当)。
+    appendTurn(
+      makeTurn({
+        models: ["claude-fable-5"],
+        costUSD: 0.267,
+        costJPY: 40.05,
+        costByModel: { "claude-fable-5": 0.267 },
+        subagents: {
+          costUSD: 0.033,
+          costByModel: { "claude-sonnet-5": 0.033 },
+          tokens: { input: 1000, output: 2000, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+          apiCalls: 1,
+          agentFiles: 1,
+        },
+      }),
+    );
+
+    const { code, output } = await captureLogs(() => runReport(["--json", "--days", "9999"]));
+    expect(code).toBe(0);
+    const json = JSON.parse(output) as ReportJson;
+
+    // total は SA 込みの総額、subagentsUSD は SA 部分。
+    expect(json.total.costUSD).toBeCloseTo(0.3, 8);
+    expect(json.total.subagentsUSD).toBeCloseTo(0.033, 10);
+    // byModel は メイン(fable)と SA(sonnet)の両方を持つ。
+    expect(json.byModel["claude-fable-5"].costUSD).toBeCloseTo(0.267, 10);
+    expect(json.byModel["claude-sonnet-5"].costUSD).toBeCloseTo(0.033, 10);
+    // byModel の合計は総額と一致する。
+    const sumCost = Object.values(json.byModel).reduce((s, m) => s + m.costUSD, 0);
+    expect(sumCost).toBeCloseTo(json.total.costUSD, 8);
+
+    // テキスト表には「(うちサブエージェント $0.033)」が1行出て、byModel 表に SA モデルが並ぶ。
+    const table = await captureLogs(() => runReport(["--days", "9999"]));
+    expect(table.code).toBe(0);
+    expect(table.output).toContain("うちサブエージェント");
+    expect(table.output).toContain(formatUSD(0.033)); // "$0.033"
+    expect(table.output).toContain("claude-sonnet-5"); // byModel 表(モデルIDそのまま)
+  });
+
+  it("SA の無い履歴では total.subagentsUSD は 0 で、テキスト表に SA 行は出ない", async () => {
+    appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.1, costJPY: 15 }));
+
+    const jsonRes = await captureLogs(() => runReport(["--json"]));
+    const json = JSON.parse(jsonRes.output) as ReportJson;
+    expect(json.total.subagentsUSD).toBe(0);
+
+    const table = await captureLogs(() => runReport([]));
+    expect(table.output).not.toContain("うちサブエージェント");
   });
 
   it("--days に不正値を渡すと既定の30が使われる", async () => {

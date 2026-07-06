@@ -77,6 +77,33 @@ function turnCostByModel(rec: TurnRecord): Record<string, number> {
   return { [rec.models[0] ?? "unknown"]: rec.costUSD };
 }
 
+/** ターンの総額(メイン + サブエージェント)。 */
+function turnTotalUSD(rec: TurnRecord): number {
+  return rec.costUSD + (rec.subagents?.costUSD ?? 0);
+}
+
+/** ターンの総額 JPY。SA 分は costUSD × fxRate で換算して costJPY に加える。 */
+function turnTotalJPY(rec: TurnRecord): number {
+  const sa = rec.subagents?.costUSD ?? 0;
+  return rec.costJPY + sa * rec.fxRate;
+}
+
+/**
+ * モデル別コスト(メイン実配分 + サブエージェント costByModel をマージ)。
+ * turnCostByModel の結果を複製し、SA の各モデルコストを同一モデルへ加算する
+ * (rec.costByModel を破壊しないため必ずコピーする)。
+ */
+function turnCostByModelWithSA(rec: TurnRecord): Record<string, number> {
+  const base: Record<string, number> = { ...turnCostByModel(rec) };
+  const sa = rec.subagents?.costByModel;
+  if (sa) {
+    for (const [model, usd] of Object.entries(sa)) {
+      base[model] = (base[model] ?? 0) + usd;
+    }
+  }
+  return base;
+}
+
 interface DailyAgg {
   date: string;
   turns: number;
@@ -96,8 +123,9 @@ interface TotalAgg {
   turns: number;
   inputTokens: number;
   outputTokens: number;
-  costUSD: number;
-  costJPY: number;
+  costUSD: number; // SA 込みの総額
+  costJPY: number; // SA 込みの総額
+  subagentsUSD: number; // うちサブエージェント部分の合計(0 なら 0)
 }
 
 interface Aggregated {
@@ -113,12 +141,23 @@ function aggregate(turns: TurnRecord[]): Aggregated {
   // 各モデルの行に1ずつ計上する(参加カウント)ため、turns の合計は総ターン数を超えうる。
   const modelMap = new Map<string, ModelAgg>();
 
-  const total: TotalAgg = { turns: 0, inputTokens: 0, outputTokens: 0, costUSD: 0, costJPY: 0 };
+  const total: TotalAgg = {
+    turns: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUSD: 0,
+    costJPY: 0,
+    subagentsUSD: 0,
+  };
 
   for (const rec of turns) {
     const dateKey = localDateKey(rec.ts) ?? "unknown";
     const inTok = effectiveInputTokens(rec);
     const outTok = outputTokensOf(rec);
+    // 日別・合計は SA 込みの総額で集計する(dashboard と同じ扱い)。
+    const totalUsd = turnTotalUSD(rec);
+    const totalJpy = turnTotalJPY(rec);
+    const saUsd = rec.subagents?.costUSD ?? 0;
 
     const d = dailyMap.get(dateKey) ?? {
       date: dateKey,
@@ -131,11 +170,12 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     d.turns += 1;
     d.inputTokens += inTok;
     d.outputTokens += outTok;
-    d.costUSD += rec.costUSD;
-    d.costJPY += rec.costJPY;
+    d.costUSD += totalUsd;
+    d.costJPY += totalJpy;
     dailyMap.set(dateKey, d);
 
-    for (const [model, modelUsd] of Object.entries(turnCostByModel(rec))) {
+    // モデル別: メイン実配分 + SA の costByModel をマージ(turnCostByModelWithSA)。
+    for (const [model, modelUsd] of Object.entries(turnCostByModelWithSA(rec))) {
       const m = modelMap.get(model) ?? { turns: 0, costUSD: 0, costJPY: 0 };
       m.turns += 1;
       m.costUSD += modelUsd;
@@ -146,8 +186,9 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     total.turns += 1;
     total.inputTokens += inTok;
     total.outputTokens += outTok;
-    total.costUSD += rec.costUSD;
-    total.costJPY += rec.costJPY;
+    total.costUSD += totalUsd;
+    total.costJPY += totalJpy;
+    total.subagentsUSD += saUsd;
   }
 
   const daily = [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -188,6 +229,9 @@ function printTable(result: Aggregated, days: number): void {
       formatUSD(result.total.costUSD).padStart(10) +
       formatJPY(result.total.costJPY).padStart(12),
   );
+  if (result.total.subagentsUSD > 0) {
+    console.log(`(うちサブエージェント ${formatUSD(result.total.subagentsUSD)})`);
+  }
 
   console.log("");
   console.log("モデル別 (By model):");

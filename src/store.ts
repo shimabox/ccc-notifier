@@ -169,6 +169,29 @@ export function loadCursor(transcriptPath: string): Cursor | null {
 }
 
 /**
+ * loadCursor の戻り値を「形全体」で検証する。
+ * cursors.json は理論上手で編集されうるため、文字列だけの seenMessageKeys フィルタでは足りない。
+ * offset が有限数値 / lastUuid が string|null / lastTs が string|null / seenMessageKeys が string 配列 —
+ * この形でなければ(部分的な不正も含め)全体を null に落とす。null なら以降はフルリスキャン
+ * ではなく「新規読み込み」になり、二重計上は aggregateNewTurn 内の重複排除に委ねられる。
+ * track.ts / subagents.ts の双方から使うため store.ts の export として持つ。
+ */
+export function sanitizeCursor(raw: unknown): Cursor | null {
+  if (!isPlainObject(raw)) return null;
+  const { offset, lastUuid, lastTs, seenMessageKeys } = raw;
+  if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
+  if (lastUuid !== null && typeof lastUuid !== "string") return null;
+  if (lastTs !== null && typeof lastTs !== "string") return null;
+  if (!Array.isArray(seenMessageKeys)) return null;
+  const keys: string[] = [];
+  for (const key of seenMessageKeys) {
+    if (typeof key !== "string") return null;
+    keys.push(key);
+  }
+  return { offset, lastUuid, lastTs, seenMessageKeys: keys };
+}
+
+/**
  * cursors.json に transcriptPath -> Cursor を保存する。
  * 読み込み→更新→ cursors.json.tmp に書いて renameSync することで原子的に置換する。
  * 既存 cursors.json が壊れている場合は(復旧不能なため)空辞書から作り直す。

@@ -43,6 +43,7 @@ const CLI_PATH = join(REPO_ROOT, "dist", "cli.js");
 const FIXTURE_TRANSCRIPT = fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url));
 const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
 const FIXTURE_SETTINGS = fileURLToPath(new URL("./fixtures/settings-existing.json", import.meta.url));
+const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
 
 const FIXED_FX_RATE = 150;
 
@@ -526,5 +527,37 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const tableResult = await runCli(["report", "--days", "9999"], { env: sb.env });
     expect(tableResult.code).toBe(0);
     expect(tableResult.stdout).toContain("合計");
+  });
+
+  // ---- 10. サブエージェント取り込み ----
+  it("10. track: subagents ディレクトリを集計して history に subagents ブロックが入り、dashboard に Sonnet 行が現れる", async () => {
+    // transcript の兄弟 <transcript(.jsonl除去)>/subagents/agent-x.jsonl に SA フィクスチャを配置。
+    // transcriptPath = <tmp>/transcript.jsonl → SA dir = <tmp>/transcript/subagents
+    const saDir = join(sb.tmp, "transcript", "subagents");
+    mkdirSync(saDir, { recursive: true });
+    copyFileSync(FIXTURE_SUBAGENT, join(saDir, "agent-x.jsonl"));
+
+    const result = await runCli(["track"], { env: sb.env, stdin: stdinFor(sb.transcriptPath) });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("");
+
+    const rows = readHistory(sb.acnHome);
+    expect(rows).toHaveLength(1);
+    const rec = rows[0];
+    // メインは GOLDEN どおり(SA は混入しない)。
+    expect(rec.costUSD).toBeCloseTo(0.267, 10);
+    // SA 枠(GOLDEN: 0.033 / sonnet-5 / 1 call / 1 file)。
+    expect(rec.subagents).toBeDefined();
+    expect(rec.subagents!.costUSD).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.costByModel["claude-sonnet-5"]).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.apiCalls).toBe(1);
+    expect(rec.subagents!.agentFiles).toBe(1);
+
+    // dashboard を生成すると、SA のモデル(Sonnet 5)と「うちサブエージェント」が HTML に現れる。
+    const dash = await runCli(["dashboard", "--no-open"], { env: sb.env });
+    expect(dash.code).toBe(0);
+    const html = readFileSync(join(sb.acnHome, "report.html"), "utf8");
+    expect(html).toContain("Sonnet 5");
+    expect(html).toContain("うちサブエージェント");
   });
 });

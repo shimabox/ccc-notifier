@@ -595,3 +595,102 @@ describe("runDashboard — モデル別の実配分 (costByModel)", () => {
     expect(new Set(segClasses).size).toBe(2);
   });
 });
+
+// ============ サブエージェント枠(subagents) ============
+//
+// track.ts が保存する TurnRecord.subagents を dashboard.ts がどう総額に反映するかを検証する。
+//  - ヒーロー合計・KPI・埋め込み totals は SA 込みの総額
+//  - 「うちサブエージェント」がヒーローに表示される
+//  - モデル別表に SA のモデル(Sonnet 5)が現れる
+//  - ターン履歴の埋め込みに SA 情報(subagent)と model の "+SA" が入る
+//  - SA なしレコードだけなら「うちサブエージェント」は出ない
+
+interface SubagentEmbedTurn {
+  model: string;
+  costUSD: number;
+  subagent: { usd: string; jpy: string; models: string; apiCalls: number } | null;
+}
+
+/** GOLDEN 相当の SA 付きレコード(メイン fable 0.267 + SA sonnet 0.033)。 */
+function seedWithSubagents(): void {
+  appendTurn(
+    makeTurn({
+      ts: new Date().toISOString(),
+      models: ["claude-fable-5"],
+      costUSD: 0.267,
+      costJPY: 40.05,
+      costByModel: { "claude-fable-5": 0.267 },
+      subagents: {
+        costUSD: 0.033,
+        costByModel: { "claude-sonnet-5": 0.033 },
+        tokens: { input: 1000, output: 2000, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+        apiCalls: 1,
+        agentFiles: 1,
+      },
+    }),
+  );
+}
+
+describe("runDashboard — サブエージェント (subagents)", () => {
+  it("ヒーロー合計・埋め込み totals が SA 込みの総額(0.267 + 0.033 = 0.300)になる", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    // 埋め込み totals は総額。
+    const data = parseData(html);
+    expect(data.totals.cost).toBeCloseTo(0.3, 10);
+    expect(data.totals.turns).toBe(1);
+    // ヒーローの合計値表示も総額。
+    expect(html).toContain(formatUSD(0.3)); // "$0.300"
+  });
+
+  it("ヒーローに「うちサブエージェント $0.033(¥5)」が表示される", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    expect(html).toContain("うちサブエージェント");
+    expect(html).toContain(formatUSD(0.033)); // "$0.033"
+  });
+
+  it("モデル別表に SA のモデル(Sonnet 5)が現れ、表の合計が総額と一致する", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    expect(html).toContain("Fable 5");
+    expect(html).toContain("Sonnet 5");
+
+    const modelCosts = extractModelTableUsd(html);
+    expect(modelCosts.sort((a, b) => a - b)).toEqual([0.033, 0.267]);
+    const sum = modelCosts.reduce((s, v) => s + v, 0);
+    expect(sum).toBeCloseTo(0.3, 6);
+  });
+
+  it("ターン履歴の埋め込みに SA 情報(subagent)と model の +SA が入る", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    const turns = parseData(html).turns as unknown as SubagentEmbedTurn[];
+    expect(turns).toHaveLength(1);
+    const t = turns[0];
+    expect(t.model).toContain("+SA");
+    expect(t.subagent).not.toBeNull();
+    expect(t.subagent!.usd).toBe(formatUSD(0.033));
+    expect(t.subagent!.apiCalls).toBe(1);
+    expect(t.subagent!.models).toContain("Sonnet 5");
+  });
+
+  it("SA なしレコードだけなら「うちサブエージェント」は表示されず、embed の subagent は null", async () => {
+    appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.12, costJPY: 18 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    expect(html).not.toContain("うちサブエージェント");
+    const turns = parseData(html).turns as unknown as SubagentEmbedTurn[];
+    expect(turns[0].subagent).toBeNull();
+    expect(turns[0].model).not.toContain("+SA");
+  });
+});

@@ -65,6 +65,13 @@ export interface TurnRecord {
   fxSource: 'live' | 'cache' | 'fixed';
   prompt: string;            // 全文(ローカルのみ)。null 時は ""
   unknownModels?: string[];
+  subagents?: {              // サブエージェント枠(旧レコード後方互換のため optional)
+    costUSD: number;                     // サブエージェント合計(丸めない)
+    costByModel: Record<string, number>; // モデルID → USD
+    tokens: TokenBuckets;                // 全エージェント合算
+    apiCalls: number;                    // 重複排除後メッセージ数
+    agentFiles: number;                  // 今回集計対象になったファイル数
+  };
 }
 
 export interface SlackConfig { webhookUrl: string; promptChars: number; sendFullPrompt: boolean; }

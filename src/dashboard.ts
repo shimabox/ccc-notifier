@@ -154,6 +154,34 @@ function turnCostByModel(rec: TurnRecord): Record<string, number> {
   return { [rec.models[0] ?? "unknown"]: rec.costUSD };
 }
 
+/** ターンの総額(メイン + サブエージェント)。表示はこの総額を基準にする。 */
+function turnTotalUSD(rec: TurnRecord): number {
+  return rec.costUSD + (rec.subagents?.costUSD ?? 0);
+}
+
+/** ターンの総額 JPY。SA 分は costUSD × fxRate で換算して costJPY に加える。 */
+function turnTotalJPY(rec: TurnRecord): number {
+  const sa = rec.subagents?.costUSD ?? 0;
+  return rec.costJPY + sa * rec.fxRate;
+}
+
+/**
+ * モデル別コスト(メイン実配分 + サブエージェント costByModel をマージ)。
+ * turnCostByModel の結果を複製し、SA の各モデルコストを同一モデルへ加算する
+ * (rec.costByModel を破壊しないため必ずコピーする)。これにより SA のモデルが
+ * モデル別表・日別スタックに現れ、合計は turnTotalUSD と一致する。
+ */
+function turnCostByModelWithSA(rec: TurnRecord): Record<string, number> {
+  const base: Record<string, number> = { ...turnCostByModel(rec) };
+  const sa = rec.subagents?.costByModel;
+  if (sa) {
+    for (const [model, usd] of Object.entries(sa)) {
+      base[model] = (base[model] ?? 0) + usd;
+    }
+  }
+  return base;
+}
+
 /** min..max(いずれもローカル日付キー)を1日刻みで列挙する。 */
 function fillDayKeys(min: string, max: string): string[] {
   const res: string[] = [];
@@ -223,11 +251,17 @@ interface TurnEmbed {
   modelsRaw: string[];
   tokInFmt: string;
   tokOutFmt: string;
-  costUSD: number; // 生値(合計検証用)
+  costUSD: number; // 生値(合計検証用・メインのみ)
   usd: string;
   jpy: string;
   prompt: string; // 最大 PROMPT_MAX 字 + マーク
   truncated: boolean;
+  subagent: {
+    usd: string; // SA コスト表示($)
+    jpy: string; // SA コスト表示(¥)
+    models: string; // SA モデル表示名(カンマ区切り)
+    apiCalls: number;
+  } | null;
 }
 
 interface Aggregated {
@@ -244,6 +278,9 @@ interface Aggregated {
   maxDate: string | null;
   anyTruncated: boolean;
   chartTruncatedDays: boolean;
+  subagentsCost: number; // 期間内 SA コスト合計(USD)
+  subagentsJpy: number; // 期間内 SA コスト合計(JPY)
+  anySubagents: boolean; // 1件でも subagents 付きレコードがあるか
 }
 
 function emptyTotals(): PeriodTotals {
@@ -272,27 +309,40 @@ function aggregate(turns: TurnRecord[]): Aggregated {
 
   let minDate: string | null = null;
   let maxDate: string | null = null;
+  let subagentsCost = 0;
+  let subagentsJpy = 0;
+  let anySubagents = false;
 
   for (const rec of turns) {
-    totals.cost += rec.costUSD;
-    totals.jpy += rec.costJPY;
+    // 合計・KPI・プロジェクトは SA 込みの総額で集計する。
+    const totalUsd = turnTotalUSD(rec);
+    const totalJpy = turnTotalJPY(rec);
+
+    totals.cost += totalUsd;
+    totals.jpy += totalJpy;
     totals.turns += 1;
+
+    if (rec.subagents) {
+      anySubagents = true;
+      subagentsCost += rec.subagents.costUSD;
+      subagentsJpy += rec.subagents.costUSD * rec.fxRate;
+    }
 
     const dt = new Date(rec.ts);
     if (!Number.isNaN(dt.getTime())) {
       if (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) {
-        today.cost += rec.costUSD;
-        today.jpy += rec.costJPY;
+        today.cost += totalUsd;
+        today.jpy += totalJpy;
         today.turns += 1;
       }
       if (dt.getTime() >= weekCutoff) {
-        week.cost += rec.costUSD;
-        week.jpy += rec.costJPY;
+        week.cost += totalUsd;
+        week.jpy += totalJpy;
         week.turns += 1;
       }
       if (dt.getFullYear() === y && dt.getMonth() === mo) {
-        month.cost += rec.costUSD;
-        month.jpy += rec.costJPY;
+        month.cost += totalUsd;
+        month.jpy += totalJpy;
         month.turns += 1;
       }
       const key = dateKeyOf(dt);
@@ -300,9 +350,10 @@ function aggregate(turns: TurnRecord[]): Aggregated {
       if (maxDate === null || key > maxDate) maxDate = key;
     }
 
-    // モデル別集計: 実配分(turnCostByModel)。複数モデルのターンは各モデルの行に1ずつ
-    // 計上する(参加カウント)ため、モデル別 turns の合計は総ターン数を超えうる。
-    for (const [model, modelUsd] of Object.entries(turnCostByModel(rec))) {
+    // モデル別集計: メイン実配分 + SA の costByModel をマージ(turnCostByModelWithSA)。
+    // 複数モデル・サブエージェントのモデルは各行に1ずつ計上する(参加カウント)ため、
+    // モデル別 turns の合計は総ターン数を超えうる。
+    for (const [model, modelUsd] of Object.entries(turnCostByModelWithSA(rec))) {
       const ma = modelAgg.get(model) ?? { cost: 0, jpy: 0, turns: 0 };
       ma.cost += modelUsd;
       ma.jpy += modelUsd * rec.fxRate;
@@ -312,8 +363,8 @@ function aggregate(turns: TurnRecord[]): Aggregated {
 
     const projName = basename(rec.project) || rec.project || "(unknown)";
     const px = projAgg.get(projName) ?? { cost: 0, jpy: 0, turns: 0 };
-    px.cost += rec.costUSD;
-    px.jpy += rec.costJPY;
+    px.cost += totalUsd;
+    px.jpy += totalJpy;
     px.turns += 1;
     projAgg.set(projName, px);
   }
@@ -389,9 +440,10 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     const idx = dayIndex.get(key);
     if (idx === undefined) continue;
     const bucket = stacks[idx];
-    // モデル別の実配分(turnCostByModel)で日別スタックへ振り分ける。
-    // 1ターンが複数モデルにまたがる場合、同日のスタックに複数セグメントとして現れうる。
-    for (const [model, modelUsd] of Object.entries(turnCostByModel(rec))) {
+    // モデル別の実配分 + SA(turnCostByModelWithSA)で日別スタックへ振り分ける。
+    // 1ターンが複数モデル・サブエージェントにまたがる場合、同日のスタックに複数セグメントと
+    // して現れうる。SA 分はメインターンの日(rec.ts)に計上される。
+    for (const [model, modelUsd] of Object.entries(turnCostByModelWithSA(rec))) {
       const info = slotByModel.get(model) ?? otherSlot ?? { slot: "other", name: "その他" };
       const cur = bucket.get(info.slot) ?? { name: info.name, slot: info.slot, value: 0, usdFmt: "" };
       cur.value += modelUsd;
@@ -440,12 +492,23 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     if (truncated) anyTruncated = true;
     const primary = rec.models[0] ?? "unknown";
     const extra = rec.models.length > 1 ? ` +${rec.models.length - 1}` : "";
+    const saMark = rec.subagents ? " +SA" : "";
+    let subagent: TurnEmbed["subagent"] = null;
+    if (rec.subagents) {
+      const saModels = Object.keys(rec.subagents.costByModel).map((m) => modelDisplayName(m));
+      subagent = {
+        usd: formatUSD(rec.subagents.costUSD),
+        jpy: formatJPY(rec.subagents.costUSD * rec.fxRate),
+        models: saModels.join(", "),
+        apiCalls: rec.subagents.apiCalls,
+      };
+    }
     return {
       tsLocal: fmtLocalDateTime(rec.ts),
       project: basename(rec.project) || rec.project || "(unknown)",
       projectFull: rec.project ?? "",
       branch: rec.gitBranch,
-      model: modelDisplayName(primary) + extra,
+      model: modelDisplayName(primary) + extra + saMark,
       modelsRaw: rec.models,
       tokInFmt: formatTokens(turnInputTokens(rec)),
       tokOutFmt: formatTokens(turnOutputTokens(rec)),
@@ -454,6 +517,7 @@ function aggregate(turns: TurnRecord[]): Aggregated {
       jpy: formatJPY(rec.costJPY),
       prompt: text,
       truncated,
+      subagent,
     };
   });
 
@@ -471,6 +535,9 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     maxDate,
     anyTruncated,
     chartTruncatedDays,
+    subagentsCost,
+    subagentsJpy,
+    anySubagents,
   };
 }
 
@@ -900,10 +967,17 @@ const APP_JS = `<script>
       if(t.branch){ metaParts.push(t.branch); }
       if(t.modelsRaw && t.modelsRaw.length){ metaParts.push(t.modelsRaw.join(', ')); }
       meta.textContent = metaParts.join('  ·  ');
+      dtd.appendChild(meta);
+      // サブエージェントがあるターンは内訳を1行追加(textContent で安全に挿入)。
+      if(t.subagent){
+        var saLine = document.createElement('div');
+        saLine.className = 'detail-meta';
+        saLine.textContent = 'サブエージェント: ' + (t.subagent.usd||'') + '(' + (t.subagent.jpy||'') + ')· ' + (t.subagent.models||'') + ' · APIコール ' + (t.subagent.apiCalls||0);
+        dtd.appendChild(saLine);
+      }
       var pre = document.createElement('div');
       pre.className = 'detail-prompt';
       pre.textContent = full.length ? full : '(プロンプトなし)';
-      dtd.appendChild(meta);
       dtd.appendChild(pre);
       dtr.appendChild(dtd);
 
@@ -1114,6 +1188,9 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<div class="hero-label">合計 / Total</div>` +
     `<div class="hero-value">${esc(formatUSD(agg.totals.cost))}</div>` +
     `<div class="hero-meta">${esc(formatJPY(agg.totals.jpy))} · ${agg.totals.turns} ターン</div>` +
+    (agg.anySubagents
+      ? `<div class="hero-meta">うちサブエージェント ${esc(formatUSD(agg.subagentsCost))}(${esc(formatJPY(agg.subagentsJpy))})</div>`
+      : "") +
     `</div>` +
     `</div>`;
 
@@ -1127,9 +1204,11 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `</div>`;
 
   // ---- 日別チャート ----
-  const dailyNote = agg.chartTruncatedDays
-    ? `期間が広いため棒が細く表示されます(チャートは横スクロールできます)。`
-    : `モデル別の実配分で集計しています(旧バージョンで記録されたターンは主モデルに全額帰属)。`;
+  const dailyNote =
+    (agg.chartTruncatedDays
+      ? `期間が広いため棒が細く表示されます(チャートは横スクロールできます)。`
+      : `モデル別の実配分で集計しています(旧バージョンで記録されたターンは主モデルに全額帰属)。`) +
+    ` サブエージェント分を含みます(完了タイミングにより次ターン以降の日に計上されることがあります)。`;
   const dailySection =
     `<section class="card">` +
     `<h2>日別コスト / Daily cost</h2>` +

@@ -17,6 +17,7 @@ import {
   paths,
   readConfig,
   readTurns,
+  sanitizeCursor,
   saveCursor,
   todayTotalUSD,
 } from "../src/store";
@@ -240,6 +241,45 @@ describe("cursor (loadCursor / saveCursor)", () => {
 
     const p = paths();
     expect(existsSync(p.errorLog)).toBe(false);
+  });
+});
+
+describe("sanitizeCursor", () => {
+  it("正しい形のカーソルはそのまま正規化して返す(往復一致)", () => {
+    const c: Cursor = {
+      offset: 42,
+      lastUuid: "uuid-x",
+      lastTs: "2026-07-06T10:00:00.000Z",
+      seenMessageKeys: ["m1:r1", "m2:r2"],
+    };
+    expect(sanitizeCursor(c)).toEqual(c);
+    // lastUuid / lastTs が null でも許容される。
+    expect(sanitizeCursor({ offset: 0, lastUuid: null, lastTs: null, seenMessageKeys: [] })).toEqual({
+      offset: 0,
+      lastUuid: null,
+      lastTs: null,
+      seenMessageKeys: [],
+    });
+  });
+
+  it("オブジェクトでない / offset が数値でない場合は null に落とす", () => {
+    expect(sanitizeCursor(null)).toBeNull();
+    expect(sanitizeCursor("string")).toBeNull();
+    expect(sanitizeCursor([1, 2, 3])).toBeNull();
+    expect(sanitizeCursor({ offset: "abc", lastUuid: null, lastTs: null, seenMessageKeys: [] })).toBeNull();
+    expect(
+      sanitizeCursor({ offset: Number.NaN, lastUuid: null, lastTs: null, seenMessageKeys: [] }),
+    ).toBeNull();
+  });
+
+  it("seenMessageKeys が配列でない / 非文字列要素を含む場合は null に落とす", () => {
+    expect(sanitizeCursor({ offset: 1, lastUuid: null, lastTs: null, seenMessageKeys: 42 })).toBeNull();
+    expect(
+      sanitizeCursor({ offset: 1, lastUuid: null, lastTs: null, seenMessageKeys: ["ok", 123] }),
+    ).toBeNull();
+    // lastUuid / lastTs が string|null 以外でも null。
+    expect(sanitizeCursor({ offset: 1, lastUuid: 5, lastTs: null, seenMessageKeys: [] })).toBeNull();
+    expect(sanitizeCursor({ offset: 1, lastUuid: null, lastTs: {}, seenMessageKeys: [] })).toBeNull();
   });
 });
 

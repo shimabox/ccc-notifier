@@ -21,36 +21,17 @@ import {
   logError,
   paths,
   readConfig,
+  sanitizeCursor,
   saveCursor,
   todayTotalUSD,
 } from "./store";
+import { collectSubagentUsage } from "./subagents";
+import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
-import type { Cursor, StopHookInput, TokenBuckets, TurnRecord, UsageByModel } from "./types";
+import type { StopHookInput, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/**
- * loadCursor の戻り値を「形全体」で検証する。
- * cursors.json は理論上手で編集されうるため、文字列だけの seenMessageKeys フィルタでは足りない。
- * offset が有限数値 / lastUuid が string|null / lastTs が string|null / seenMessageKeys が string 配列 —
- * この形でなければ(部分的な不正も含め)全体を null に落とす。null なら以降はフルリスキャン
- * ではなく「新規読み込み」になり、二重計上は aggregateNewTurn 内の重複排除に委ねられる。
- */
-function sanitizeCursor(raw: unknown): Cursor | null {
-  if (!isRecord(raw)) return null;
-  const { offset, lastUuid, lastTs, seenMessageKeys } = raw;
-  if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
-  if (lastUuid !== null && typeof lastUuid !== "string") return null;
-  if (lastTs !== null && typeof lastTs !== "string") return null;
-  if (!Array.isArray(seenMessageKeys)) return null;
-  const keys: string[] = [];
-  for (const key of seenMessageKeys) {
-    if (typeof key !== "string") return null;
-    keys.push(key);
-  }
-  return { offset, lastUuid, lastTs, seenMessageKeys: keys };
 }
 
 function emptyBuckets(): TokenBuckets {
@@ -106,6 +87,16 @@ export async function runTrack(stdinText: string): Promise<void> {
     const agg = await aggregateNewTurn(transcriptPath, cursor);
     if (agg === null) return;
 
+    // 3b. サブエージェント usage の増分集計(旧形式環境や失敗時は SA なしで続行)。
+    //     collectSubagentUsage 自体は defensive だが、二重に try/catch で境界を作る。
+    let sa: SubagentUsage | null = null;
+    try {
+      sa = await collectSubagentUsage(transcriptPath);
+    } catch (err) {
+      logError("track:subagents", err);
+      sa = null;
+    }
+
     // 4. 単価(track 経路はネットに出ないため offline)+ コスト算出。
     const cacheDir = paths().cacheDir;
     const table = await loadPriceTable(cacheDir, { offline: true });
@@ -141,11 +132,40 @@ export async function runTrack(stdinText: string): Promise<void> {
       record.unknownModels = breakdown.unknownModels;
     }
 
+    // 6b. サブエージェント枠を記録に付加する(新規 SA usage がある場合のみ)。
+    //     通知のしきい値判定・通知金額は従来どおり record.costUSD(メインのみ)であり、
+    //     ここで record.costUSD には一切加算しない(通知は一切変えない)。
+    if (sa !== null && sa.apiCalls > 0) {
+      const saBreakdown = computeCost(sa.perModel, {}, table);
+      record.subagents = {
+        costUSD: saBreakdown.usd,
+        costByModel: saBreakdown.byModel,
+        tokens: sumBuckets(sa.perModel),
+        apiCalls: sa.apiCalls,
+        agentFiles: sa.agentFiles,
+      };
+      // SA 側の unknownModels を record.unknownModels にマージ(重複なし)。
+      if (saBreakdown.unknownModels.length > 0) {
+        const merged = record.unknownModels ? [...record.unknownModels] : [];
+        for (const m of saBreakdown.unknownModels) {
+          if (!merged.includes(m)) merged.push(m);
+        }
+        record.unknownModels = merged;
+      }
+    }
+
     // 7. 記録 → カーソル保存(この順序固定)。
     //    クラッシュ時は「記録済み・カーソル未更新」側に倒し、seenMessageKeys による重複排除で
     //    二重計上を防ぐ。逆順にすると「カーソルだけ進んで未記録」= 恒久的なコスト取りこぼしになる。
+    //    SA のカーソルはメインより後に保存する(途中クラッシュで SA 分が再集計されても、
+    //    次回 seenMessageKeys で重複排除される側に倒す)。
     appendTurn(record);
     saveCursor(transcriptPath, agg.newCursor);
+    if (sa !== null) {
+      for (const nc of sa.newCursors) {
+        saveCursor(nc.path, nc.cursor);
+      }
+    }
 
     // 8. 後処理を「互いに独立なタスク」として集め、allSettled でまとめて待つ。どれか1つが
     //    失敗しても他は止まらない(通知 ↔ 再生成 も相互に独立)。
