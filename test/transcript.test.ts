@@ -337,4 +337,68 @@ describe('aggregateNewTurn', () => {
       cacheRead: 50,
     });
   });
+
+  // 9. synthetic model rows: client-generated placeholder assistant rows
+  //    (message.model === "<synthetic>", usage often zero-filled) must never
+  //    be counted as an API call, must never create a "<synthetic>" model key
+  //    in main or sidechain, and must not affect normal rows' aggregates.
+  it('9. ignores synthetic model rows without affecting normal aggregation', async () => {
+    const f = path.join(dir, 't.jsonl');
+    const syntheticUsage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    };
+    await writeJsonl(f, [
+      userLine({ content: '実プロンプト', ts: '2026-07-06T00:00:01.000Z' }),
+      asst({ id: 'msg_A1', req: 'req_A1', usage: usageNew(10, 20), ts: '2026-07-06T00:00:02.000Z' }),
+      asst({
+        id: 'msg_B1',
+        req: 'req_B1',
+        usage: usageNew(5, 6),
+        model: 'claude-haiku-4-5',
+        sidechain: true,
+        ts: '2026-07-06T00:00:03.000Z',
+      }),
+      asst({
+        id: 'msg_S1',
+        req: 'req_S1',
+        usage: syntheticUsage,
+        model: '<synthetic>',
+        ts: '2026-07-06T00:00:04.000Z',
+      }),
+      asst({
+        id: 'msg_S2',
+        req: 'req_S2',
+        usage: syntheticUsage,
+        model: '<synthetic>',
+        sidechain: true,
+        ts: '2026-07-06T00:00:05.000Z',
+      }),
+    ]);
+
+    const r = await aggregateNewTurn(f, null);
+    expect(r).not.toBeNull();
+    if (r === null) return;
+
+    // only the two normal rows count as API calls; the synthetic ones do not
+    expect(r.apiCalls).toBe(2);
+    expect(r.prompt).toBe('実プロンプト');
+
+    // "<synthetic>" never appears as a model key in either bucket
+    expect(Object.keys(r.main)).toEqual(['claude-fable-5']);
+    expect(Object.keys(r.sidechain)).toEqual(['claude-haiku-4-5']);
+
+    // normal rows' aggregates are unaffected by the synthetic rows
+    expect(r.main['claude-fable-5']).toEqual({ ...ZERO, input: 10, output: 20 });
+    expect(r.sidechain['claude-haiku-4-5']).toEqual({ ...ZERO, input: 5, output: 6 });
+
+    // synthetic keys are not remembered either (never entered pending)
+    expect(r.newCursor.seenMessageKeys).toEqual(
+      expect.arrayContaining(['msg_A1:req_A1', 'msg_B1:req_B1']),
+    );
+    expect(r.newCursor.seenMessageKeys).not.toContain('msg_S1:req_S1');
+    expect(r.newCursor.seenMessageKeys).not.toContain('msg_S2:req_S2');
+  });
 });

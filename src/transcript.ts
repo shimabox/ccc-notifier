@@ -12,6 +12,9 @@ import type { Cursor, TokenBuckets, TurnAggregate, UsageByModel } from './types'
 
 const NEWLINE = 0x0a; // '\n'
 const MAX_SEEN_KEYS = 500;
+// Client-generated placeholder row (e.g. an API error notice), not a real API
+// call. usage is often zero-filled but must still be excluded entirely.
+const SYNTHETIC_MODEL = '<synthetic>';
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -188,16 +191,22 @@ export async function aggregateNewTurn(
     if (type === 'assistant' && message !== null) {
       const usage = message.usage;
       if (isRecord(usage)) {
-        const id = strOrNull(message.id) ?? '';
-        const reqId = strOrNull(obj.requestId) ?? '';
-        const key = `${id}:${reqId}`;
-        // Rescan guard #2 (seen keys): also the primary dedupe path in normal
-        // mode. A key we have already accounted for is never counted again.
-        if (!seenKeys.has(key)) {
-          const model = strOrNull(message.model) ?? 'unknown';
-          // Same key across duplicated rows: last write wins (identical or
-          // corrected values), and it still only counts once.
-          pending.set(key, { model, isSidechain: isSide, bucket: extractBucket(usage) });
+        const rawModel = message.model;
+        // "<synthetic>" rows are client-generated placeholders (e.g. API error
+        // notices), not real API calls: skip entirely (not pending, not
+        // apiCalls, not seenMessageKeys). Exact-match only.
+        if (rawModel !== SYNTHETIC_MODEL) {
+          const id = strOrNull(message.id) ?? '';
+          const reqId = strOrNull(obj.requestId) ?? '';
+          const key = `${id}:${reqId}`;
+          // Rescan guard #2 (seen keys): also the primary dedupe path in normal
+          // mode. A key we have already accounted for is never counted again.
+          if (!seenKeys.has(key)) {
+            const model = strOrNull(rawModel) ?? 'unknown';
+            // Same key across duplicated rows: last write wins (identical or
+            // corrected values), and it still only counts once.
+            pending.set(key, { model, isSidechain: isSide, bucket: extractBucket(usage) });
+          }
         }
       }
     }
