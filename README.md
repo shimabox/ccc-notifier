@@ -10,9 +10,9 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 
 上が通知の例です(1行目がタイトル、2〜3行目が本文)。応答が完了するたびに OS 通知(任意で Slack 通知も)としてこれが届きます。
 
-![ダッシュボード](docs/images/dashboard.png)
+![通知の実例](docs/images/notification.png)
 
-<!-- TODO: OS通知のスクリーンショット(docs/images/notification.png)を撮って差し込む -->
+![ダッシュボード](docs/images/dashboard.png)
 
 ## 特徴 / Features
 
