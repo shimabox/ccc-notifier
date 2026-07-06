@@ -1,0 +1,300 @@
+// test/cli.test.ts (T8)
+//
+// 契約: src/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
+//
+// 注意: src/track.ts / src/setup.ts は並行実装中のため、このテストファイルは
+// それらを直接 import しない。main() のテスト(--version / unknown / help)は
+// src/cli.ts を経由するが、cli.ts 側が track/setup を動的 import() しているため、
+// track/setup が万一未完成・破損していても、track/init/uninstall を実際に実行しない
+// これらのテストには影響しない。念のため cli.ts 自体も各 it() 内で動的 import する
+// (静的 import にすると、cli.ts の読み込みに失敗した場合にファイル全体のテスト収集が
+// 失敗し、report/doctor 系の無関係なテストまで巻き込まれてしまうため)。
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { runDoctor } from "../src/doctor";
+import { runReport } from "../src/report";
+import { appendTurn } from "../src/store";
+import type { TurnRecord } from "../src/types";
+
+// ============ 共通ヘルパー ============
+
+/** console.log を spy し、呼び出し中の戻り値と出力(全呼び出しを連結したテキスト)を返す。 */
+async function captureLogs(fn: () => Promise<number>): Promise<{ code: number; output: string }> {
+  const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const code = await fn();
+    const output = spy.mock.calls.map((args) => args.map((a) => String(a)).join(" ")).join("\n");
+    return { code, output };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+function makeTurn(overrides: Partial<TurnRecord> = {}): TurnRecord {
+  return {
+    schemaVersion: 1,
+    ts: new Date().toISOString(),
+    sessionId: "sess-report",
+    project: "/tmp/proj",
+    gitBranch: "main",
+    models: ["claude-fable-5"],
+    tokens: { input: 100, output: 200, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+    sidechainTokens: null,
+    apiCalls: 1,
+    costUSD: 0.1,
+    costJPY: 15,
+    fxRate: 150,
+    fxSource: "fixed",
+    prompt: "test prompt",
+    ...overrides,
+  };
+}
+
+interface ReportJson {
+  days: number;
+  daily: Array<{
+    date: string;
+    turns: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUSD: number;
+    costJPY: number;
+  }>;
+  byModel: Record<string, { turns: number; costUSD: number; costJPY: number }>;
+  total: { turns: number; inputTokens: number; outputTokens: number; costUSD: number; costJPY: number };
+}
+
+// ============ main() ============
+// --version / unknown-cmd / (引数なし) の3ケース。cli.ts は各 it 内で動的 import する。
+
+describe("main", () => {
+  it("main(['--version']) は 0 を返し、セマンティックバージョン風の文字列を表示する", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main(["--version"]));
+
+    expect(code).toBe(0);
+    expect(output.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it("main(['-v']) も --version と同様に扱う", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main(["-v"]));
+
+    expect(code).toBe(0);
+    expect(output.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it("main(['unknown-cmd']) は 1 を返し、help を表示する(track にフォールバックしない)", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main(["unknown-cmd"]));
+
+    expect(code).toBe(1);
+    expect(output).toContain("使い方");
+    expect(output).toContain("doctor");
+  });
+
+  it("main([]) (引数なし) は 0 を返し、help を表示する", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main([]));
+
+    expect(code).toBe(0);
+    expect(output).toContain("使い方");
+    expect(output).toContain("report");
+  });
+
+  it("main(['--help']) も引数なしと同様に help を表示して 0 を返す", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main(["--help"]));
+
+    expect(code).toBe(0);
+    expect(output).toContain("Usage");
+  });
+});
+
+// ============ runReport ============
+
+describe("runReport", () => {
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "acn-cli-test-report-"));
+    process.env.ACN_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    delete process.env.ACN_HOME;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("日付・モデルの異なる3件を集計し、既定30日の合計・日別件数が期待どおりで、--days 1 で古い行が除外される", async () => {
+    const now = Date.now();
+    const day = 86400000;
+
+    // 12時間前: 既定(30日)・--days 1 のどちらでも含まれる
+    const recent = makeTurn({
+      ts: new Date(now - 12 * 60 * 60 * 1000).toISOString(),
+      models: ["claude-fable-5"],
+      costUSD: 0.1,
+      costJPY: 15,
+    });
+    // 2日前: 既定(30日)では含まれるが --days 1 では除外される
+    const mid = makeTurn({
+      ts: new Date(now - 2 * day).toISOString(),
+      models: ["claude-sonnet-5"],
+      costUSD: 0.2,
+      costJPY: 30,
+    });
+    // 40日前: 既定(30日)でも --days 1 でも除外される
+    const old = makeTurn({
+      ts: new Date(now - 40 * day).toISOString(),
+      models: ["claude-haiku-4-5"],
+      costUSD: 0.05,
+      costJPY: 7.5,
+    });
+
+    appendTurn(old);
+    appendTurn(recent);
+    appendTurn(mid);
+
+    const all = await captureLogs(() => runReport(["--json"]));
+    expect(all.code).toBe(0);
+    const allJson = JSON.parse(all.output) as ReportJson;
+
+    expect(allJson.days).toBe(30);
+    expect(allJson.total.turns).toBe(2);
+    expect(allJson.daily.length).toBe(2);
+    expect(allJson.total.costUSD).toBeCloseTo(0.3, 10);
+    expect(allJson.total.costJPY).toBeCloseTo(45, 10);
+    expect(Object.keys(allJson.byModel).sort()).toEqual(["claude-fable-5", "claude-sonnet-5"]);
+    expect(allJson.byModel["claude-haiku-4-5"]).toBeUndefined();
+
+    const recentOnly = await captureLogs(() => runReport(["--days", "1", "--json"]));
+    expect(recentOnly.code).toBe(0);
+    const recentJson = JSON.parse(recentOnly.output) as ReportJson;
+
+    expect(recentJson.total.turns).toBe(1);
+    expect(recentJson.daily.length).toBe(1);
+    expect(Object.keys(recentJson.byModel)).toEqual(["claude-fable-5"]);
+    expect(recentJson.total.costUSD).toBeCloseTo(0.1, 10);
+  });
+
+  it("--days に不正値を渡すと既定の30が使われる", async () => {
+    appendTurn(makeTurn());
+
+    const { code, output } = await captureLogs(() => runReport(["--days", "not-a-number", "--json"]));
+
+    expect(code).toBe(0);
+    const json = JSON.parse(output) as ReportJson;
+    expect(json.days).toBe(30);
+  });
+
+  it("履歴が無ければ 0 を返し「履歴がありません」を表示する", async () => {
+    const { code, output } = await captureLogs(() => runReport([]));
+
+    expect(code).toBe(0);
+    expect(output).toContain("履歴がありません");
+  });
+
+  it("--json 指定でも履歴が無ければ JSON ではなく「履歴がありません」を表示する", async () => {
+    const { code, output } = await captureLogs(() => runReport(["--json"]));
+
+    expect(code).toBe(0);
+    expect(output).toContain("履歴がありません");
+    expect(() => JSON.parse(output)).toThrow();
+  });
+});
+
+// ============ runDoctor ============
+
+describe("runDoctor", () => {
+  let tmpHome: string;
+  let projectsDir: string;
+  let goodSettingsPath: string;
+  let badSettingsPath: string;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "acn-cli-test-doctor-"));
+    process.env.ACN_HOME = tmpHome;
+
+    // ACN_CLAUDE_PROJECTS: 一時dir配下に proj/x.jsonl として transcript フィクスチャを配置
+    projectsDir = join(tmpHome, "claude-projects");
+    mkdirSync(join(projectsDir, "proj"), { recursive: true });
+    copyFileSync(
+      fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url)),
+      join(projectsDir, "proj", "x.jsonl"),
+    );
+    process.env.ACN_CLAUDE_PROJECTS = projectsDir;
+
+    // hook コマンドが指すスクリプトパスとして実在するダミーファイルを用意する
+    // (script path 存在チェックが ⚠️ にならず ✅ になることを確認するため)。
+    const scriptDir = join(tmpHome, "agent-cost-notifier-dist");
+    mkdirSync(scriptDir, { recursive: true });
+    const scriptPath = join(scriptDir, "cli.js");
+    writeFileSync(scriptPath, "", "utf8");
+
+    // settings-existing.json フィクスチャのコピーに agent-cost-notifier を含む Stop エントリを足したもの
+    const rawFixture = readFileSync(
+      fileURLToPath(new URL("./fixtures/settings-existing.json", import.meta.url)),
+      "utf8",
+    );
+    const parsedGood = JSON.parse(rawFixture) as Record<string, unknown>;
+    const existingHooks = (parsedGood.hooks ?? {}) as Record<string, unknown>;
+    parsedGood.hooks = {
+      ...existingHooks,
+      Stop: [
+        {
+          hooks: [
+            {
+              type: "command",
+              command: `"${process.execPath}" "${scriptPath}" track`,
+              timeout: 15,
+            },
+          ],
+        },
+      ],
+    };
+    goodSettingsPath = join(tmpHome, "settings-good.json");
+    writeFileSync(goodSettingsPath, JSON.stringify(parsedGood, null, 2), "utf8");
+
+    // Stop エントリなし(= 元のフィクスチャそのまま)
+    badSettingsPath = join(tmpHome, "settings-bad.json");
+    writeFileSync(badSettingsPath, rawFixture, "utf8");
+
+    process.env.ACN_DRY_RUN = "1";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in test")));
+  });
+
+  afterEach(() => {
+    delete process.env.ACN_CLAUDE_PROJECTS;
+    delete process.env.ACN_CLAUDE_SETTINGS;
+    delete process.env.ACN_DRY_RUN;
+    delete process.env.ACN_HOME;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("Stop hook 登録済み・fetch 全滅でも ❌ 無しで 0 を返す", async () => {
+    process.env.ACN_CLAUDE_SETTINGS = goodSettingsPath;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(0);
+    expect((output.match(/❌/g) ?? []).length).toBe(0);
+    expect((output.match(/✅/g) ?? []).length).toBeGreaterThan(0);
+  });
+
+  it("Stop エントリの無い settings.json では 1 を返す", async () => {
+    process.env.ACN_CLAUDE_SETTINGS = badSettingsPath;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(1);
+    expect((output.match(/❌/g) ?? []).length).toBeGreaterThan(0);
+  });
+});
