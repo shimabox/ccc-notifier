@@ -112,6 +112,9 @@ describe("runTrack", () => {
       cacheWrite1h: 0,
       cacheRead: 0,
     });
+    expect(rec.costByModel).toBeDefined();
+    expect(rec.costByModel!["claude-fable-5"]).toBeCloseTo(0.261, 10);
+    expect(rec.costByModel!["claude-haiku-4-5"]).toBeCloseTo(0.006, 10);
 
     const notify = JSON.parse(readFileSync(lastNotifyFile(), "utf8"));
     expect(notify.os.title).toContain("$0.267");

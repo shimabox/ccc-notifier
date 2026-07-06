@@ -144,6 +144,16 @@ function turnOutputTokens(rec: TurnRecord): number {
   return rec.tokens.output + (rec.sidechainTokens ? rec.sidechainTokens.output : 0);
 }
 
+/**
+ * ターンの「モデル別コスト」を返す(実配分)。
+ * rec.costByModel があり空でなければそれをそのまま返す。
+ * 無ければ(旧レコード・後方互換)先頭モデルへ costUSD を全額帰属させるフォールバックを返す。
+ */
+function turnCostByModel(rec: TurnRecord): Record<string, number> {
+  if (rec.costByModel && Object.keys(rec.costByModel).length > 0) return rec.costByModel;
+  return { [rec.models[0] ?? "unknown"]: rec.costUSD };
+}
+
 /** min..max(いずれもローカル日付キー)を1日刻みで列挙する。 */
 function fillDayKeys(min: string, max: string): string[] {
   const res: string[] = [];
@@ -167,7 +177,7 @@ interface ModelSlot {
   slot: string; // "1".."8" または "other"
   cost: number;
   jpy: number;
-  turns: number;
+  turns: number; // 参加カウント(そのモデルが登場したターン数。複数モデルのターンは各モデル+1)
   usdFmt: string;
   jpyFmt: string;
   sharePct: number;
@@ -257,7 +267,7 @@ function aggregate(turns: TurnRecord[]): Aggregated {
   const week = emptyTotals();
   const month = emptyTotals();
 
-  const primaryAgg = new Map<string, { cost: number; jpy: number; turns: number }>();
+  const modelAgg = new Map<string, { cost: number; jpy: number; turns: number }>();
   const projAgg = new Map<string, { cost: number; jpy: number; turns: number }>();
 
   let minDate: string | null = null;
@@ -290,12 +300,15 @@ function aggregate(turns: TurnRecord[]): Aggregated {
       if (maxDate === null || key > maxDate) maxDate = key;
     }
 
-    const pm = rec.models[0] ?? "unknown";
-    const pa = primaryAgg.get(pm) ?? { cost: 0, jpy: 0, turns: 0 };
-    pa.cost += rec.costUSD;
-    pa.jpy += rec.costJPY;
-    pa.turns += 1;
-    primaryAgg.set(pm, pa);
+    // モデル別集計: 実配分(turnCostByModel)。複数モデルのターンは各モデルの行に1ずつ
+    // 計上する(参加カウント)ため、モデル別 turns の合計は総ターン数を超えうる。
+    for (const [model, modelUsd] of Object.entries(turnCostByModel(rec))) {
+      const ma = modelAgg.get(model) ?? { cost: 0, jpy: 0, turns: 0 };
+      ma.cost += modelUsd;
+      ma.jpy += modelUsd * rec.fxRate;
+      ma.turns += 1;
+      modelAgg.set(model, ma);
+    }
 
     const projName = basename(rec.project) || rec.project || "(unknown)";
     const px = projAgg.get(projName) ?? { cost: 0, jpy: 0, turns: 0 };
@@ -306,7 +319,7 @@ function aggregate(turns: TurnRecord[]): Aggregated {
   }
 
   // ---- モデルスロット割当(コスト降順、8超は上位7 + その他) ----
-  const entries = [...primaryAgg.entries()].sort(
+  const entries = [...modelAgg.entries()].sort(
     (a, b) => b[1].cost - a[1].cost || a[0].localeCompare(b[0]),
   );
 
@@ -375,13 +388,16 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     if (key === null) continue;
     const idx = dayIndex.get(key);
     if (idx === undefined) continue;
-    const pm = rec.models[0] ?? "unknown";
-    const info = slotByModel.get(pm) ?? otherSlot ?? { slot: "other", name: "その他" };
     const bucket = stacks[idx];
-    const cur = bucket.get(info.slot) ?? { name: info.name, slot: info.slot, value: 0, usdFmt: "" };
-    cur.value += rec.costUSD;
-    bucket.set(info.slot, cur);
-    dayTotals[idx] += rec.costUSD;
+    // モデル別の実配分(turnCostByModel)で日別スタックへ振り分ける。
+    // 1ターンが複数モデルにまたがる場合、同日のスタックに複数セグメントとして現れうる。
+    for (const [model, modelUsd] of Object.entries(turnCostByModel(rec))) {
+      const info = slotByModel.get(model) ?? otherSlot ?? { slot: "other", name: "その他" };
+      const cur = bucket.get(info.slot) ?? { name: info.name, slot: info.slot, value: 0, usdFmt: "" };
+      cur.value += modelUsd;
+      bucket.set(info.slot, cur);
+      dayTotals[idx] += modelUsd;
+    }
     dayTurns[idx] += 1;
   }
 
@@ -1113,7 +1129,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   // ---- 日別チャート ----
   const dailyNote = agg.chartTruncatedDays
     ? `期間が広いため棒が細く表示されます(チャートは横スクロールできます)。`
-    : `各ターンのコストを主要モデル(先頭)に帰属させる簡易集計です。`;
+    : `モデル別の実配分で集計しています(旧バージョンで記録されたターンは主モデルに全額帰属)。`;
   const dailySection =
     `<section class="card">` +
     `<h2>日別コスト / Daily cost</h2>` +
@@ -1131,6 +1147,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<p class="note">コスト降順。バー長=コスト、右の数値は $ と構成比。</p>` +
     `<div class="chart-scroll">${renderModelBars(agg)}</div>` +
     `<div class="table-wrap">${renderModelTable(agg.models)}</div>` +
+    `<p class="note">複数モデルを使ったターンは各モデルの行に1ずつ計上(ターン数の合計は総ターン数を超えることがあります)。</p>` +
     `</section>` +
     `<section class="card">` +
     `<h2>プロジェクト別 / By project</h2>` +

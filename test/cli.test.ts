@@ -183,6 +183,46 @@ describe("runReport", () => {
     expect(recentJson.total.costUSD).toBeCloseTo(0.1, 10);
   });
 
+  it("--json の byModel は costByModel があれば実配分、無ければ主モデルへのフォールバックになる", async () => {
+    // costByModel あり: fable/haiku へ実配分される(1ターン=1レコードだが2モデル行に分かれる)。
+    appendTurn(
+      makeTurn({
+        models: ["claude-fable-5", "claude-haiku-4-5"],
+        costUSD: 1.0,
+        costJPY: 150,
+        costByModel: { "claude-fable-5": 0.9, "claude-haiku-4-5": 0.1 },
+      }),
+    );
+    // costByModel 無し(旧レコード相当): 主モデル(先頭)へ全額フォールバック計上される。
+    appendTurn(
+      makeTurn({
+        models: ["claude-sonnet-5"],
+        costUSD: 0.5,
+        costJPY: 75,
+      }),
+    );
+
+    const { code, output } = await captureLogs(() => runReport(["--json", "--days", "9999"]));
+    expect(code).toBe(0);
+    const json = JSON.parse(output) as ReportJson;
+
+    expect(json.byModel["claude-fable-5"].costUSD).toBeCloseTo(0.9, 10);
+    expect(json.byModel["claude-fable-5"].turns).toBe(1);
+    expect(json.byModel["claude-haiku-4-5"].costUSD).toBeCloseTo(0.1, 10);
+    expect(json.byModel["claude-haiku-4-5"].turns).toBe(1);
+    // フォールバック: costByModel が無いレコードは主モデルへ全額計上される。
+    expect(json.byModel["claude-sonnet-5"].costUSD).toBeCloseTo(0.5, 10);
+    expect(json.byModel["claude-sonnet-5"].turns).toBe(1);
+
+    // 実配分の合計は総コストと一致する。参加カウントのため byModel の turns 合計(3)は
+    // 総ターン数(2)を超える。
+    const sumCost = Object.values(json.byModel).reduce((s, m) => s + m.costUSD, 0);
+    expect(sumCost).toBeCloseTo(json.total.costUSD, 8);
+    expect(json.total.turns).toBe(2);
+    const sumTurns = Object.values(json.byModel).reduce((s, m) => s + m.turns, 0);
+    expect(sumTurns).toBe(3);
+  });
+
   it("--days に不正値を渡すと既定の30が使われる", async () => {
     appendTurn(makeTurn());
 

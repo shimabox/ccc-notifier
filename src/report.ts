@@ -67,6 +67,16 @@ function outputTokensOf(rec: TurnRecord): number {
   return rec.tokens.output + (rec.sidechainTokens ? rec.sidechainTokens.output : 0);
 }
 
+/**
+ * ターンの「モデル別コスト」を返す(実配分)。
+ * rec.costByModel があり空でなければそれをそのまま返す。
+ * 無ければ(旧レコード・後方互換)先頭モデルへ costUSD を全額帰属させるフォールバックを返す。
+ */
+function turnCostByModel(rec: TurnRecord): Record<string, number> {
+  if (rec.costByModel && Object.keys(rec.costByModel).length > 0) return rec.costByModel;
+  return { [rec.models[0] ?? "unknown"]: rec.costUSD };
+}
+
 interface DailyAgg {
   date: string;
   turns: number;
@@ -77,7 +87,7 @@ interface DailyAgg {
 }
 
 interface ModelAgg {
-  turns: number;
+  turns: number; // 参加カウント(そのモデルが登場したターン数。複数モデルのターンは各モデル+1)
   costUSD: number;
   costJPY: number;
 }
@@ -98,8 +108,9 @@ interface Aggregated {
 
 function aggregate(turns: TurnRecord[]): Aggregated {
   const dailyMap = new Map<string, DailyAgg>();
-  // モデル別集計は record.models の先頭モデル(主要モデル)にターン全体を帰属させる簡易集計。
-  // サイドチェーンで別モデルが使われていても内訳は分けず、1ターン=主要モデル1件としてカウントする。
+  // モデル別集計はターンごとの実配分(turnCostByModel)を合算する。costByModel が無い旧レコードは
+  // 先頭モデル(主要モデル)にターン全体を帰属させるフォールバックになる。複数モデルのターンは
+  // 各モデルの行に1ずつ計上する(参加カウント)ため、turns の合計は総ターン数を超えうる。
   const modelMap = new Map<string, ModelAgg>();
 
   const total: TotalAgg = { turns: 0, inputTokens: 0, outputTokens: 0, costUSD: 0, costJPY: 0 };
@@ -124,12 +135,13 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     d.costJPY += rec.costJPY;
     dailyMap.set(dateKey, d);
 
-    const primaryModel = rec.models[0] ?? "unknown";
-    const m = modelMap.get(primaryModel) ?? { turns: 0, costUSD: 0, costJPY: 0 };
-    m.turns += 1;
-    m.costUSD += rec.costUSD;
-    m.costJPY += rec.costJPY;
-    modelMap.set(primaryModel, m);
+    for (const [model, modelUsd] of Object.entries(turnCostByModel(rec))) {
+      const m = modelMap.get(model) ?? { turns: 0, costUSD: 0, costJPY: 0 };
+      m.turns += 1;
+      m.costUSD += modelUsd;
+      m.costJPY += modelUsd * rec.fxRate;
+      modelMap.set(model, m);
+    }
 
     total.turns += 1;
     total.inputTokens += inTok;
@@ -185,6 +197,7 @@ function printTable(result: Aggregated, days: number): void {
       model.padEnd(28) + String(m.turns).padStart(8) + formatUSD(m.costUSD).padStart(10) + formatJPY(m.costJPY).padStart(12),
     );
   }
+  console.log("※ 複数モデルを使ったターンは各モデルの行に1ずつ計上します(ターン数の合計は総ターン数を超えることがあります)。");
 
   console.log("");
   console.log(`合計 (Total): ${formatUSD(result.total.costUSD)} (${formatJPY(result.total.costJPY)}) / ${result.total.turns} turns`);

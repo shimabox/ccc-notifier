@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runDashboard } from "../src/dashboard";
+import { formatUSD } from "../src/format";
 import { appendTurn } from "../src/store";
 import type { TurnRecord } from "../src/types";
 
@@ -202,6 +203,47 @@ interface Embed {
 /** #acn-data をパースして埋め込みオブジェクトを返す(< 等は JSON.parse が復元する)。 */
 function parseData(html: string): Embed {
   return JSON.parse(extractDataRaw(html)) as Embed;
+}
+
+interface EmbedDailyModel {
+  name: string;
+  slot: string;
+  usdFmt: string;
+}
+interface EmbedDaily {
+  date: string;
+  turns: number;
+  usdFmt: string;
+  models: EmbedDailyModel[];
+}
+
+/** #acn-data の daily 配列を(モデル内訳込みで)取り出す。parseData の Embed 型は daily を unknown[] にしているため、ここで具体的な形へキャストする。 */
+function parseDailyData(html: string): EmbedDaily[] {
+  return parseData(html).daily as unknown as EmbedDaily[];
+}
+
+/**
+ * 「モデル別内訳」card 内の data-table から $ 表示のコスト列だけを抜き出す
+ * (ターン数・¥・構成比%の各セルは先頭文字が異なるため regex で除外される)。
+ */
+function extractModelTableUsd(html: string): number[] {
+  const marker = "モデル別内訳 / By model</h2>";
+  const start = html.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const tableStart = html.indexOf('<table class="data-table">', start);
+  expect(tableStart).toBeGreaterThan(start);
+  const tableEnd = html.indexOf("</table>", tableStart);
+  expect(tableEnd).toBeGreaterThan(tableStart);
+  const tableHtml = html.slice(tableStart, tableEnd);
+  const matches = [...tableHtml.matchAll(/<td class="c-num">\$([\d,]+\.?\d*)<\/td>/g)];
+  return matches.map((m) => Number(m[1].replace(/,/g, "")));
+}
+
+/** renderDailyChart(aria-label="日別コスト積み上げ棒グラフ")の SVG 断片だけを取り出す。 */
+function extractDailyChartSvg(html: string): string {
+  const m = html.match(/<svg[^>]*aria-label="日別コスト積み上げ棒グラフ"[\s\S]*?<\/svg>/);
+  expect(m).toBeTruthy();
+  return m![0];
 }
 
 describe("runDashboard — 標準シナリオ", () => {
@@ -435,5 +477,121 @@ describe("runDashboard — 空状態", () => {
     expect(data.turns).toEqual([]);
     // 外部参照ゼロは空状態でも維持
     expect(html).not.toMatch(/src\s*=\s*["']?\s*https?:/i);
+  });
+});
+
+// ============ モデル別の実配分(costByModel) ============
+//
+// track.ts が保存する TurnRecord.costByModel を dashboard.ts がどう集計するかを検証する。
+//  (a) costByModel 付き: 各モデルへ実配分され、主モデルへの全額計上にならない
+//  (b) costByModel 無し(旧レコード): 主モデルへ全額のフォールバック
+//  (c) 混在: モデル別表の合計が総コストと一致する
+//  (d) 日別スタックに同日で複数モデルのセグメントが現れる
+
+describe("runDashboard — モデル別の実配分 (costByModel)", () => {
+  it("(a) costByModel 付きレコードは各モデルへ実配分され、主モデルに全額計上されない", async () => {
+    appendTurn(
+      makeTurn({
+        models: ["claude-fable-5", "claude-haiku-4-5"],
+        costUSD: 1.0,
+        costJPY: 150,
+        costByModel: { "claude-fable-5": 0.9, "claude-haiku-4-5": 0.1 },
+      }),
+    );
+
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    expect(html).toContain("Fable 5");
+    expect(html).toContain("Haiku 4.5");
+    // 各モデルの行に実配分どおりの金額が入っている(どちらかが $1.00 全額を持つのではない)。
+    expect(html).toContain(`>Fable 5</td><td class="c-num">1</td><td class="c-num">${formatUSD(0.9)}</td>`);
+    expect(html).toContain(`>Haiku 4.5</td><td class="c-num">1</td><td class="c-num">${formatUSD(0.1)}</td>`);
+
+    const modelCosts = extractModelTableUsd(html);
+    expect(modelCosts.sort((a, b) => a - b)).toEqual([0.1, 0.9]);
+    expect(modelCosts).not.toContain(1.0);
+  });
+
+  it("(b) costByModel の無い旧形式レコードは主モデルへ全額フォールバック計上される", async () => {
+    appendTurn(
+      makeTurn({
+        models: ["claude-sonnet-5"],
+        costUSD: 0.42,
+        costJPY: 63,
+        // costByModel は指定しない = 旧レコード相当
+      }),
+    );
+
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    expect(html).toContain("Sonnet 5");
+    expect(html).toContain(
+      `>Sonnet 5</td><td class="c-num">1</td><td class="c-num">${formatUSD(0.42)}</td>`,
+    );
+    const modelCosts = extractModelTableUsd(html);
+    expect(modelCosts).toEqual([0.42]);
+  });
+
+  it("(c) 混在 seed(実配分 + フォールバック)でもモデル別表の合計は総コストと一致する", async () => {
+    const now = new Date().toISOString();
+    appendTurn(
+      makeTurn({
+        ts: now,
+        models: ["claude-fable-5", "claude-haiku-4-5"],
+        costUSD: 1.0,
+        costJPY: 150,
+        costByModel: { "claude-fable-5": 0.9, "claude-haiku-4-5": 0.1 },
+      }),
+    );
+    appendTurn(
+      makeTurn({
+        ts: now,
+        models: ["claude-sonnet-5"],
+        costUSD: 0.5,
+        costJPY: 75,
+        // costByModel なし → フォールバック
+      }),
+    );
+
+    await run(["--no-open"]);
+    const html = readHtml();
+    const data = parseData(html);
+
+    expect(data.totals.cost).toBeCloseTo(1.5, 10);
+    expect(data.totals.turns).toBe(2);
+
+    const modelCosts = extractModelTableUsd(html);
+    const sum = modelCosts.reduce((s, v) => s + v, 0);
+    expect(sum).toBeCloseTo(data.totals.cost, 6);
+  });
+
+  it("(d) 日別チャートで複数モデルのスタックが同日に現れる(seg クラス・埋め込み daily.models で検証)", async () => {
+    appendTurn(
+      makeTurn({
+        ts: new Date().toISOString(),
+        models: ["claude-fable-5", "claude-haiku-4-5"],
+        costUSD: 1.0,
+        costJPY: 150,
+        costByModel: { "claude-fable-5": 0.9, "claude-haiku-4-5": 0.1 },
+      }),
+    );
+
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    // 埋め込み daily データ: データのある唯一の日に2モデル分のセグメントが入っている。
+    const daily = parseDailyData(html);
+    const day = daily.find((dd) => dd.models.length > 0);
+    expect(day).toBeDefined();
+    expect(day!.models.length).toBe(2);
+    expect(day!.models.map((m) => m.name).sort()).toEqual(["Fable 5", "Haiku 4.5"]);
+
+    // 日別チャート SVG 自体にも、同じバーの中に異なるモデルスロットの seg が2つ現れる
+    // (このテストではデータのある日が1日だけなので、この SVG 内の seg はすべてその日のもの)。
+    const dailySvg = extractDailyChartSvg(html);
+    const segClasses = [...dailySvg.matchAll(/class="seg (s\d+|sother)"/g)].map((m) => m[1]);
+    expect(new Set(segClasses).size).toBe(2);
   });
 });

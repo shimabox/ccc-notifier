@@ -15,3 +15,4 @@
 - sidechain tokens 合算: { input:1000, output:500, cacheWrite5m:2000, cacheWrite1h:0, cacheRead:0 }
 - models = ["claude-fable-5","claude-haiku-4-5"]
 - sessionId = "sess-1" / project(cwd) = "/tmp/proj" / gitBranch = "main"
+- costByModel = `{ "claude-fable-5": 0.261, "claude-haiku-4-5": 0.006 }`(computeCost の byModel をそのまま保存。丸めない)

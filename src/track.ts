@@ -131,6 +131,7 @@ export async function runTrack(stdinText: string): Promise<void> {
       sidechainTokens: sidechainHasModels ? sumBuckets(agg.sidechain) : null,
       apiCalls: agg.apiCalls,
       costUSD: breakdown.usd,
+      costByModel: breakdown.byModel, // モデル別 USD(main+sidechain 合算、丸めない)
       costJPY: breakdown.usd * fx.rate, // 丸めない(表示時に丸める)
       fxRate: fx.rate,
       fxSource: fx.source,

@@ -59,6 +59,7 @@ export interface TurnRecord {
   sidechainTokens: TokenBuckets | null; // sidechain 合算(無ければ null)
   apiCalls: number;
   costUSD: number;           // 丸めず保存(表示時に丸める)
+  costByModel?: Record<string, number>; // モデルID → そのターンの USD(main+sidechain 合算、丸めない)
   costJPY: number;
   fxRate: number;
   fxSource: 'live' | 'cache' | 'fixed';
