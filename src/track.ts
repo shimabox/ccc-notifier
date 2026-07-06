@@ -9,6 +9,8 @@
 //   - ネット待ちは各モジュール内のタイムアウト(fx 1.5s×2 / Slack 3s)で構造的に有界。
 //     track 側で無限待ちの await を追加しない。
 
+import { join } from "node:path";
+import { writeDashboardHtml } from "./dashboard";
 import { getUsdJpy } from "./fx";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
@@ -144,14 +146,40 @@ export async function runTrack(stdinText: string): Promise<void> {
     appendTurn(record);
     saveCursor(transcriptPath, agg.newCursor);
 
-    // 8. しきい値を超えるときのみ通知する。todayUSD は append 後に集計するため当該ターンを含む。
-    //    OS / Slack は互いに独立(allSettled で片方の失敗が他方に影響しない)。どちらも throw しない契約。
+    // 8. 後処理を「互いに独立なタスク」として集め、allSettled でまとめて待つ。どれか1つが
+    //    失敗しても他は止まらない(通知 ↔ 再生成 も相互に独立)。
+    //    - 通知(OS / Slack): しきい値 minNotifyUSD 以上のときのみ。todayUSD は append 後に
+    //      集計するため当該ターンを含む。どちらも throw しない契約。
+    //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。履歴が更新された以上、
+    //      通知の有無(しきい値)とは独立に実行する。失敗は logError に留め、通知を止めない。
+    const tasks: Promise<unknown>[] = [];
+
     if (record.costUSD >= cfg.minNotifyUSD) {
       const todayUSD = cfg.includeDailyTotal ? todayTotalUSD() : undefined;
-      await Promise.allSettled([
-        notifyOS(record, cfg, todayUSD),
-        notifySlack(record, cfg, todayUSD),
-      ]);
+      tasks.push(notifyOS(record, cfg, todayUSD));
+      tasks.push(notifySlack(record, cfg, todayUSD));
+    }
+
+    if (cfg.dashboard.autoRegenerate) {
+      // writeDashboardHtml は同期関数。失敗を通知タスクから隔離するため、try/catch で包んで
+      // 「必ず解決する Promise」に変換してから allSettled に載せる。
+      tasks.push(
+        (async () => {
+          try {
+            writeDashboardHtml({
+              days: cfg.dashboard.days,
+              outPath: join(paths().home, "report.html"),
+              autoReloadSec: cfg.dashboard.autoReloadSec,
+            });
+          } catch (err) {
+            logError("track:dashboard", err);
+          }
+        })(),
+      );
+    }
+
+    if (tasks.length > 0) {
+      await Promise.allSettled(tasks);
     }
   } catch (err) {
     // フェイルセーフ最終境界: いかなる失敗も error.log に留め、外へは決して漏らさない。

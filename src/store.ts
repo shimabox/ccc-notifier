@@ -88,6 +88,17 @@ function mergeConfig(partial: unknown): Config {
   if ("includeDailyTotal" in partial) {
     result.includeDailyTotal = partial.includeDailyTotal as boolean;
   }
+  if (isPlainObject(partial.dashboard)) {
+    if ("autoRegenerate" in partial.dashboard) {
+      result.dashboard.autoRegenerate = partial.dashboard.autoRegenerate as boolean;
+    }
+    if ("autoReloadSec" in partial.dashboard) {
+      result.dashboard.autoReloadSec = partial.dashboard.autoReloadSec as number;
+    }
+    if ("days" in partial.dashboard) {
+      result.dashboard.days = partial.dashboard.days as number;
+    }
+  }
   return result;
 }
 

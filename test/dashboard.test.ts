@@ -14,7 +14,7 @@
 //  8. 0件時も exit 0 で「まだ履歴がありません」
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -365,6 +365,61 @@ describe("runDashboard — フラグ", () => {
     const code = await run(["--no-open", "--days=7"]);
     expect(code).toBe(0);
     expect(readHtml()).toContain("直近 7 日間");
+  });
+});
+
+describe("runDashboard — 自動リロード / meta refresh", () => {
+  it("既定(config の autoReloadSec=30)では meta refresh を content=\"30\" で出力する", async () => {
+    seedStandard();
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
+    // フッタに自動更新の案内が1行出る
+    expect(html).toContain("約 30 秒ごとに自動更新");
+  });
+
+  it("--no-refresh を付けると meta refresh も自動更新案内も出さない", async () => {
+    seedStandard();
+    await run(["--no-open", "--no-refresh"]);
+    const html = readHtml();
+    expect(html).not.toContain('http-equiv="refresh"');
+    expect(html).not.toContain("秒ごとに自動更新");
+  });
+
+  it("--refresh 0 でも meta refresh を出さない", async () => {
+    seedStandard();
+    await run(["--no-open", "--refresh", "0"]);
+    expect(readHtml()).not.toContain('http-equiv="refresh"');
+  });
+
+  it("--refresh <sec> でリロード間隔を上書きできる", async () => {
+    seedStandard();
+    await run(["--no-open", "--refresh", "15"]);
+    expect(readHtml()).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="15"/);
+  });
+
+  it("config の dashboard.autoReloadSec が既定リロード秒になる", async () => {
+    writeFileSync(
+      join(tmpHome, "config.json"),
+      JSON.stringify({ dashboard: { autoReloadSec: 45 } }),
+      "utf8",
+    );
+    seedStandard();
+    await run(["--no-open"]);
+    expect(readHtml()).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="45"/);
+  });
+
+  it("リロードを跨いで状態を保持する JS(検索語・スクロール位置の復元)が埋め込まれている", async () => {
+    seedStandard();
+    await run(["--no-open"]);
+    const html = readHtml();
+    // sessionStorage を使う
+    expect(html).toContain("sessionStorage");
+    // 検索語の保存・復元キー
+    expect(html).toContain("acn-search");
+    // スクロール位置の保存・復元キーと復元呼び出し
+    expect(html).toContain("acn-scroll");
+    expect(html).toContain("window.scrollTo");
   });
 });
 

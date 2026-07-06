@@ -30,7 +30,7 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Print an aggregated cost report",
   },
   {
-    cmd: "dashboard [--days N] [--no-open] [--out <path>]",
+    cmd: "dashboard [--days N] [--no-open] [--out <path>] [--refresh <sec>|--no-refresh]",
     ja: "HTMLダッシュボードを生成してブラウザで開く",
     en: "Generate and open the HTML dashboard",
   },

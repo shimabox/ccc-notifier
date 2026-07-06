@@ -153,6 +153,28 @@ describe("readConfig", () => {
     expect(cfg.fx).toEqual({ fallbackRate: DEFAULT_CONFIG.fx.fallbackRate, cacheHours: 24 });
   });
 
+  it("dashboard の一部だけ指定した場合、残りはデフォルト補完される", () => {
+    const p = paths();
+    writeFileSync(p.configFile, JSON.stringify({ dashboard: { autoReloadSec: 60 } }), "utf8");
+
+    const cfg = readConfig();
+
+    expect(cfg.dashboard).toEqual({
+      autoRegenerate: DEFAULT_CONFIG.dashboard.autoRegenerate,
+      autoReloadSec: 60,
+      days: DEFAULT_CONFIG.dashboard.days,
+    });
+  });
+
+  it("dashboard キーの無い旧 config はデフォルトで dashboard を補完する", () => {
+    const p = paths();
+    writeFileSync(p.configFile, JSON.stringify({ minNotifyUSD: 0.05 }), "utf8");
+
+    const cfg = readConfig();
+
+    expect(cfg.dashboard).toEqual(DEFAULT_CONFIG.dashboard);
+  });
+
   it("破損 JSON なら DEFAULT_CONFIG を返し、元ファイルは変更せず error.log に記録する", () => {
     const p = paths();
     const brokenJson = "{ this is not valid json";

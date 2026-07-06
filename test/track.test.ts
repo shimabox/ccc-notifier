@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { runTrack } from "../src/track";
 import * as store from "../src/store";
+import * as dashboard from "../src/dashboard";
 import type { TurnRecord } from "../src/types";
 
 // 読み取り専用のゴールデン fixture。実行のたびに一時 dir へコピーして使う(fixture を汚さない)。
@@ -239,5 +240,64 @@ describe("runTrack", () => {
 
     // 通り抜けスパイなので副作用も本物: 実際に1行記録されている。
     expect(readHistory()).toHaveLength(1);
+  });
+
+  // 8. 自動再生成(既定): track 成功後に report.html が生成され、meta refresh を含む。
+  it("8. regenerates ACN_HOME/report.html (with meta refresh) after a successful track by default", async () => {
+    await runTrack(stdinFor(transcriptPath));
+
+    expect(readHistory()).toHaveLength(1);
+    const report = join(tmpHome, "report.html");
+    expect(existsSync(report)).toBe(true);
+    const html = readFileSync(report, "utf8");
+    expect(html).toContain("agent-cost-notifier");
+    // 既定 autoReloadSec=30 の meta refresh が入っている(開きっぱなしのタブが最新化される)。
+    expect(html).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
+  });
+
+  // 9. autoRegenerate=false なら report.html は生成されない(history は記録される)。
+  it("9. does not regenerate report.html when dashboard.autoRegenerate is false", async () => {
+    writeFileSync(
+      join(tmpHome, "config.json"),
+      JSON.stringify({ dashboard: { autoRegenerate: false } }),
+      "utf8",
+    );
+
+    await runTrack(stdinFor(transcriptPath));
+
+    expect(readHistory()).toHaveLength(1);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+  });
+
+  // 10. 通知しきい値未満で通知がスキップされても、再生成は独立に実行される。
+  it("10. still regenerates report.html even when the notification is skipped by minNotifyUSD", async () => {
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ minNotifyUSD: 1 }), "utf8");
+
+    await runTrack(stdinFor(transcriptPath));
+
+    expect(readHistory()).toHaveLength(1);
+    // 通知はスキップされる。
+    expect(existsSync(lastNotifyFile())).toBe(false);
+    // が、再生成は実行される(通知しきい値とは独立)。
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
+  });
+
+  // 11. 再生成が throw しても runTrack は正常終了し、history は記録される(フェイルセーフ)。
+  it("11. survives a failing report regeneration and still records the turn", async () => {
+    const spy = vi.spyOn(dashboard, "writeDashboardHtml").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    await expect(runTrack(stdinFor(transcriptPath))).resolves.toBeUndefined();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    // 再生成が失敗しても履歴は記録される。
+    expect(readHistory()).toHaveLength(1);
+    // mock が throw したため report.html は書かれない。
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    // フェイルセーフ: error.log に track:dashboard が残る。
+    const errLog = join(tmpHome, "error.log");
+    expect(existsSync(errLog)).toBe(true);
+    expect(readFileSync(errLog, "utf8")).toContain("[track:dashboard]");
   });
 });

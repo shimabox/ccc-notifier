@@ -48,6 +48,7 @@ const baseConfig: Config = {
   costLabel: "api_equivalent",
   fx: { fallbackRate: 150, cacheHours: 12 },
   includeDailyTotal: true,
+  dashboard: { autoRegenerate: true, autoReloadSec: 30, days: 30 },
 };
 
 afterEach(() => {

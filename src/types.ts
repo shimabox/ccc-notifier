@@ -74,6 +74,11 @@ export interface Config {
   costLabel: 'api_equivalent' | 'actual';  // 既定 'api_equivalent'
   fx: { fallbackRate: number; cacheHours: number }; // 既定 150 / 12
   includeDailyTotal: boolean;              // 既定 true
+  dashboard: {
+    autoRegenerate: boolean;  // track 実行のたびに report.html を再生成する(既定 true)
+    autoReloadSec: number;    // 生成 HTML の自動リロード間隔秒。0 で無効(既定 30)
+    days: number;             // 自動再生成時の対象期間(既定 30)
+  };
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -82,6 +87,7 @@ export const DEFAULT_CONFIG: Config = {
   costLabel: 'api_equivalent',
   fx: { fallbackRate: 150, cacheHours: 12 },
   includeDailyTotal: true,
+  dashboard: { autoRegenerate: true, autoReloadSec: 30, days: 30 },
 };
 
 export interface StopHookInput {

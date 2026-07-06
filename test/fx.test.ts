@@ -12,6 +12,7 @@ function makeConfig(fxOverrides?: Partial<Config['fx']>): Config {
     costLabel: 'api_equivalent',
     fx: { fallbackRate: 150, cacheHours: 12, ...fxOverrides },
     includeDailyTotal: true,
+    dashboard: { autoRegenerate: true, autoReloadSec: 30, days: 30 },
   };
 }
 

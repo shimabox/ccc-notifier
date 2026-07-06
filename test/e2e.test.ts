@@ -276,6 +276,14 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(notify.os.title).toContain("$0.267");
     expect(notify.os.title).toContain("¥40");
     expect(notify.os.title).toContain("API換算");
+
+    // track による report.html 自動再生成(dashboard.autoRegenerate 既定 true)。
+    const reportPath = join(sb.acnHome, "report.html");
+    expect(existsSync(reportPath)).toBe(true);
+    const reportHtml = readFileSync(reportPath, "utf8");
+    expect(reportHtml).toContain("agent-cost-notifier");
+    // 既定 autoReloadSec=30 の meta refresh(開くたびに最新へ近づくダッシュボード)。
+    expect(reportHtml).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
   });
 
   // ---- 2. 冪等性 ----

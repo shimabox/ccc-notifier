@@ -43,3 +43,18 @@
 
 ## TurnRecord.models の定義
 main のモデル → sidechain のみのモデル の順、重複排除。
+
+## 2026-07-07 追加: Config.dashboard(オーケストレーター認可)
+Config に `dashboard: { autoRegenerate: boolean; autoReloadSec: number; days: number }` を追加した。
+既定は `{ autoRegenerate: true, autoReloadSec: 30, days: 30 }`。
+- `autoRegenerate`: track 実行のたびに report.html を再生成する(通知しきい値とは独立)。
+- `autoReloadSec`: 生成 HTML の `<meta http-equiv="refresh">` 間隔秒。0 で無効。
+- `days`: 自動再生成時の対象期間。
+mergeConfig は他キーと同じ流儀で dashboard を深いマージする(欠損サブキーはデフォルト補完)。
+
+## src/dashboard.ts — writeDashboardHtml(2026-07-07 追加)
+- `writeDashboardHtml(opts: { days: number; outPath: string; autoReloadSec: number }): void`
+  - readTurns(days) → HTML 生成 → mkdir(dirname) + writeFileSync。
+  - console 出力・ブラウザ起動はしない。失敗は throw(呼び出し側が処理)。
+  - `autoReloadSec > 0` のとき生成 HTML の `<head>` に `<meta http-equiv="refresh" content="N">` を出力する。
+  - runDashboard(挙動不変)と track の自動再生成(フェイルセーフ経路)の共通コア。

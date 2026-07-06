@@ -15,7 +15,7 @@ import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { formatJPY, formatTokens, formatUSD, modelDisplayName } from "./format";
-import { paths, readTurns } from "./store";
+import { paths, readConfig, readTurns } from "./store";
 import type { TokenBuckets, TurnRecord } from "./types";
 
 const DEFAULT_DAYS = 30;
@@ -29,6 +29,7 @@ interface DashboardOpts {
   days: number;
   open: boolean;
   out: string | null;
+  autoReloadSec: number; // 生成 HTML の meta refresh 間隔秒。0 で無効。
 }
 
 function parseDays(value: string | undefined): number {
@@ -37,10 +38,20 @@ function parseDays(value: string | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DAYS;
 }
 
+/** --refresh の値をパースする。0 以上の整数のみ採用し、不正値は fallback(config 値)に倒す。 */
+function parseRefresh(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function parseArgs(argv: string[]): DashboardOpts {
   let days = DEFAULT_DAYS;
   let open = true;
   let out: string | null = null;
+  // 既定のリロード間隔は config の dashboard.autoReloadSec。フラグで上書きできる。
+  const cfgReloadSec = readConfig().dashboard.autoReloadSec;
+  let autoReloadSec = cfgReloadSec;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -56,10 +67,17 @@ function parseArgs(argv: string[]): DashboardOpts {
       i++;
     } else if (arg.startsWith("--out=")) {
       out = arg.slice("--out=".length) || null;
+    } else if (arg === "--no-refresh") {
+      autoReloadSec = 0;
+    } else if (arg === "--refresh") {
+      autoReloadSec = parseRefresh(argv[i + 1], cfgReloadSec);
+      i++;
+    } else if (arg.startsWith("--refresh=")) {
+      autoReloadSec = parseRefresh(arg.slice("--refresh=".length), cfgReloadSec);
     }
   }
 
-  return { days, open, out };
+  return { days, open, out, autoReloadSec };
 }
 
 // ============ 小さなユーティリティ ============
@@ -820,6 +838,11 @@ const APP_JS = `<script>
   var turns = data.turns || [];
   var daily = data.daily || [];
 
+  // sessionStorage は file:// やプライベートモードで例外を投げうるため、全アクセスを try/catch で包む。
+  // 自動リロード(meta refresh)を挟んでも検索語・スクロール位置を維持するために使う。
+  function ssGet(k){ try { return sessionStorage.getItem(k); } catch(e){ return null; } }
+  function ssSet(k, v){ try { sessionStorage.setItem(k, v); } catch(e){} }
+
   // ---- ターン履歴テーブル ----
   var tbody = document.getElementById('turn-body');
   var rows = [];
@@ -898,7 +921,12 @@ const APP_JS = `<script>
     }
     if(count){ count.textContent = shown + ' 件'; }
   }
-  if(search){ search.addEventListener('input', applyFilter); }
+  if(search){
+    // 自動リロード後も検索語を維持する: ロード時に復元 → applyFilter、入力のたびに保存。
+    var savedSearch = ssGet('acn-search');
+    if(savedSearch !== null){ search.value = savedSearch; }
+    search.addEventListener('input', function(){ ssSet('acn-search', search.value); applyFilter(); });
+  }
   applyFilter();
 
   // ---- 日別チャートのツールチップ ----
@@ -957,6 +985,15 @@ const APP_JS = `<script>
       band.addEventListener('pointerleave', function(){ if(tip){ tip.hidden = true; } });
     })(bands[b]);
   }
+
+  // ---- 自動リロードでもスクロール位置を維持する ----
+  // ロード時に保存値へスクロール復元し、以後は scroll のたびに現在位置を保存する(代入のみ)。
+  var savedScroll = ssGet('acn-scroll');
+  if(savedScroll !== null){
+    var sy = parseInt(savedScroll, 10);
+    if(!isNaN(sy)){ try { window.scrollTo(0, sy); } catch(e){} }
+  }
+  window.addEventListener('scroll', function(){ ssSet('acn-scroll', String(window.scrollY)); });
 })();
 </script>`;
 
@@ -1004,16 +1041,28 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   };
   const dataJson = escapeJsonForScript(JSON.stringify(embed));
 
+  // meta refresh / フッタ表示に使う「有効なリロード秒」。非有限・0以下は無効(0)へ正規化し、
+  // content 属性へは常に安全な整数だけを埋め込む(config 由来の異常値による属性破壊を防ぐ)。
+  const reloadSec =
+    Number.isFinite(opts.autoReloadSec) && opts.autoReloadSec > 0 ? Math.floor(opts.autoReloadSec) : 0;
+  const refreshMeta = reloadSec > 0 ? `<meta http-equiv="refresh" content="${reloadSec}">` : "";
+  const autoUpdateFoot =
+    reloadSec > 0
+      ? `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は Claude Code の応答完了時)</div>`
+      : "";
+
   const head =
     `<!doctype html><html lang="ja"><head>` +
     `<meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<meta name="color-scheme" content="light dark">` +
+    refreshMeta +
     `<title>agent-cost-notifier ダッシュボード</title>` +
     STYLE +
     `</head><body><div class="wrap">`;
 
   const foot =
+    autoUpdateFoot +
     `<div class="foot">agent-cost-notifier v${esc(version)} · データはローカルのみ / all data stays local</div>` +
     `</div>` +
     `<div id="acn-tip" class="acn-tip" hidden></div>` +
@@ -1141,16 +1190,36 @@ function openInBrowser(path: string): void {
 
 // ============ エントリ ============
 
+/**
+ * ダッシュボード HTML を生成してファイルへ書き出す(副作用は書き込みのみ)。
+ * - readTurns(days) → renderDashboard → mkdir(dirname) + writeFileSync。
+ * - console 出力・ブラウザ起動はしない。失敗は throw する(呼び出し側が処理する)。
+ * - autoReloadSec > 0 のとき、生成 HTML の <head> に meta refresh を出力する。
+ * runDashboard と track の自動再生成(フェイルセーフ経路)の共通コア。
+ */
+export function writeDashboardHtml(opts: {
+  days: number;
+  outPath: string;
+  autoReloadSec: number;
+}): void {
+  const turns = readTurns(opts.days);
+  const html = renderDashboard(turns, {
+    days: opts.days,
+    open: false,
+    out: opts.outPath,
+    autoReloadSec: opts.autoReloadSec,
+  });
+  mkdirSync(dirname(opts.outPath), { recursive: true });
+  writeFileSync(opts.outPath, html, "utf8");
+}
+
 export async function runDashboard(argv: string[]): Promise<number> {
   const opts = parseArgs(argv);
 
   let outPath: string;
   try {
     outPath = opts.out ?? join(paths().home, "report.html");
-    const turns = readTurns(opts.days);
-    const html = renderDashboard(turns, opts);
-    mkdirSync(dirname(outPath), { recursive: true });
-    writeFileSync(outPath, html, "utf8");
+    writeDashboardHtml({ days: opts.days, outPath, autoReloadSec: opts.autoReloadSec });
   } catch (err) {
     console.error(
       `dashboard の生成に失敗しました / failed to generate dashboard: ${err instanceof Error ? err.message : String(err)}`,
