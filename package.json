@@ -1,0 +1,33 @@
+{
+  "name": "agent-cost-notifier",
+  "version": "0.1.0",
+  "description": "Per-prompt cost notifier for Claude Code (USD/JPY) with local history and HTML dashboard",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "agent-cost-notifier": "dist/cli.js",
+    "acn": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "node-notifier": "^10.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/node-notifier": "^8.0.5",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

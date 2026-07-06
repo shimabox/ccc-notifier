@@ -1,0 +1,15 @@
+{
+  "permissions": { "defaultMode": "auto" },
+  "model": "claude-fable-5[1m]",
+  "hooks": {
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/notify-permission.sh" } ] }
+    ],
+    "SessionStart": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "bash '/home/user/.claude/hooks/state.sh' session", "timeout": 10 } ] }
+    ]
+  },
+  "statusLine": { "type": "command", "command": "~/.claude/statusline.py" },
+  "effortLevel": "high",
+  "unknownFutureKey": { "keep": true }
+}
