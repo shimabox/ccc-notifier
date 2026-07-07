@@ -40,6 +40,12 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Backfill uncounted history",
   },
   {
+    cmd: "mute [30m|2h|1d]",
+    ja: "通知を一時停止(期間省略で無期限。記録は続く)",
+    en: "Pause notifications (indefinitely if no duration; tracking continues)",
+  },
+  { cmd: "unmute", ja: "通知を再開", en: "Resume notifications" },
+  {
     cmd: "track",
     ja: "Stop hook から呼ばれる内部コマンド(手動実行は不要)",
     en: "Internal command invoked by the Stop hook (not for manual use)",
@@ -167,6 +173,14 @@ export async function main(argv: string[]): Promise<number> {
       case "sweep": {
         const { runSweep } = await import("./sweep");
         return await runSweep(rest);
+      }
+      case "mute": {
+        const { runMute } = await import("./mute");
+        return runMute(rest);
+      }
+      case "unmute": {
+        const { runUnmute } = await import("./mute");
+        return runUnmute();
       }
       case "--version":
       case "-v":

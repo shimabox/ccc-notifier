@@ -10,6 +10,7 @@ import {
   writeFileSync,
   appendFileSync,
   renameSync,
+  rmSync,
   statSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ export interface AcnPaths {
   cacheDir: string;
   errorLog: string;
   lastNotifyFile: string;
+  muteFile: string;
 }
 
 const ERROR_LOG_MAX_BYTES = 1024 * 1024; // 1MB
@@ -46,6 +48,7 @@ export function paths(): AcnPaths {
     cacheDir,
     errorLog: join(home, "error.log"),
     lastNotifyFile: join(home, "last-notify.json"),
+    muteFile: join(home, "muted.json"),
   };
 }
 
@@ -132,6 +135,56 @@ export function readConfig(): Config {
   }
 
   return mergeConfig(parsed);
+}
+
+// ---- 通知ミュート(muted.json) ----
+//
+// `acn mute` / `acn unmute` が管理する通知の一時停止状態。抑止するのは OS/Slack 通知のみで、
+// 履歴の記録・ダッシュボード再生成は止めない。config.json とは独立のマーカーファイルにする
+// ことで、ユーザーの config を CLI が書き換えない方針(readConfig のコメント参照)を保つ。
+
+/** muted.json の中身。until が null なら無期限、ISO 文字列なら期限付きミュート。 */
+export interface MuteState {
+  until: string | null;
+}
+
+/**
+ * muted.json を読む。ファイル不在 → null(ミュートなし)。
+ * 読み込み失敗・形が不正・until がパース不能な場合も null に倒す
+ * (壊れたファイルのせいで通知が止まりっぱなしになる事故を防ぐ側)。
+ */
+export function readMuteState(): MuteState | null {
+  const p = paths();
+  if (!existsSync(p.muteFile)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(p.muteFile, "utf8")) as unknown;
+    if (!isPlainObject(parsed) || !("until" in parsed)) return null;
+    const until = parsed.until;
+    if (until === null) return { until: null };
+    if (typeof until === "string" && !Number.isNaN(new Date(until).getTime())) {
+      return { until };
+    }
+    return null;
+  } catch (err) {
+    logError("readMuteState", err);
+    return null;
+  }
+}
+
+/** 現在ミュート中か。期限付きミュートは until を過ぎていたら false(ファイルは消さない)。 */
+export function isMuted(now: Date = new Date()): boolean {
+  const state = readMuteState();
+  if (state === null) return false;
+  if (state.until === null) return true;
+  return new Date(state.until).getTime() > now.getTime();
+}
+
+export function writeMuteState(state: MuteState): void {
+  writeFileSync(paths().muteFile, `${JSON.stringify(state)}\n`, "utf8");
+}
+
+export function clearMuteState(): void {
+  rmSync(paths().muteFile, { force: true });
 }
 
 /**

@@ -13,7 +13,8 @@ import { computeCost, loadPriceTable } from "./pricing";
 import { getUsdJpy } from "./fx";
 import { formatUSD } from "./format";
 import { notifyOS } from "./notify/os";
-import { paths, readConfig } from "./store";
+import { fmtMuteUntil } from "./mute";
+import { isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TurnRecord } from "./types";
 
@@ -286,6 +287,18 @@ async function checkFx(cfg: Config): Promise<boolean> {
 // ---- 6. テスト通知 ----
 async function checkNotification(cfg: Config): Promise<boolean> {
   try {
+    // ミュート中の見落とし(「通知が来ない!」)を防ぐため、状態を明示する。
+    // テスト通知自体はミュートの影響を受けずに送る(通知経路の診断が目的のため)。
+    if (isMuted()) {
+      const until = readMuteState()?.until;
+      log(
+        "warn",
+        until
+          ? `通知はミュート中です(${fmtMuteUntil(until)} まで)。再開は acn unmute`
+          : "通知はミュート中です(無期限)。再開は acn unmute",
+      );
+    }
+
     if (!cfg.notify.os) {
       log("warn", "notify.os が無効なため、テスト通知はスキップされました");
       return true;
