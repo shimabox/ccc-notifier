@@ -41,6 +41,14 @@ const MAX_SEEN_KEYS = 500;
 const SYNTHETIC_MODEL = "<synthetic>";
 const DAY_MS = 86_400_000;
 
+// 進行中セッション保護: mtime がこの時間以内の transcript は既定でスキップする(--include-active で解除)。
+// 理由: 応答完了と同時に sweep が走ると、hook(track)より先にそのターンを読み切ってカーソルを
+// 進めてしまい、track が「新規なし」で即 return → そのターンだけ通知・再生成が消える競合が起きる。
+// 進行中のセッションは応答のたびに mtime が更新されるため、「直近更新なし」を完了済みの近似とする。
+// スキップした分は次回 sweep か通常の hook が拾うので取りこぼしにはならない。
+const ACTIVE_GUARD_MIN = 5;
+const ACTIVE_GUARD_MS = ACTIVE_GUARD_MIN * 60_000;
+
 export interface SweepSummary {
   projects: number;
   transcripts: number;
@@ -50,6 +58,7 @@ export interface SweepSummary {
   totalJPY: number;
   subagentsUSD: number; // SA 回収額(別枠)。totalUSD / byModel はメイン基準のまま(SA を含めない)
   byModel: Record<string, number>;
+  skippedActive: number; // 進行中セッション保護でスキップした transcript 数(黙って落とさず必ず表示する)
   dryRun: boolean;
 }
 
@@ -485,14 +494,17 @@ interface SweepFlags {
   dryRun: boolean;
   days: number | null;
   projects: string | null;
+  includeActive: boolean; // 進行中セッション保護(mtime ガード)を無効化して全 transcript を対象にする
 }
 
 function parseSweepFlags(argv: string[]): SweepFlags {
-  const flags: SweepFlags = { dryRun: false, days: null, projects: null };
+  const flags: SweepFlags = { dryRun: false, days: null, projects: null, includeActive: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") {
       flags.dryRun = true;
+    } else if (a === "--include-active") {
+      flags.includeActive = true;
     } else if (a === "--days" || a.startsWith("--days=")) {
       const v = a.includes("=") ? a.slice("--days=".length) : argv[++i];
       const n = Number(v);
@@ -515,6 +527,20 @@ async function listProjectDirs(root: string): Promise<string[] | null> {
   }
 }
 
+/**
+ * 進行中セッション保護: transcript の mtime が ACTIVE_GUARD_MS 以内なら true。
+ * stat 失敗は false(= 従来どおり処理へ進め、read 時の防御に任せる)。
+ * 保護は「スキップ」側の追加ガードなので、判定不能時に処理を止めない側へ倒す。
+ */
+async function isRecentlyModified(path: string): Promise<boolean> {
+  try {
+    const st = await fsp.stat(path);
+    return Date.now() - st.mtimeMs < ACTIVE_GUARD_MS;
+  } catch {
+    return false;
+  }
+}
+
 /** プロジェクトディレクトリ直下の *.jsonl(1階層のみ・通常ファイル)を絶対パスで列挙する。 */
 async function listTranscripts(projectDir: string): Promise<string[]> {
   try {
@@ -534,6 +560,12 @@ function printSweepSummary(summary: SweepSummary, fx: FxResult): void {
   console.log(
     `走査: プロジェクト ${summary.projects} / transcript ${summary.transcripts} / サブエージェントファイル ${summary.agentFiles}`,
   );
+  if (summary.skippedActive > 0) {
+    console.log(
+      `スキップ: ${summary.skippedActive} transcript(直近${ACTIVE_GUARD_MIN}分以内に更新 = 進行中セッションの可能性)。` +
+        `セッション完了後に再実行するか、完了済みと分かっている場合は --include-active で取り込めます`,
+    );
+  }
 
   if (summary.newRecords === 0) {
     console.log("新規はありませんでした");
@@ -589,6 +621,7 @@ export async function runSweep(argv: string[]): Promise<number> {
     totalJPY: 0,
     subagentsUSD: 0,
     byModel: {},
+    skippedActive: 0,
     dryRun: flags.dryRun,
   };
 
@@ -598,6 +631,11 @@ export async function runSweep(argv: string[]): Promise<number> {
     const transcripts = await listTranscripts(projectDir);
     for (const mainPath of transcripts) {
       summary.transcripts += 1;
+      // 進行中セッション保護(冒頭の ACTIVE_GUARD_MS コメント参照)。カーソルも進めず丸ごと後回しにする。
+      if (!flags.includeActive && (await isRecentlyModified(mainPath))) {
+        summary.skippedActive += 1;
+        continue;
+      }
       try {
         await processTranscript(mainPath, table, fx, daysCutoff, flags.dryRun, summary);
       } catch (err) {

@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -467,10 +468,14 @@ describe("main sweep", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 
     mkdirSync(join(projectsRoot, "projA"), { recursive: true });
+    const t1 = join(projectsRoot, "projA", "t1.jsonl");
     copyFileSync(
       fileURLToPath(new URL("./fixtures/transcript-multiturn.jsonl", import.meta.url)),
-      join(projectsRoot, "projA", "t1.jsonl"),
+      t1,
     );
+    // コピー直後(mtime=現在)だと進行中セッション保護でスキップされるため、完了済みを模して古くする。
+    const aged = new Date(Date.now() - 10 * 60_000);
+    utimesSync(t1, aged, aged);
   });
 
   afterEach(() => {

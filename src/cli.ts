@@ -35,9 +35,9 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Generate and open the HTML dashboard",
   },
   {
-    cmd: "sweep [--dry-run] [--days N]",
-    ja: "過去の未計上分を一括で履歴に取り込む",
-    en: "Backfill uncounted history",
+    cmd: "sweep [--dry-run] [--days N] [--include-active]",
+    ja: "過去の未計上分を一括で履歴に取り込む(進行中セッションは自動スキップ)",
+    en: "Backfill uncounted history (active sessions are skipped)",
   },
   {
     cmd: "mute [30m|2h|1d]",

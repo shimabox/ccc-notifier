@@ -17,6 +17,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,13 +73,20 @@ afterEach(() => {
 
 // ---- helpers --------------------------------------------------------------
 
-/** projA/t1.jsonl(+ 任意で SA)を配置する。 */
+/**
+ * projA/t1.jsonl(+ 任意で SA)を配置する。
+ * mtime は 10 分前に戻す(コピー直後 = 現在 mtime のままだと進行中セッション保護で
+ * スキップされるため。「完了済みセッション」を模すのが既定)。
+ */
 function placeFixtures(opts: { withSA: boolean }): void {
+  const aged = new Date(Date.now() - 10 * 60_000);
   mkdirSync(join(projectsRoot, "projA"), { recursive: true });
   copyFileSync(FIXTURE_MULTITURN, mainPath);
+  utimesSync(mainPath, aged, aged);
   if (opts.withSA) {
     mkdirSync(join(projectsRoot, "projA", "t1", "subagents"), { recursive: true });
     copyFileSync(FIXTURE_SUBAGENT, saPath);
+    utimesSync(saPath, aged, aged);
   }
 }
 
@@ -308,5 +316,40 @@ describe("runSweep", () => {
     expect(saOnly.subagents).toBeDefined();
     expect(saOnly.subagents!.costUSD).toBeCloseTo(0.015, 10);
     expect(saOnly.subagents!.apiCalls).toBe(1);
+  });
+
+  // 8. 進行中セッション保護: mtime が直近の transcript は既定でスキップし、カーソルも進めない。
+  //    セッション完了後(mtime が古くなった後)の再実行では取りこぼしなく取り込まれる。
+  it("8. skips a recently-modified transcript (active-session guard) and ingests it later", async () => {
+    placeFixtures({ withSA: false });
+    const now = new Date();
+    utimesSync(mainPath, now, now); // 「今まさに書かれている」状態を模す
+
+    const first = await sweep([]);
+    expect(first.code).toBe(0);
+    expect(first.output).toContain("スキップ: 1 transcript");
+    expect(first.output).toContain("--include-active");
+    expect(readHistory()).toHaveLength(0);
+    expect(existsSync(cursorsFile())).toBe(false); // カーソル未更新 = hook の通知を奪わない
+
+    // セッション完了(mtime が古くなる)後は通常どおり全ターン取り込まれる。
+    const aged = new Date(Date.now() - 10 * 60_000);
+    utimesSync(mainPath, aged, aged);
+    const second = await sweep([]);
+    expect(second.output).toContain("2 ターン");
+    expect(readHistory()).toHaveLength(2);
+  });
+
+  // 9. --include-active はガードを解除して直近更新の transcript も取り込む。
+  it("9. --include-active ingests a recently-modified transcript", async () => {
+    placeFixtures({ withSA: false });
+    const now = new Date();
+    utimesSync(mainPath, now, now);
+
+    const { code, output } = await sweep(["--include-active"]);
+    expect(code).toBe(0);
+    expect(output).toContain("2 ターン");
+    expect(output).not.toContain("スキップ:");
+    expect(readHistory()).toHaveLength(2);
   });
 });

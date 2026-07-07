@@ -24,6 +24,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -173,7 +174,11 @@ function createSandbox(): Sandbox {
 
   const projectsDir = join(tmp, "claude-projects");
   mkdirSync(join(projectsDir, "proj"), { recursive: true });
-  copyFileSync(FIXTURE_TRANSCRIPT, join(projectsDir, "proj", "session.jsonl"));
+  const sweepTarget = join(projectsDir, "proj", "session.jsonl");
+  copyFileSync(FIXTURE_TRANSCRIPT, sweepTarget);
+  // コピー直後(mtime=現在)だと sweep の進行中セッション保護でスキップされるため、完了済みを模して古くする。
+  const aged = new Date(Date.now() - 10 * 60_000);
+  utimesSync(sweepTarget, aged, aged);
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
