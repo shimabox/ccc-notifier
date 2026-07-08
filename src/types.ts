@@ -83,6 +83,7 @@ export interface Config {
   costLabel: 'api_equivalent' | 'actual';  // 既定 'api_equivalent'
   fx: { fallbackRate: number; cacheHours: number }; // 既定 150 / 12
   includeDailyTotal: boolean;              // 既定 true
+  monthlyBudgetUSD: number;                // 月の予算(USD)。0 で無効(既定 0)。ダッシュボードで当月の使用率を表示する
   dashboard: {
     autoRegenerate: boolean;  // track 実行のたびに report.html を再生成する(既定 true)
     autoReloadSec: number;    // 生成 HTML の自動リロード間隔秒。0 で無効(既定 30)
@@ -96,6 +97,7 @@ export const DEFAULT_CONFIG: Config = {
   costLabel: 'api_equivalent',
   fx: { fallbackRate: 150, cacheHours: 12 },
   includeDailyTotal: true,
+  monthlyBudgetUSD: 0,
   dashboard: { autoRegenerate: true, autoReloadSec: 30, days: 30 },
 };
 

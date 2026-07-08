@@ -411,3 +411,49 @@ describe("runDashboard — サブエージェント (subagents)", () => {
     expect(t.md).not.toContain("+SA");
   });
 });
+
+describe("runDashboard — 月予算カード", () => {
+  function setBudget(usd: number): void {
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ monthlyBudgetUSD: usd }), "utf8");
+  }
+
+  // カードの有無はコンテナ #acn-budget で判定する(「月予算」の文字列は
+  // クライアント JS 内にも含まれるため、テキスト検索では判定できない)。
+  it("予算未設定(0)ならカード(#acn-budget)は出ない", async () => {
+    appendTurn(makeTurn({ costUSD: 10, costJPY: 1500 })); // 今月
+    await run(["--no-open"]);
+    expect(readHtml()).not.toContain('id="acn-budget"');
+  });
+
+  it("予算設定時: 当月使用額 / 予算 / 使用率% とバー幅(初期=当月)が出る", async () => {
+    // 今月 $124(=8×$15.5)。ダミーは ts 既定=now=今月。31% は緑(ok)。
+    for (let i = 0; i < 8; i++) appendTurn(makeTurn({ costUSD: 15.5, costJPY: 15.5 * 150 }));
+    setBudget(400);
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain('id="acn-budget"');
+    expect(html).toContain("<b>$124.00</b> / $400.00");
+    expect(html).toContain("31.0% used");
+    expect(html).toContain('budget-fill lvl-ok" style="width:31.0%');
+  });
+
+  it("70%以上100%未満は warn(黄)", async () => {
+    appendTurn(makeTurn({ costUSD: 300, costJPY: 45000 })); // 今月 $300 / $400 = 75%
+    setBudget(400);
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("75.0% used");
+    expect(html).toContain('budget-fill lvl-warn" style="width:75.0%');
+    expect(html).toContain('class="budget-pct lvl-warn"');
+  });
+
+  it("100%以上は over(赤)かつバー幅は 100% に頭打ち", async () => {
+    appendTurn(makeTurn({ costUSD: 500, costJPY: 75000 })); // 今月 $500 > 予算 $400
+    setBudget(400);
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("125.0% used");
+    expect(html).toContain('budget-fill lvl-over" style="width:100.0%');
+    expect(html).toContain('class="budget-pct lvl-over"');
+  });
+});

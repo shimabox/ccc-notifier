@@ -386,6 +386,17 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 .k1{background:var(--s1);} .k2{background:var(--s2);} .k3{background:var(--s3);} .k4{background:var(--s4);}
 .k5{background:var(--s5);} .k6{background:var(--s6);} .k7{background:var(--s7);} .k8{background:var(--s8);} .kother{background:var(--sother);}
 
+.budget-bar{height:12px; background:var(--plane); border:1px solid var(--border); border-radius:7px; overflow:hidden; margin:12px 0;}
+.budget-fill{height:100%; border-radius:6px; min-width:2px;}
+.budget-fill.lvl-ok{background:var(--s2);}
+.budget-fill.lvl-warn{background:var(--s3);}
+.budget-fill.lvl-over{background:var(--s6);}
+.budget-foot{display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; font-size:13px; color:var(--ink2);}
+.budget-foot b{color:var(--ink); font-weight:660; font-variant-numeric:tabular-nums;}
+.budget-pct{font-variant-numeric:tabular-nums; font-weight:640;}
+.budget-pct.lvl-warn{color:var(--s3);}
+.budget-pct.lvl-over{color:var(--s6);}
+
 .chart{height:auto; display:block;}
 .chart-scroll{overflow-x:auto;}
 .seg.s1{fill:var(--s1);} .seg.s2{fill:var(--s2);} .seg.s3{fill:var(--s3);} .seg.s4{fill:var(--s4);}
@@ -787,6 +798,61 @@ const APP_JS = `<script>
     projEl.appendChild(table);
   }
 
+  // ---- 月予算(選択中の月に連動)----
+  var budgetEl = document.getElementById('acn-budget');
+  var BUDGET = +data.budget || 0;
+  var BUDGET_RATE = +data.budgetRate || 0;
+  function monthKeyOf(t){ var d = new Date(t); if(isNaN(d.getTime())) return null; return d.getFullYear() + '-' + pad(d.getMonth()+1); }
+  // 予算は「月」単位。選択中バケットが属する暦月を対象にする(通算のときは今月)。
+  function targetMonthKey(){
+    if(SEL === null) return monthKeyOf(Date.now());
+    if(GRAN === 'month') return SEL;      // 既に YYYY-MM
+    return SEL.slice(0, 7);               // YYYY-MM-DD -> YYYY-MM
+  }
+  function renderBudget(){
+    if(!budgetEl || !(BUDGET > 0)) return;
+    var mk = targetMonthKey();
+    var usd = 0, jpy = 0;
+    for(var i=0;i<turns.length;i++){
+      var tn = turns[i];
+      if(monthKeyOf(tn.t) !== mk) continue;
+      var bs = tn.bs || {}, fx = tn.fx || 0;
+      for(var s in bs){ if(bs.hasOwnProperty(s)){ usd += bs[s]; jpy += bs[s]*fx; } }
+    }
+    var pct = BUDGET > 0 ? (usd / BUDGET) * 100 : 0;
+    var width = Math.max(0, Math.min(100, pct));
+    var level = pct >= 100 ? 'over' : pct >= 70 ? 'warn' : 'ok';
+    var budgetJpy = BUDGET * BUDGET_RATE;
+    var curMonth = monthKeyOf(Date.now());
+    var monthShort = (mk === curMonth) ? '今月' : mk;
+
+    clearNode(budgetEl);
+    var h = document.createElement('h2');
+    h.textContent = '月予算 / Monthly budget';
+    var sub = document.createElement('span'); sub.className = 'stat-sub';
+    sub.textContent = ' ' + mk + (mk === curMonth ? '(今月)' : '');
+    h.appendChild(sub);
+    budgetEl.appendChild(h);
+
+    var bar = document.createElement('div'); bar.className = 'budget-bar';
+    var fill = document.createElement('div'); fill.className = 'budget-fill lvl-' + level;
+    fill.style.width = width.toFixed(1) + '%';
+    bar.appendChild(fill); budgetEl.appendChild(bar);
+
+    var foot = document.createElement('div'); foot.className = 'budget-foot';
+    var left = document.createElement('span');
+    left.appendChild(document.createTextNode(monthShort + ' '));
+    var b = document.createElement('b'); b.textContent = formatUSD(usd); left.appendChild(b);
+    left.appendChild(document.createTextNode(' / ' + formatUSD(BUDGET) + ' '));
+    var mut = document.createElement('span'); mut.className = 'muted';
+    mut.textContent = '(' + formatJPY(jpy) + ' / ' + formatJPY(budgetJpy) + ')';
+    left.appendChild(mut);
+    var pctEl = document.createElement('span'); pctEl.className = 'budget-pct lvl-' + level;
+    pctEl.textContent = pct.toFixed(1) + '% used';
+    foot.appendChild(left); foot.appendChild(pctEl);
+    budgetEl.appendChild(foot);
+  }
+
   // ---- ターン履歴 ----
   // 全期間だと数千行になりページが極端に長く・重くなるため、DOM 描画は最大 HIST_CAP 件に抑える。
   // 検索は選択中の全ターンを対象にし、一致件数を件数表示に出す(先頭 HIST_CAP 件だけ描画)。
@@ -879,6 +945,7 @@ const APP_JS = `<script>
   function render(){
     var sub = turnsInSelection();
     renderChart();
+    renderBudget();
     renderByModel(sub);
     renderByProject(sub);
     renderHistory(sub);
@@ -932,6 +999,30 @@ function renderLegend(slots: SlotDef[]): string {
   return `<div class="legend">${items}</div>`;
 }
 
+/**
+ * 月予算カード。budgetUSD が 0 以下(未設定)なら空文字。
+ * 当月(暦月)の使用額 / 予算 / 使用率(%)を、しきい値で色分けしたプログレスバーで表示する。
+ */
+function budgetCard(budgetUSD: number, month: PeriodTotals, fallbackRate: number): string {
+  if (!(budgetUSD > 0)) return "";
+  const pct = (month.usd / budgetUSD) * 100;
+  const width = Math.max(0, Math.min(100, pct));
+  const level = pct >= 100 ? "over" : pct >= 70 ? "warn" : "ok";
+  const budgetJpy = budgetUSD * fallbackRate;
+  // サーバは初期表示(当月)を描画し、ブラウザ側が選択中の月に合わせて #acn-budget を差し替える。
+  return (
+    `<section class="card" id="acn-budget">` +
+    `<h2>月予算 / Monthly budget<span class="stat-sub"> 今月(暦月)</span></h2>` +
+    `<div class="budget-bar"><div class="budget-fill lvl-${level}" style="width:${width.toFixed(1)}%"></div></div>` +
+    `<div class="budget-foot">` +
+    `<span>今月 <b>${esc(formatUSD(month.usd))}</b> / ${esc(formatUSD(budgetUSD))} ` +
+    `<span class="muted">(${esc(formatJPY(month.jpy))} / ${esc(formatJPY(budgetJpy))})</span></span>` +
+    `<span class="budget-pct lvl-${level}">${pct.toFixed(1)}% used</span>` +
+    `</div>` +
+    `</section>`
+  );
+}
+
 // ============ フルページ組み立て ============
 
 function escapeJsonForScript(json: string): string {
@@ -948,6 +1039,8 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
 
   const map = computeSlotMap(turns);
   const kpi = computeKpis(turns);
+  const cfg = readConfig();
+  const budgetUSD = cfg.monthlyBudgetUSD;
   const turnsEmbed = turns.map((rec) => buildTurnEmbed(rec, map));
   const anyTruncated = turnsEmbed.some((t) => t.tr);
   const anySub = turns.some((r) => r.subagents);
@@ -974,7 +1067,14 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
       ? `${dateKeyOf(new Date(minMs))} 〜 ${dateKeyOf(new Date(maxMs))}`
       : "—";
 
-  const embed = { version, generatedAt, slots: map.slots, turns: turnsEmbed };
+  const embed = {
+    version,
+    generatedAt,
+    slots: map.slots,
+    turns: turnsEmbed,
+    budget: budgetUSD,
+    budgetRate: cfg.fx.fallbackRate,
+  };
   const dataJson = escapeJsonForScript(JSON.stringify(embed));
 
   const reloadSec =
@@ -1047,6 +1147,9 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     statCard("通算", "全期間", kpi.all) +
     `</div>`;
 
+  // ---- 月予算(設定時のみ)----
+  const budgetSection = budgetCard(budgetUSD, kpi.month, cfg.fx.fallbackRate);
+
   // ---- 日別コスト(粒度切替・選択・通算) ----
   const chartSection =
     `<section class="card">` +
@@ -1100,7 +1203,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `</tr></thead><tbody id="turn-body"></tbody></table></div>` +
     `</section>`;
 
-  return head + header + kpiSection + chartSection + breakdownSection + historySection + foot;
+  return head + header + kpiSection + budgetSection + chartSection + breakdownSection + historySection + foot;
 }
 
 // ============ ブラウザ起動 ============
