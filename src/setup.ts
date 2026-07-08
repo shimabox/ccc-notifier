@@ -318,8 +318,8 @@ export async function runInit(argv: string[]): Promise<number> {
       message: "通知チャネルを選択してください",
       options: [
         { value: "os", label: "OS 通知のみ" },
-        { value: "both", label: "OS 通知 + Slack" },
         { value: "slack", label: "Slack のみ(OS 通知なし)" },
+        { value: "both", label: "OS 通知 + Slack" },
       ],
       initialValue: "os",
     });
