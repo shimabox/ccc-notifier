@@ -57,9 +57,9 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
 const CMD_COLUMN_WIDTH = Math.max(...COMMANDS.map((c) => c.cmd.length)) + 2;
 
 const HELP_TEXT = [
-  "agent-cost-notifier (acn) — Claude Code のプロンプトごとのコスト通知 / per-prompt cost notifier for Claude Code",
+  "ccc-notifier(Claude Code Cost notifier)— Claude Code のプロンプトごとのコスト通知 / per-prompt cost notifier for Claude Code",
   "",
-  "使い方 / Usage: acn <command> [options]",
+  "使い方 / Usage: ccc-notifier <command> [options]",
   "",
   ...COMMANDS.map((c) => `  ${c.cmd.padEnd(CMD_COLUMN_WIDTH)}${c.ja} / ${c.en}`),
 ].join("\n");
@@ -199,7 +199,7 @@ export async function main(argv: string[]): Promise<number> {
   } catch (err) {
     // main(): Promise<number> は決して reject しない契約とする。
     console.error(
-      `agent-cost-notifier: unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+      `ccc-notifier: unexpected error: ${err instanceof Error ? err.message : String(err)}`,
     );
     return 1;
   }

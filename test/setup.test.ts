@@ -14,7 +14,7 @@ import { runInit, runUninstall } from "../src/setup";
 
 // ============ 実ホーム保護 ============
 // すべてのテストで ACN_CLAUDE_SETTINGS / ACN_HOME / ACN_CLI_PATH / ACN_DRY_RUN を一時値に固定する。
-// これにより「環境変数を設定し忘れた経路」から実ホーム(~/.claude や ~/.agent-cost-notifier)へ
+// これにより「環境変数を設定し忘れた経路」から実ホーム(~/.claude や ~/.ccc-notifier)へ
 // 書き込む余地を無くす。settingsPath() / paths() / resolveCliPath() は呼び出しのたびに env を評価する。
 
 let tmpDir: string;
@@ -22,9 +22,9 @@ let settingsFile: string;
 let homeDir: string;
 let cliPath: string;
 
-// 識別マーカー "agent-cost-notifier" を含む CLI パス(生成 command に marker が載る前提)。
+// 識別マーカー "ccc-notifier" を含む CLI パス(生成 command に marker が載る前提)。
 function cliUnder(dir: string, name = "cli.js"): string {
-  return join(dir, "node_modules", "agent-cost-notifier", "dist", name);
+  return join(dir, "node_modules", "ccc-notifier", "dist", name);
 }
 
 function fixtureRaw(): string {
@@ -92,7 +92,7 @@ describe("runInit — 既存設定の完全保持", () => {
     expect(after.hooks.Stop).toHaveLength(1);
     const hook = after.hooks.Stop[0].hooks[0];
     expect(hook.type).toBe("command");
-    expect(hook.command).toContain("agent-cost-notifier");
+    expect(hook.command).toContain("ccc-notifier");
     expect(hook.command).toContain("track");
     expect(hook.timeout).toBe(15);
 
@@ -153,7 +153,7 @@ describe("runInit — settings 不在", () => {
     expect(Object.keys(created)).toEqual(["hooks"]);
     expect(Object.keys(created.hooks)).toEqual(["Stop"]);
     expect(created.hooks.Stop).toHaveLength(1);
-    expect(stopCommand(created)).toContain("agent-cost-notifier");
+    expect(stopCommand(created)).toContain("ccc-notifier");
 
     expect(backupsInTmp()).toHaveLength(0);
   });
@@ -261,14 +261,14 @@ describe("runInit — win32 のパス正規化", () => {
     const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
-      const winCli = "C:\\Users\\me\\node_modules\\agent-cost-notifier\\dist\\cli.js";
+      const winCli = "C:\\Users\\me\\node_modules\\ccc-notifier\\dist\\cli.js";
       process.env.ACN_CLI_PATH = winCli;
 
       const code = await runInit(["--yes", "--os-only"]);
       expect(code).toBe(0);
 
       const command = stopCommand(readSettings());
-      expect(command).toContain('"C:/Users/me/node_modules/agent-cost-notifier/dist/cli.js"');
+      expect(command).toContain('"C:/Users/me/node_modules/ccc-notifier/dist/cli.js"');
       expect(command).not.toContain("\\");
       expect(command.startsWith('"')).toBe(true);
       expect(command.endsWith("track")).toBe(true);

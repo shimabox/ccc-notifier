@@ -14,6 +14,7 @@ import { getUsdJpy } from "./fx";
 import { formatUSD } from "./format";
 import { notifyOS } from "./notify/os";
 import { fmtMuteUntil } from "./mute";
+import { matchesMarker } from "./setup";
 import { isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TurnRecord } from "./types";
@@ -64,11 +65,11 @@ function tokenizeCommand(command: string): string[] {
 /** hook コマンド文字列からスクリプトパスらしきトークンを推定する。見つからなければ null。 */
 function extractScriptPath(command: string): string | null {
   const tokens = tokenizeCommand(command).filter((t) => t.length > 0);
-  const markerJs = tokens.find((t) => t.endsWith(".js") && t.includes("agent-cost-notifier"));
+  const markerJs = tokens.find((t) => t.endsWith(".js") && matchesMarker(t));
   if (markerJs) return markerJs;
   const anyJs = tokens.find((t) => t.endsWith(".js"));
   if (anyJs) return anyJs;
-  const marker = tokens.find((t) => t.includes("agent-cost-notifier"));
+  const marker = tokens.find((t) => matchesMarker(t));
   return marker ?? null;
 }
 
@@ -114,7 +115,7 @@ async function checkHookRegistration(): Promise<boolean> {
       const innerHooks = entry.hooks;
       if (!Array.isArray(innerHooks)) continue;
       for (const h of innerHooks) {
-        if (isRecord(h) && typeof h.command === "string" && h.command.includes("agent-cost-notifier")) {
+        if (isRecord(h) && typeof h.command === "string" && matchesMarker(h.command)) {
           matchedCommands.push(h.command);
         }
       }
@@ -122,7 +123,7 @@ async function checkHookRegistration(): Promise<boolean> {
   }
 
   if (matchedCommands.length === 0) {
-    log("fail", "hooks.Stop に agent-cost-notifier のエントリが見つかりません(init を実行してください)");
+    log("fail", "hooks.Stop に ccc-notifier のエントリが見つかりません(init を実行してください)");
     return false;
   }
 
@@ -131,7 +132,7 @@ async function checkHookRegistration(): Promise<boolean> {
   // (npm 未公開でも npx がローカル node_modules/.bin を拾って動くことがあり紛らわしいため)。
   log(
     "ok",
-    `hooks.Stop に agent-cost-notifier のエントリが登録されています(${matchedCommands.length}件): ${matchedCommands.join(" / ")}`,
+    `hooks.Stop に ccc-notifier のエントリが登録されています(${matchedCommands.length}件): ${matchedCommands.join(" / ")}`,
   );
 
   let allScriptsExist = true;
@@ -300,8 +301,8 @@ async function checkNotification(cfg: Config): Promise<boolean> {
       log(
         "warn",
         until
-          ? `通知はミュート中です(${fmtMuteUntil(until)} まで)。再開は acn unmute`
-          : "通知はミュート中です(無期限)。再開は acn unmute",
+          ? `通知はミュート中です(${fmtMuteUntil(until)} まで)。再開は ccc-notifier unmute`
+          : "通知はミュート中です(無期限)。再開は ccc-notifier unmute",
       );
     }
 

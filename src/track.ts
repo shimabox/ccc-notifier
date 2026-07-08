@@ -170,7 +170,7 @@ export async function runTrack(stdinText: string): Promise<void> {
 
     // 8. 後処理を「互いに独立なタスク」として集め、allSettled でまとめて待つ。どれか1つが
     //    失敗しても他は止まらない(通知 ↔ 再生成 も相互に独立)。
-    //    - 通知(OS / Slack): しきい値 minNotifyUSD 以上、かつミュート中(acn mute)でない
+    //    - 通知(OS / Slack): しきい値 minNotifyUSD 以上、かつミュート中(ccc-notifier mute)でない
     //      ときのみ。ミュートは通知だけを抑止し、記録・再生成には影響しない。todayUSD は
     //      append 後に集計するため当該ターンを含む。どちらも throw しない契約。
     //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。履歴が更新された以上、

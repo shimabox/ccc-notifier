@@ -1,4 +1,4 @@
-// src/mute.ts — `acn mute` / `acn unmute`(通知の一時停止・再開)
+// src/mute.ts — `ccc-notifier mute` / `ccc-notifier unmute`(通知の一時停止・再開)
 //
 // 抑止するのは OS/Slack 通知のみ。track の履歴記録・ダッシュボード再生成は止めない
 // (「静かにしてほしいが計上は続けたい」が典型ユースケースのため)。
@@ -29,8 +29,8 @@ export function runMute(args: string[]): number {
 
   if (duration === undefined) {
     writeMuteState({ until: null });
-    console.log("通知を停止しました(無期限)。再開するには acn unmute を実行してください。");
-    console.log("Notifications muted indefinitely. Run `acn unmute` to resume.");
+    console.log("通知を停止しました(無期限)。再開するには ccc-notifier unmute を実行してください。");
+    console.log("Notifications muted indefinitely. Run `ccc-notifier unmute` to resume.");
     console.log("※ コストの記録・ダッシュボード更新は続きます / cost tracking continues.");
     return 0;
   }

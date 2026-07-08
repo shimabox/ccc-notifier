@@ -270,7 +270,7 @@ describe("runTrack", () => {
     const report = join(tmpHome, "report.html");
     expect(existsSync(report)).toBe(true);
     const html = readFileSync(report, "utf8");
-    expect(html).toContain("agent-cost-notifier");
+    expect(html).toContain("ccc-notifier");
     // 既定 autoReloadSec=30 の meta refresh が入っている(開きっぱなしのタブが最新化される)。
     expect(html).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
   });

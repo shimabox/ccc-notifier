@@ -1,14 +1,14 @@
 {
-  "name": "agent-cost-notifier",
+  "name": "ccc-notifier",
   "version": "0.1.0",
-  "description": "Per-prompt cost notifier for Claude Code (USD/JPY) with local history and HTML dashboard",
+  "description": "Claude Code Cost notifier: per-prompt cost notifications (USD/JPY) with local history and HTML dashboard",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "agent-cost-notifier": "dist/cli.js",
-    "acn": "dist/cli.js"
+    "ccc-notifier": "dist/cli.js",
+    "ccc": "dist/cli.js"
   },
   "files": [
     "dist"

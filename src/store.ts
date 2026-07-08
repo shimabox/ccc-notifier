@@ -36,7 +36,7 @@ const ERROR_LOG_MAX_BYTES = 1024 * 1024; // 1MB
  * - home / cacheDir はここで冪等に mkdirSync(recursive) しておく。
  */
 export function paths(): AcnPaths {
-  const home = process.env.ACN_HOME || join(homedir(), ".agent-cost-notifier");
+  const home = process.env.ACN_HOME || join(homedir(), ".ccc-notifier");
   const cacheDir = join(home, "cache");
   mkdirSync(home, { recursive: true });
   mkdirSync(cacheDir, { recursive: true });

@@ -110,7 +110,7 @@ function runCli(args: string[], opts: { env: NodeJS.ProcessEnv; stdin?: string }
 // ============ サンドボックス ============
 // 各テストで ACN_HOME・fixture transcript のコピー・settings.json のコピー・
 // ACN_CLAUDE_PROJECTS 用ディレクトリを一時領域に作り直す。実ホーム
-// (~/.claude や ~/.agent-cost-notifier)には一切触れない。
+// (~/.claude や ~/.ccc-notifier)には一切触れない。
 
 interface Sandbox {
   tmp: string;
@@ -291,7 +291,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const reportPath = join(sb.acnHome, "report.html");
     expect(existsSync(reportPath)).toBe(true);
     const reportHtml = readFileSync(reportPath, "utf8");
-    expect(reportHtml).toContain("agent-cost-notifier");
+    expect(reportHtml).toContain("ccc-notifier");
     // 既定 autoReloadSec=30 の meta refresh(開くたびに最新へ近づくダッシュボード)。
     expect(reportHtml).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
   });
@@ -408,7 +408,8 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(Array.isArray(afterInit1.hooks.Stop)).toBe(true);
     expect(afterInit1.hooks.Stop).toHaveLength(1);
     const hookEntry = afterInit1.hooks.Stop[0].hooks[0];
-    expect(hookEntry.command).toContain("agent-cost-notifier");
+    // フォルダ名(ブランド名)に依存させず、実際にビルドされた dist/cli.js のパスで検証する。
+    expect(hookEntry.command).toContain(CLI_PATH);
     expect(hookEntry.command).toContain("track");
 
     // 既存キーは deep-equal で不変。

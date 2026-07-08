@@ -340,12 +340,12 @@ describe("runDoctor", () => {
 
     // hook コマンドが指すスクリプトパスとして実在するダミーファイルを用意する
     // (script path 存在チェックが ⚠️ にならず ✅ になることを確認するため)。
-    const scriptDir = join(tmpHome, "agent-cost-notifier-dist");
+    const scriptDir = join(tmpHome, "ccc-notifier-dist");
     mkdirSync(scriptDir, { recursive: true });
     const scriptPath = join(scriptDir, "cli.js");
     writeFileSync(scriptPath, "", "utf8");
 
-    // settings-existing.json フィクスチャのコピーに agent-cost-notifier を含む Stop エントリを足したもの
+    // settings-existing.json フィクスチャのコピーに ccc-notifier を含む Stop エントリを足したもの
     const rawFixture = readFileSync(
       fileURLToPath(new URL("./fixtures/settings-existing.json", import.meta.url)),
       "utf8",
@@ -425,7 +425,7 @@ describe("runDoctor", () => {
 
   it("hook の第1トークンが存在しない絶対パスの Node なら ⚠️ を出すが ❌ にせず 0 を返す", async () => {
     // scriptPath は beforeEach が実在させたダミー(存在チェックは ✅ のまま)。第1トークンだけ無効化。
-    const scriptPath = join(tmpHome, "agent-cost-notifier-dist", "cli.js");
+    const scriptPath = join(tmpHome, "ccc-notifier-dist", "cli.js");
     const p = writeSettingsWithCommand(
       "settings-nodepath.json",
       `"/no/such/mise/node/bin/node" "${scriptPath}" track`,
@@ -441,7 +441,7 @@ describe("runDoctor", () => {
   });
 
   it("hook の第1トークンがベア名 'node' なら Node 実行パス警告を出さない", async () => {
-    const scriptPath = join(tmpHome, "agent-cost-notifier-dist", "cli.js");
+    const scriptPath = join(tmpHome, "ccc-notifier-dist", "cli.js");
     const p = writeSettingsWithCommand("settings-barenode.json", `node "${scriptPath}" track`);
     process.env.ACN_CLAUDE_SETTINGS = p;
 

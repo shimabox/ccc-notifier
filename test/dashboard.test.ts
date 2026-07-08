@@ -254,7 +254,7 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
     const html = readHtml();
     expect(html.startsWith("<!doctype html>")).toBe(true);
-    expect(html).toContain("agent-cost-notifier");
+    expect(html).toContain("ccc-notifier");
   });
 
   it("2. #acn-data をパースでき、合計 costUSD が seed 合計と一致する", async () => {
@@ -361,7 +361,7 @@ describe("runDashboard — フラグ", () => {
     expect(code).toBe(0);
     expect(existsSync(out)).toBe(true);
     expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
-    expect(readHtml(out)).toContain("agent-cost-notifier");
+    expect(readHtml(out)).toContain("ccc-notifier");
   });
 
   it("7b. --days フィルタで窓の外の古いレコードは #acn-data に含まれない", async () => {

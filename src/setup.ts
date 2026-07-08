@@ -24,8 +24,8 @@ import type { TurnRecord } from "./types";
 import { paths, readConfig } from "./store";
 import { notifyOS } from "./notify/os";
 
-// 本ツールの hook エントリの識別マーカー: command 文字列にこれを含む Stop エントリ。
-const HOOK_MARKER = "agent-cost-notifier";
+// 本ツールの hook エントリの識別マーカー: command 文字列にこれを含む Stop エントリを「自分のもの」とみなす。
+const HOOK_MARKER = "ccc-notifier";
 const HOOK_TIMEOUT = 15;
 const SLACK_PROMPT_CHARS = 100;
 
@@ -66,13 +66,18 @@ function buildHookCommand(): string {
   return `"${nodePath}" "${cliPath}" track`;
 }
 
-/** Stop エントリ(マッチャーグループ)が本ツールのものか判定する(いずれかの hook が marker を含むか)。 */
+/** command 文字列がマーカーを含むか。doctor.ts の hook 検出とも共有する。 */
+export function matchesMarker(command: string): boolean {
+  return command.includes(HOOK_MARKER);
+}
+
+/** Stop エントリ(マッチャーグループ)が本ツールのものか判定する(いずれかの hook がマーカーを含むか)。 */
 function isOurStopEntry(entry: unknown): boolean {
   if (!isPlainObject(entry)) return false;
   const hooks = entry.hooks;
   if (!Array.isArray(hooks)) return false;
   return hooks.some(
-    (h) => isPlainObject(h) && typeof h.command === "string" && h.command.includes(HOOK_MARKER),
+    (h) => isPlainObject(h) && typeof h.command === "string" && matchesMarker(h.command),
   );
 }
 
@@ -220,7 +225,7 @@ function mergeSettings(sPath: string, command: string): SettingsWriteResult {
     const entry = stop[idx] as Record<string, unknown>;
     const entryHooks = entry.hooks as unknown[];
     for (const h of entryHooks) {
-      if (isPlainObject(h) && typeof h.command === "string" && h.command.includes(HOOK_MARKER)) {
+      if (isPlainObject(h) && typeof h.command === "string" && matchesMarker(h.command)) {
         h.command = command;
         h.timeout = HOOK_TIMEOUT;
       }
@@ -270,7 +275,7 @@ export async function runInit(argv: string[]): Promise<number> {
     }
   } else {
     // 対話モード。isCancel を必ず処理し、キャンセル時は何も書かずに exit 1。
-    p.intro("agent-cost-notifier セットアップ");
+    p.intro("ccc-notifier セットアップ");
 
     const channel = await p.select<string>({
       message: "通知チャネルを選択してください",
@@ -363,7 +368,7 @@ export async function runInit(argv: string[]): Promise<number> {
       : "  (settings.json を新規作成したためバックアップはありません)",
   );
   console.log(`  設定ファイル: ${acn.configFile}`);
-  console.log("Claude Code で何か実行すると通知が届きます。確認: npx agent-cost-notifier doctor");
+  console.log("Claude Code で何か実行すると通知が届きます。確認: npx ccc-notifier doctor");
   return 0;
 }
 

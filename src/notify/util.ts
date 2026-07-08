@@ -9,10 +9,10 @@ import { join } from "node:path";
 
 /**
  * データディレクトリのパスを返す。存在しなければ作成する(mkdir -p 相当)。
- * ACN_HOME 環境変数があればそれを優先。既定は ~/.agent-cost-notifier。
+ * ACN_HOME 環境変数があればそれを優先。既定は ~/.ccc-notifier。
  */
 export function acnHome(): string {
-  const home = process.env.ACN_HOME || join(homedir(), ".agent-cost-notifier");
+  const home = process.env.ACN_HOME || join(homedir(), ".ccc-notifier");
   try {
     mkdirSync(home, { recursive: true });
   } catch {

@@ -1147,13 +1147,13 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<meta name="color-scheme" content="light dark">` +
     refreshMeta +
-    `<title>agent-cost-notifier ダッシュボード</title>` +
+    `<title>ccc-notifier ダッシュボード</title>` +
     STYLE +
     `</head><body><div class="wrap">`;
 
   const foot =
     autoUpdateFoot +
-    `<div class="foot">agent-cost-notifier v${esc(version)} · データはローカルのみ / all data stays local</div>` +
+    `<div class="foot">ccc-notifier v${esc(version)} · データはローカルのみ / all data stays local</div>` +
     `</div>` +
     `<div id="acn-tip" class="acn-tip" hidden></div>` +
     `<script id="acn-data" type="application/json">${dataJson}</script>` +
@@ -1164,7 +1164,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   if (turns.length === 0) {
     const header =
       `<div class="head"><div>` +
-      `<h1>agent-cost-notifier ダッシュボード</h1>` +
+      `<h1>ccc-notifier ダッシュボード</h1>` +
       `<div class="sub">${esc(period)} · 生成 ${esc(generatedAt)}</div>` +
       `</div></div>`;
     const empty =
@@ -1180,7 +1180,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   const header =
     `<div class="head">` +
     `<div>` +
-    `<h1>agent-cost-notifier ダッシュボード</h1>` +
+    `<h1>ccc-notifier ダッシュボード</h1>` +
     `<div class="sub">${esc(period)}<span class="muted"> · ${esc(rangeText)}</span></div>` +
     `<div class="sub muted">生成 ${esc(generatedAt)} / generated</div>` +
     `</div>` +
