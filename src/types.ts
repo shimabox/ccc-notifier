@@ -1,7 +1,7 @@
 // ============ 環境変数(テスト・サンドボックス用) ============
-// ACN_HOME            : データディレクトリ上書き(既定 ~/.ccc-notifier)
-// ACN_CLAUDE_SETTINGS : Claude settings.json パス上書き(既定 ~/.claude/settings.json)
-// ACN_DRY_RUN=1       : 通知を実送信せず、送信ペイロードを ACN_HOME/last-notify.json に書く
+// CCCN_HOME            : データディレクトリ上書き(既定 ~/.ccc-notifier)
+// CCCN_CLAUDE_SETTINGS : Claude settings.json パス上書き(既定 ~/.claude/settings.json)
+// CCCN_DRY_RUN=1       : 通知を実送信せず、送信ペイロードを CCCN_HOME/last-notify.json に書く
 
 export interface TokenBuckets {
   input: number;        // usage.input_tokens

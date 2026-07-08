@@ -27,12 +27,12 @@ import type { Cursor, TurnRecord } from "../src/types";
 let tmpHome: string;
 
 beforeEach(() => {
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-store-test-"));
-  process.env.ACN_HOME = tmpHome;
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-store-test-"));
+  process.env.CCCN_HOME = tmpHome;
 });
 
 afterEach(() => {
-  delete process.env.ACN_HOME;
+  delete process.env.CCCN_HOME;
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
@@ -67,9 +67,9 @@ function makeCursor(overrides: Partial<Cursor> = {}): Cursor {
 }
 
 describe("paths", () => {
-  it("ACN_HOME を反映してディレクトリを自動作成し、呼び出しのたびに評価する", () => {
+  it("CCCN_HOME を反映してディレクトリを自動作成し、呼び出しのたびに評価する", () => {
     const nestedHome = join(tmpHome, "nested", "home");
-    process.env.ACN_HOME = nestedHome;
+    process.env.CCCN_HOME = nestedHome;
     expect(existsSync(nestedHome)).toBe(false);
 
     const p = paths();
@@ -88,9 +88,9 @@ describe("paths", () => {
     expect(() => paths()).not.toThrow();
 
     // env を変えると、モジュールロード時ではなく呼び出し時に再評価される
-    const otherHome = mkdtempSync(join(tmpdir(), "acn-store-test-other-"));
+    const otherHome = mkdtempSync(join(tmpdir(), "cccn-store-test-other-"));
     try {
-      process.env.ACN_HOME = otherHome;
+      process.env.CCCN_HOME = otherHome;
       const p2 = paths();
       expect(p2.home).toBe(otherHome);
       expect(p2.home).not.toBe(p.home);

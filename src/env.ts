@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 
 /**
  * WSL 上で動作しているか。
- * - ACN_FORCE_WSL=1/0 が最優先(テスト・強制切替用の上書き)。
+ * - CCCN_FORCE_WSL=1/0 が最優先(テスト・強制切替用の上書き)。
  * - process.platform が linux 以外なら false。
  * - WSL は必ず WSL_DISTRO_NAME を設定するため、まずこれを見る。
  * - 予備として /proc/version の "microsoft"/"wsl" 文字列を確認する。
@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
  * (WSL では WSL_DISTRO_NAME で即決、それ以外でも /proc/version は memory-backed)。
  */
 export function isWSL(): boolean {
-  const forced = process.env.ACN_FORCE_WSL;
+  const forced = process.env.CCCN_FORCE_WSL;
   if (forced === "1") return true;
   if (forced === "0") return false;
 

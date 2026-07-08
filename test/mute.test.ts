@@ -1,4 +1,4 @@
-// test/mute.test.ts — 通知ミュート(acn mute / unmute)のユニット + track 統合テスト。
+// test/mute.test.ts — 通知ミュート(cccn mute / unmute)のユニット + track 統合テスト。
 //
 // 観点:
 //   - mute/unmute が muted.json を正しく作成・削除する
@@ -24,12 +24,12 @@ let prevHome: string | undefined;
 let prevDryRun: string | undefined;
 
 beforeEach(() => {
-  prevHome = process.env.ACN_HOME;
-  prevDryRun = process.env.ACN_DRY_RUN;
+  prevHome = process.env.CCCN_HOME;
+  prevDryRun = process.env.CCCN_DRY_RUN;
 
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-mute-test-"));
-  process.env.ACN_HOME = tmpHome;
-  process.env.ACN_DRY_RUN = "1";
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-mute-test-"));
+  process.env.CCCN_HOME = tmpHome;
+  process.env.CCCN_DRY_RUN = "1";
 
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -41,10 +41,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
 
-  if (prevHome === undefined) delete process.env.ACN_HOME;
-  else process.env.ACN_HOME = prevHome;
-  if (prevDryRun === undefined) delete process.env.ACN_DRY_RUN;
-  else process.env.ACN_DRY_RUN = prevDryRun;
+  if (prevHome === undefined) delete process.env.CCCN_HOME;
+  else process.env.CCCN_HOME = prevHome;
+  if (prevDryRun === undefined) delete process.env.CCCN_DRY_RUN;
+  else process.env.CCCN_DRY_RUN = prevDryRun;
 });
 
 function muteFile(): string {

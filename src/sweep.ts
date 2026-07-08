@@ -487,7 +487,7 @@ async function processTranscript(
 
 function projectsRoot(override: string | null): string {
   if (override) return override;
-  return process.env.ACN_CLAUDE_PROJECTS || join(homedir(), ".claude", "projects");
+  return process.env.CCCN_CLAUDE_PROJECTS || join(homedir(), ".claude", "projects");
 }
 
 interface SweepFlags {

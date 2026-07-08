@@ -56,15 +56,15 @@ function run(argv: string[]): number {
 }
 
 beforeEach(() => {
-  prevHome = process.env.ACN_HOME;
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-budget-"));
-  process.env.ACN_HOME = tmpHome;
+  prevHome = process.env.CCCN_HOME;
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-budget-"));
+  process.env.CCCN_HOME = tmpHome;
 });
 afterEach(() => {
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
-  if (prevHome === undefined) delete process.env.ACN_HOME;
-  else process.env.ACN_HOME = prevHome;
+  if (prevHome === undefined) delete process.env.CCCN_HOME;
+  else process.env.CCCN_HOME = prevHome;
 });
 
 describe("parseBudgetAmount", () => {

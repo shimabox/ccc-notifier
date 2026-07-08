@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { runInit, runUninstall } from "../src/setup";
 
 // ============ 実ホーム保護 ============
-// すべてのテストで ACN_CLAUDE_SETTINGS / ACN_HOME / ACN_CLI_PATH / ACN_DRY_RUN を一時値に固定する。
+// すべてのテストで CCCN_CLAUDE_SETTINGS / CCCN_HOME / CCCN_CLI_PATH / CCCN_DRY_RUN を一時値に固定する。
 // これにより「環境変数を設定し忘れた経路」から実ホーム(~/.claude や ~/.ccc-notifier)へ
 // 書き込む余地を無くす。settingsPath() / paths() / resolveCliPath() は呼び出しのたびに env を評価する。
 
@@ -44,22 +44,22 @@ function stopCommand(settings: Record<string, any>): string {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "acn-setup-"));
+  tmpDir = mkdtempSync(join(tmpdir(), "cccn-setup-"));
   settingsFile = join(tmpDir, "settings.json");
-  homeDir = join(tmpDir, "acn-home");
+  homeDir = join(tmpDir, "cccn-home");
   cliPath = cliUnder(tmpDir);
 
-  process.env.ACN_CLAUDE_SETTINGS = settingsFile;
-  process.env.ACN_HOME = homeDir;
-  process.env.ACN_CLI_PATH = cliPath;
-  process.env.ACN_DRY_RUN = "1";
+  process.env.CCCN_CLAUDE_SETTINGS = settingsFile;
+  process.env.CCCN_HOME = homeDir;
+  process.env.CCCN_CLI_PATH = cliPath;
+  process.env.CCCN_DRY_RUN = "1";
 });
 
 afterEach(() => {
-  delete process.env.ACN_CLAUDE_SETTINGS;
-  delete process.env.ACN_HOME;
-  delete process.env.ACN_CLI_PATH;
-  delete process.env.ACN_DRY_RUN;
+  delete process.env.CCCN_CLAUDE_SETTINGS;
+  delete process.env.CCCN_HOME;
+  delete process.env.CCCN_CLI_PATH;
+  delete process.env.CCCN_DRY_RUN;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -113,7 +113,7 @@ describe("runInit — 冪等性", () => {
     expect(readSettings().hooks.Stop).toHaveLength(1);
 
     // 2回目は CLI パスを変える → command は更新されるが重複追加はされない。
-    process.env.ACN_CLI_PATH = cliUnder(tmpDir, "cli-v2.js");
+    process.env.CCCN_CLI_PATH = cliUnder(tmpDir, "cli-v2.js");
     await runInit(["--yes", "--os-only"]);
 
     const after = readSettings();
@@ -292,7 +292,7 @@ describe("runUninstall — 我々のエントリのみ除去", () => {
 // ============ 7. --purge ============
 
 describe("runUninstall — --purge", () => {
-  it("--yes 併用で ACN_HOME を削除する", async () => {
+  it("--yes 併用で CCCN_HOME を削除する", async () => {
     writeFileSync(settingsFile, fixtureRaw(), "utf8");
     await runInit(["--yes", "--os-only"]);
     expect(existsSync(homeDir)).toBe(true);
@@ -311,7 +311,7 @@ describe("runInit — win32 のパス正規化", () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
       const winCli = "C:\\Users\\me\\node_modules\\ccc-notifier\\dist\\cli.js";
-      process.env.ACN_CLI_PATH = winCli;
+      process.env.CCCN_CLI_PATH = winCli;
 
       const code = await runInit(["--yes", "--os-only"]);
       expect(code).toBe(0);

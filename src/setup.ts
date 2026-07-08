@@ -39,17 +39,17 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** 対象 settings パスを呼び出しのたびに評価して返す(モジュールロード時に固定しない)。 */
 function settingsPath(): string {
-  return process.env.ACN_CLAUDE_SETTINGS || join(homedir(), ".claude", "settings.json");
+  return process.env.CCCN_CLAUDE_SETTINGS || join(homedir(), ".claude", "settings.json");
 }
 
 /**
  * 実行中モジュールから dist/cli.js の絶対パスを解決する。
- * - ACN_CLI_PATH があればそれを最優先(テスト用上書き)。
+ * - CCCN_CLI_PATH があればそれを最優先(テスト用上書き)。
  * - tsup バンドル後は実行ファイル自身が dist/cli.js。import.meta.url が dist 配下なら
  *   それ自身(= dist/cli.js)、src 配下なら ../dist/cli.js を解決する。
  */
 function resolveCliPath(): string {
-  const override = process.env.ACN_CLI_PATH;
+  const override = process.env.CCCN_CLI_PATH;
   if (override) return override;
   const here = fileURLToPath(import.meta.url);
   const dir = dirname(here);
@@ -111,7 +111,7 @@ function makeTestRecord(): TurnRecord {
   return {
     schemaVersion: 1,
     ts: new Date().toISOString(),
-    sessionId: "acn-setup-test",
+    sessionId: "cccn-setup-test",
     project: process.cwd(),
     gitBranch: null,
     models: ["claude-fable-5"],
@@ -401,8 +401,8 @@ export async function runInit(argv: string[]): Promise<number> {
   }
 
   // 2. config.json 書き込み。
-  const acn = paths();
-  writeFileSync(acn.configFile, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+  const cccn = paths();
+  writeFileSync(cccn.configFile, JSON.stringify(cfg, null, 2) + "\n", "utf8");
 
   // 3. hook コマンド構築。
   const command = buildHookCommand();
@@ -412,7 +412,7 @@ export async function runInit(argv: string[]): Promise<number> {
   const result = mergeSettings(sPath, command);
   if (!result.ok) return 1;
 
-  // 5. テスト通知(ACN_DRY_RUN 下では last-notify.json に書かれるだけ)。
+  // 5. テスト通知(CCCN_DRY_RUN 下では last-notify.json に書かれるだけ)。
   //    OS が有効なら OS 通知を、Slack を設定していれば Slack 通知も送り、その場で設定を確認できるようにする。
   const testRecord = makeTestRecord();
   await notifyOS(testRecord, cfg);
@@ -428,7 +428,7 @@ export async function runInit(argv: string[]): Promise<number> {
       ? `  バックアップ: ${result.backupPath}`
       : "  (settings.json を新規作成したためバックアップはありません)",
   );
-  console.log(`  設定ファイル: ${acn.configFile}`);
+  console.log(`  設定ファイル: ${cccn.configFile}`);
   console.log("Claude Code で何か実行すると通知が届きます。確認: npx ccc-notifier doctor");
   return 0;
 }

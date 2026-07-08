@@ -57,17 +57,17 @@ async function run(argv: string[]): Promise<number> {
 }
 
 beforeEach(() => {
-  prevHome = process.env.ACN_HOME;
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-history-"));
-  process.env.ACN_HOME = tmpHome;
+  prevHome = process.env.CCCN_HOME;
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-history-"));
+  process.env.CCCN_HOME = tmpHome;
   historyFile = join(tmpHome, "history.jsonl");
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
-  if (prevHome === undefined) delete process.env.ACN_HOME;
-  else process.env.ACN_HOME = prevHome;
+  if (prevHome === undefined) delete process.env.CCCN_HOME;
+  else process.env.CCCN_HOME = prevHome;
 });
 
 describe("runHistory — 引数バリデーション", () => {

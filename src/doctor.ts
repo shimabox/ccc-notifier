@@ -42,11 +42,11 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 function settingsPath(): string {
-  return process.env.ACN_CLAUDE_SETTINGS || join(homedir(), ".claude", "settings.json");
+  return process.env.CCCN_CLAUDE_SETTINGS || join(homedir(), ".claude", "settings.json");
 }
 
 function projectsDir(): string {
-  return process.env.ACN_CLAUDE_PROJECTS || join(homedir(), ".claude", "projects");
+  return process.env.CCCN_CLAUDE_PROJECTS || join(homedir(), ".claude", "projects");
 }
 
 /**
@@ -334,8 +334,8 @@ async function checkNotification(cfg: Config): Promise<boolean> {
       prompt: "doctor によるテスト通知です",
     };
 
-    const dryRun = process.env.ACN_DRY_RUN === "1";
-    const dryHint = `(ACN_DRY_RUN=1 のため ${paths().lastNotifyFile} の内容で確認できます)`;
+    const dryRun = process.env.CCCN_DRY_RUN === "1";
+    const dryHint = `(CCCN_DRY_RUN=1 のため ${paths().lastNotifyFile} の内容で確認できます)`;
 
     // OS 通知(有効なときのみ)。
     if (cfg.notify.os) {

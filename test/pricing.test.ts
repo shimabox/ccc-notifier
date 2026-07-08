@@ -90,7 +90,7 @@ describe('loadPriceTable', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
-    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'acn-pricing-test-'));
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cccn-pricing-test-'));
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });

@@ -3,7 +3,7 @@
 // 契約: src/contracts.md の "src/sweep.ts(2026-07-07 追加)"、GOLDEN 値は
 // test/fixtures/GOLDEN.md(transcript-multiturn.jsonl / subagent-basic.jsonl)を参照。
 //
-// 一時 ACN_HOME + 一時 projects ルート(--projects かつ ACN_CLAUDE_PROJECTS で指定)に
+// 一時 CCCN_HOME + 一時 projects ルート(--projects かつ CCCN_CLAUDE_PROJECTS で指定)に
 //   projA/t1.jsonl                     … multiturn fixture(実プロンプト2ターン)
 //   projA/t1/subagents/agent-x.jsonl   … subagent fixture(SA 0.033)
 // を配置して検証する。実データ(~/.claude)には一切触れない。
@@ -40,15 +40,15 @@ let prevProjects: string | undefined;
 let prevDryRun: string | undefined;
 
 beforeEach(() => {
-  prevHome = process.env.ACN_HOME;
-  prevProjects = process.env.ACN_CLAUDE_PROJECTS;
-  prevDryRun = process.env.ACN_DRY_RUN;
+  prevHome = process.env.CCCN_HOME;
+  prevProjects = process.env.CCCN_CLAUDE_PROJECTS;
+  prevDryRun = process.env.CCCN_DRY_RUN;
 
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-sweep-home-"));
-  projectsRoot = mkdtempSync(join(tmpdir(), "acn-sweep-projects-"));
-  process.env.ACN_HOME = tmpHome;
-  process.env.ACN_CLAUDE_PROJECTS = projectsRoot;
-  process.env.ACN_DRY_RUN = "1"; // track の通知は last-notify.json へ
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-sweep-home-"));
+  projectsRoot = mkdtempSync(join(tmpdir(), "cccn-sweep-projects-"));
+  process.env.CCCN_HOME = tmpHome;
+  process.env.CCCN_CLAUDE_PROJECTS = projectsRoot;
+  process.env.CCCN_DRY_RUN = "1"; // track の通知は last-notify.json へ
 
   // 実ネットワークに出ない保険。単価は builtin、fx は fixed(150)にフォールバックし決定的になる。
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
@@ -63,12 +63,12 @@ afterEach(() => {
   rmSync(tmpHome, { recursive: true, force: true });
   rmSync(projectsRoot, { recursive: true, force: true });
 
-  if (prevHome === undefined) delete process.env.ACN_HOME;
-  else process.env.ACN_HOME = prevHome;
-  if (prevProjects === undefined) delete process.env.ACN_CLAUDE_PROJECTS;
-  else process.env.ACN_CLAUDE_PROJECTS = prevProjects;
-  if (prevDryRun === undefined) delete process.env.ACN_DRY_RUN;
-  else process.env.ACN_DRY_RUN = prevDryRun;
+  if (prevHome === undefined) delete process.env.CCCN_HOME;
+  else process.env.CCCN_HOME = prevHome;
+  if (prevProjects === undefined) delete process.env.CCCN_CLAUDE_PROJECTS;
+  else process.env.CCCN_CLAUDE_PROJECTS = prevProjects;
+  if (prevDryRun === undefined) delete process.env.CCCN_DRY_RUN;
+  else process.env.CCCN_DRY_RUN = prevDryRun;
 });
 
 // ---- helpers --------------------------------------------------------------

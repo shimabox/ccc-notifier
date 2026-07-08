@@ -84,7 +84,7 @@ describe('aggregateNewTurn', () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'acn-transcript-test-'));
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cccn-transcript-test-'));
   });
   afterEach(async () => {
     await fs.rm(dir, { recursive: true, force: true });

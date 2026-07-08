@@ -30,12 +30,12 @@ let prevHome: string | undefined;
 let prevDryRun: string | undefined;
 
 beforeEach(() => {
-  prevHome = process.env.ACN_HOME;
-  prevDryRun = process.env.ACN_DRY_RUN;
+  prevHome = process.env.CCCN_HOME;
+  prevDryRun = process.env.CCCN_DRY_RUN;
 
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-track-test-"));
-  process.env.ACN_HOME = tmpHome;
-  process.env.ACN_DRY_RUN = "1"; // 実通知せず last-notify.json に書き出す
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-track-test-"));
+  process.env.CCCN_HOME = tmpHome;
+  process.env.CCCN_DRY_RUN = "1"; // 実通知せず last-notify.json に書き出す
 
   // 誤って実ネットワークに出ない保険。fx はフォールバックで fixed(fallbackRate=150)になる。
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
@@ -49,10 +49,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
 
-  if (prevHome === undefined) delete process.env.ACN_HOME;
-  else process.env.ACN_HOME = prevHome;
-  if (prevDryRun === undefined) delete process.env.ACN_DRY_RUN;
-  else process.env.ACN_DRY_RUN = prevDryRun;
+  if (prevHome === undefined) delete process.env.CCCN_HOME;
+  else process.env.CCCN_HOME = prevHome;
+  if (prevDryRun === undefined) delete process.env.CCCN_DRY_RUN;
+  else process.env.CCCN_DRY_RUN = prevDryRun;
 });
 
 // ---- helpers --------------------------------------------------------------
@@ -263,7 +263,7 @@ describe("runTrack", () => {
   });
 
   // 8. 自動再生成(既定): track 成功後に report.html が生成され、meta refresh を含む。
-  it("8. regenerates ACN_HOME/report.html (with meta refresh) after a successful track by default", async () => {
+  it("8. regenerates CCCN_HOME/report.html (with meta refresh) after a successful track by default", async () => {
     await runTrack(stdinFor(transcriptPath));
 
     expect(readHistory()).toHaveLength(1);
