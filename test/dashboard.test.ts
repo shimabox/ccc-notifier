@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runDashboard } from "../src/dashboard";
+import { browserOpenPlan, runDashboard } from "../src/dashboard";
 import { formatUSD } from "../src/format";
 import { appendTurn } from "../src/store";
 import type { TurnRecord } from "../src/types";
@@ -455,5 +455,38 @@ describe("runDashboard — 月予算カード", () => {
     expect(html).toContain("125.0% used");
     expect(html).toContain('budget-fill lvl-over" style="width:100.0%');
     expect(html).toContain('class="budget-pct lvl-over"');
+  });
+});
+
+describe("browserOpenPlan", () => {
+  const P = "/home/user/report.html";
+
+  it("uses `open` on darwin", () => {
+    expect(browserOpenPlan("darwin", false, P, null)).toEqual({ cmd: "open", args: [P] });
+  });
+
+  it("uses `cmd /c start` on win32", () => {
+    expect(browserOpenPlan("win32", false, P, null)).toEqual({
+      cmd: "cmd",
+      args: ["/c", "start", "", P],
+    });
+  });
+
+  it("uses `xdg-open` on plain linux (not WSL)", () => {
+    expect(browserOpenPlan("linux", false, P, null)).toEqual({ cmd: "xdg-open", args: [P] });
+  });
+
+  it("opens the Windows-side path via powershell Start-Process on WSL", () => {
+    const winPath = "\\\\wsl.localhost\\Ubuntu\\home\\user\\report.html";
+    const plan = browserOpenPlan("linux", true, P, winPath);
+    expect(plan.cmd).toBe("powershell.exe");
+    expect(plan.args).toContain("-Command");
+    expect(plan.args[plan.args.length - 1]).toBe(`Start-Process -FilePath "${winPath}"`);
+    // ファイルは移動せず WSL 内のパスを Windows パスへ変換して開く(全角パス問題を回避)。
+    expect(plan.args.join(" ")).not.toContain(P);
+  });
+
+  it("falls back to xdg-open on WSL when the Windows path could not be resolved", () => {
+    expect(browserOpenPlan("linux", true, P, null)).toEqual({ cmd: "xdg-open", args: [P] });
   });
 });

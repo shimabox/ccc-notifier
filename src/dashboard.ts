@@ -9,10 +9,11 @@
 // デザインは dataviz スキルの原則に準拠(固定スロット順の配色・2px サーフェスギャップ・常設凡例・
 // 直接ラベル・表(table twin)・ライト/ダーク両テーマ)。
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isWSL } from "./env";
 import { formatJPY, formatTokens, formatUSD, modelDisplayName } from "./format";
 import { paths, readConfig, readTurns } from "./store";
 import type { TokenBuckets, TurnRecord } from "./types";
@@ -1208,21 +1209,52 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
 
 // ============ ブラウザ起動 ============
 
+/**
+ * WSL のパス(例: /home/user/report.html)を Windows 側のパス
+ * (\\wsl.localhost\<distro>\... 形式)へ変換する。wslpath は WSL に標準搭載。
+ * 変換に失敗した場合は null(呼び出し側でフォールバックする)。
+ */
+function toWindowsPath(path: string): string | null {
+  try {
+    const r = spawnSync("wslpath", ["-w", path], { encoding: "utf8", timeout: 3000 });
+    if (r.status === 0 && typeof r.stdout === "string") {
+      const win = r.stdout.trim();
+      return win.length > 0 ? win : null;
+    }
+  } catch {
+    // wslpath 不在・失敗はフォールバックへ
+  }
+  return null;
+}
+
+/**
+ * プラットフォームに応じたブラウザ起動コマンドを決める(spawn しない純粋関数・テスト用に export)。
+ * WSL2 では「ファイルを WSL 内に置いたまま」Windows パスへ変換し Windows 既定ブラウザで開く。
+ * これにより、ファイルを Windows プロファイル(例: C:\Users\山田太郎\)へ移動する必要がなくなり、
+ * 全角を含む Windows パスの解決失敗を根本的に回避できる。winPath 解決不能時は xdg-open に倒す。
+ */
+export function browserOpenPlan(
+  platform: NodeJS.Platform,
+  wsl: boolean,
+  path: string,
+  winPath: string | null,
+): { cmd: string; args: string[] } {
+  if (platform === "darwin") return { cmd: "open", args: [path] };
+  if (platform === "win32") return { cmd: "cmd", args: ["/c", "start", "", path] };
+  if (wsl && winPath) {
+    return {
+      cmd: "powershell.exe",
+      args: ["-NoProfile", "-NonInteractive", "-Command", `Start-Process -FilePath "${winPath}"`],
+    };
+  }
+  return { cmd: "xdg-open", args: [path] };
+}
+
 function openInBrowser(path: string): void {
   try {
-    const platform = process.platform;
-    let cmd: string;
-    let args: string[];
-    if (platform === "darwin") {
-      cmd = "open";
-      args = [path];
-    } else if (platform === "win32") {
-      cmd = "cmd";
-      args = ["/c", "start", "", path];
-    } else {
-      cmd = "xdg-open";
-      args = [path];
-    }
+    const wsl = process.platform === "linux" && isWSL();
+    const winPath = wsl ? toWindowsPath(path) : null;
+    const { cmd, args } = browserOpenPlan(process.platform, wsl, path, winPath);
     const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
     child.on("error", () => {
       // 起動失敗しても致命的ではない(パスは既に表示済み)
@@ -1271,6 +1303,11 @@ export async function runDashboard(argv: string[]): Promise<number> {
   }
 
   console.log(`ダッシュボードを生成しました / dashboard written: ${outPath}`);
+  if (process.platform === "linux" && isWSL()) {
+    // WSL では Windows 側パスも案内する(自動起動に失敗しても手動で開けるように)。
+    const winPath = toWindowsPath(outPath);
+    if (winPath) console.log(`Windows から開く場合 / on Windows: ${winPath}`);
+  }
   if (opts.open) {
     openInBrowser(outPath);
     console.log("ブラウザで開いています… / opening in your browser…");

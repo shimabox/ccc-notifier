@@ -10,9 +10,10 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { computeCost, loadPriceTable } from "./pricing";
+import { isWSL } from "./env";
 import { getUsdJpy } from "./fx";
 import { formatUSD } from "./format";
-import { notifyOS } from "./notify/os";
+import { notifyOS, selectNotifyBackend } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
@@ -305,6 +306,15 @@ async function checkNotification(cfg: Config): Promise<boolean> {
           ? `通知はミュート中です(${fmtMuteUntil(until)} まで)。再開は ccc-notifier unmute`
           : "通知はミュート中です(無期限)。再開は ccc-notifier unmute",
       );
+    }
+
+    // 通知経路(実行環境)を明示する。WSL2 では notify-send ではなく Windows の
+    // トースト(powershell.exe)へ橋渡しするため、その旨を診断ログに出す。
+    if (process.platform === "linux" && isWSL()) {
+      log("ok", "WSL2 環境を検出しました。通知は Windows のトースト(powershell.exe)経由で送信します");
+    } else {
+      const backend = selectNotifyBackend();
+      log("ok", `通知経路: ${backend.kind}(platform=${process.platform})`);
     }
 
     const dummy: TurnRecord = {
