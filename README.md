@@ -126,7 +126,7 @@ agent-cost-notifier init
 
 ## セットアップ / Setup
 
-このセクション以降に出てくる `npx agent-cost-notifier <command>` や `npm install -g agent-cost-notifier` は、npm 公開後(上記「インストール / Install」の方法B)を前提にした表記です。まだ方法A(ソースから)を使っている場合は、`npx agent-cost-notifier <command>` を `node dist/cli.js <command>` に読み替えてください。
+> **補足**: このセクション以降に出てくる `npx agent-cost-notifier <command>` や `npm install -g agent-cost-notifier` は、npm 公開後(上記「インストール / Install」の方法B)を前提にした表記です。**方法A(ソースから)でインストールした場合は、`npx agent-cost-notifier <command>` を `node dist/cli.js <command>` に読み替えてください**(リポジトリのディレクトリで実行します)。
 
 1. **セットアップコマンドを実行**
 

@@ -126,7 +126,13 @@ async function checkHookRegistration(): Promise<boolean> {
     return false;
   }
 
-  log("ok", `hooks.Stop に agent-cost-notifier のエントリが登録されています(${matchedCommands.length}件)`);
+  // 実行コマンドの絶対パスも表示する: source(node dist/cli.js)・グローバルインストール・
+  // 複数クローンなど、どの実体が hook として動いているか一目で分かるようにするため
+  // (npm 未公開でも npx がローカル node_modules/.bin を拾って動くことがあり紛らわしいため)。
+  log(
+    "ok",
+    `hooks.Stop に agent-cost-notifier のエントリが登録されています(${matchedCommands.length}件): ${matchedCommands.join(" / ")}`,
+  );
 
   let allScriptsExist = true;
   for (const command of matchedCommands) {
