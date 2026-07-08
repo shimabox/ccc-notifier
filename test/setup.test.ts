@@ -182,6 +182,32 @@ describe("runInit — config.json への反映", () => {
     expect(cfg.costLabel).toBe("actual");
     expect(cfg.fx.fallbackRate).toBe(155);
   });
+
+  it("--budget 未指定なら月予算の既定 $400 が設定される", async () => {
+    const code = await runInit(["--yes", "--os-only"]);
+    expect(code).toBe(0);
+    const cfg = JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8"));
+    expect(cfg.monthlyBudgetUSD).toBe(400);
+  });
+
+  it("--budget N で月予算を上書きでき、0 で無効化できる", async () => {
+    await runInit(["--yes", "--os-only", "--budget", "1000"]);
+    expect(JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8")).monthlyBudgetUSD).toBe(1000);
+
+    await runInit(["--yes", "--os-only", "--budget", "0"]);
+    expect(JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8")).monthlyBudgetUSD).toBe(0);
+  });
+
+  it("既存の月予算は --budget 未指定の再 init でも維持される", async () => {
+    await runInit(["--yes", "--os-only", "--budget", "750"]);
+    await runInit(["--yes", "--os-only"]); // --budget 無し
+    expect(JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8")).monthlyBudgetUSD).toBe(750);
+  });
+
+  it("--budget が負値ならエラー(exit 1)", async () => {
+    const code = await runInit(["--yes", "--os-only", "--budget", "-5"]);
+    expect(code).toBe(1);
+  });
 });
 
 // ============ 6. uninstall ============

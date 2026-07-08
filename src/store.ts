@@ -91,6 +91,13 @@ function mergeConfig(partial: unknown): Config {
   if ("includeDailyTotal" in partial) {
     result.includeDailyTotal = partial.includeDailyTotal as boolean;
   }
+  if ("monthlyBudgetUSD" in partial) {
+    // 0 以上の有限数のみ採用(割り算・表示に使うため異常値はデフォルト 0 に倒す)。
+    const b = partial.monthlyBudgetUSD;
+    if (typeof b === "number" && Number.isFinite(b) && b >= 0) {
+      result.monthlyBudgetUSD = b;
+    }
+  }
   if (isPlainObject(partial.dashboard)) {
     if ("autoRegenerate" in partial.dashboard) {
       result.dashboard.autoRegenerate = partial.dashboard.autoRegenerate as boolean;
@@ -340,6 +347,31 @@ export function todayTotalUSD(): number {
     }
   }
   return total;
+}
+
+/**
+ * ローカルタイムゾーンで「今月(暦月)」に該当する TurnRecord の合計(サブエージェント込みの総額)。
+ * 月予算に対する使用率の算出に使う。
+ */
+export function currentMonthTotals(): { usd: number; jpy: number; turns: number } {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+
+  let usd = 0;
+  let jpy = 0;
+  let turns = 0;
+  for (const rec of readTurns()) {
+    const ts = new Date(rec.ts);
+    if (Number.isNaN(ts.getTime())) continue;
+    if (ts.getFullYear() === y && ts.getMonth() === m) {
+      const sa = rec.subagents?.costUSD ?? 0;
+      usd += rec.costUSD + sa;
+      jpy += rec.costJPY + sa * rec.fxRate;
+      turns += 1;
+    }
+  }
+  return { usd, jpy, turns };
 }
 
 /**

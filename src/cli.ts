@@ -45,6 +45,11 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Delete history (clear=records / redact=prompts only; --days limits to older)",
   },
   {
+    cmd: "budget [<USD>]",
+    ja: "月予算の表示/設定(金額省略で表示、0 で解除)。ダッシュボードに当月の使用率を表示",
+    en: "Show/set the monthly budget (omit to show, 0 to clear)",
+  },
+  {
     cmd: "mute [30m|2h|1d]",
     ja: "通知を一時停止(期間省略で無期限。記録は続く)",
     en: "Pause notifications (indefinitely if no duration; tracking continues)",
@@ -182,6 +187,10 @@ export async function main(argv: string[]): Promise<number> {
       case "history": {
         const { runHistory } = await import("./history");
         return await runHistory(rest);
+      }
+      case "budget": {
+        const { runBudget } = await import("./budget");
+        return runBudget(rest);
       }
       case "mute": {
         const { runMute } = await import("./mute");

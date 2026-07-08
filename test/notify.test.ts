@@ -62,6 +62,7 @@ const baseConfig: Config = {
   costLabel: "api_equivalent",
   fx: { fallbackRate: 150, cacheHours: 12 },
   includeDailyTotal: true,
+  monthlyBudgetUSD: 0,
   dashboard: { autoRegenerate: true, autoReloadSec: 30, days: 30 },
 };
 

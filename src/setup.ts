@@ -28,6 +28,7 @@ import { notifyOS } from "./notify/os";
 const HOOK_MARKER = "ccc-notifier";
 const HOOK_TIMEOUT = 15;
 const SLACK_PROMPT_CHARS = 100;
+const DEFAULT_BUDGET_USD = 400; // init で提案する月予算の既定値(USD)。既存設定があればそちらを維持する。
 
 // ============ 小ヘルパー ============
 
@@ -132,6 +133,7 @@ interface InitFlags {
   slackWebhook?: string;
   label?: string;
   rate?: string;
+  budget?: string;
 }
 
 interface UninstallFlags {
@@ -159,6 +161,9 @@ function parseInitFlags(argv: string[]): InitFlags {
       if (!a.includes("=")) i++;
     } else if (a === "--rate" || a.startsWith("--rate=")) {
       flags.rate = takeValue(argv, i, "--rate");
+      if (!a.includes("=")) i++;
+    } else if (a === "--budget" || a.startsWith("--budget=")) {
+      flags.budget = takeValue(argv, i, "--budget");
       if (!a.includes("=")) i++;
     }
   }
@@ -246,6 +251,8 @@ export async function runInit(argv: string[]): Promise<number> {
   // 1. 設定値の決定 —— readConfig()(既存 + デフォルトのマージ済み)を起点に回答を適用する。
   const cfg = readConfig();
   cfg.notify.os = true; // init は OS 通知を有効化する。
+  // 月予算の既定: 既に設定済みならその値、未設定(0)なら $400 を提案する。
+  const budgetDefault = cfg.monthlyBudgetUSD > 0 ? cfg.monthlyBudgetUSD : DEFAULT_BUDGET_USD;
 
   if (flags.yes) {
     // 非対話(CI / テスト)。フラグで与えられた値のみ適用する(未指定キーは既存値を維持)。
@@ -272,6 +279,17 @@ export async function runInit(argv: string[]): Promise<number> {
         return 1;
       }
       cfg.fx.fallbackRate = r;
+    }
+    if (flags.budget !== undefined) {
+      const b = Number(flags.budget);
+      if (!Number.isFinite(b) || b < 0) {
+        console.error(`--budget は 0 以上の数値を指定してください(受領: ${flags.budget})`);
+        return 1;
+      }
+      cfg.monthlyBudgetUSD = b;
+    } else {
+      // 未指定なら既定($400。既存設定があればそれを維持)を適用する。
+      cfg.monthlyBudgetUSD = budgetDefault;
     }
   } else {
     // 対話モード。isCancel を必ず処理し、キャンセル時は何も書かずに exit 1。
@@ -340,6 +358,23 @@ export async function runInit(argv: string[]): Promise<number> {
     }
     const parsedRate = Number(rateStr);
     if (Number.isFinite(parsedRate) && parsedRate > 0) cfg.fx.fallbackRate = parsedRate;
+
+    const budgetStr = await p.text({
+      message: "月の予算(USD、既定 $400。0 で無効・ダッシュボードに当月の使用率を表示)",
+      placeholder: String(budgetDefault),
+      defaultValue: String(budgetDefault),
+      validate: (v) => {
+        if (v === undefined || v === "") return undefined; // 既定値を採用
+        const n = Number(v);
+        return !Number.isFinite(n) || n < 0 ? "0 以上の数値を入力してください" : undefined;
+      },
+    });
+    if (p.isCancel(budgetStr)) {
+      p.cancel("キャンセルしました");
+      return 1;
+    }
+    const parsedBudget = Number(budgetStr);
+    if (Number.isFinite(parsedBudget) && parsedBudget >= 0) cfg.monthlyBudgetUSD = parsedBudget;
 
     p.outro("設定を適用します");
   }
