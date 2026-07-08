@@ -409,7 +409,9 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(afterInit1.hooks.Stop).toHaveLength(1);
     const hookEntry = afterInit1.hooks.Stop[0].hooks[0];
     // フォルダ名(ブランド名)に依存させず、実際にビルドされた dist/cli.js のパスで検証する。
-    expect(hookEntry.command).toContain(CLI_PATH);
+    // buildHookCommand は win32 で "\" を "/" に正規化するため、比較側も同様に正規化する
+    // (CLI_PATH は join() 由来でバックスラッシュを含みうる)。
+    expect(hookEntry.command).toContain(CLI_PATH.replace(/\\/g, "/"));
     expect(hookEntry.command).toContain("track");
 
     // 既存キーは deep-equal で不変。
