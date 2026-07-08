@@ -261,7 +261,7 @@ describe("notifyOS", () => {
     expect(options).toMatchObject({ stdio: "ignore" });
   });
 
-  it("spawns powershell with an EncodedCommand toast script and env-based title/body on win32", async () => {
+  it("spawns powershell with an EncodedCommand toast that embeds Base64 title/body (no env vars) on win32", async () => {
     setPlatform("win32");
 
     const pending = notifyOS(baseRecord, baseConfig);
@@ -283,8 +283,13 @@ describe("notifyOS", () => {
     const decoded = Buffer.from(encoded, "base64").toString("utf16le");
     expect(decoded).toContain("ToastNotificationManager");
 
-    expect(options.env?.ACN_TITLE).toBe(expected.title);
-    expect(options.env?.ACN_BODY).toBe(expected.body);
+    // 本文は環境変数ではなく Base64 でスクリプトに埋め込む(WSL 境界を越えるため)。
+    expect(decoded).toContain(Buffer.from(expected.title, "utf8").toString("base64"));
+    expect(decoded).toContain(Buffer.from(expected.body, "utf8").toString("base64"));
+    // 送信元表示用の専用 AUMID を使う。
+    expect(decoded).toContain("ccc-notifier.notify");
+    // 環境変数 ACN_TITLE/ACN_BODY はもう渡さない。
+    expect(options.env).toBeUndefined();
   });
 
   it("resolves (and logs) when spawn reports an error on darwin/win32", async () => {
