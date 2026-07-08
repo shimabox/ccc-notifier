@@ -9,10 +9,10 @@ import { join } from "node:path";
 
 /**
  * データディレクトリのパスを返す。存在しなければ作成する(mkdir -p 相当)。
- * ACN_HOME 環境変数があればそれを優先。既定は ~/.ccc-notifier。
+ * CCCN_HOME 環境変数があればそれを優先。既定は ~/.ccc-notifier。
  */
-export function acnHome(): string {
-  const home = process.env.ACN_HOME || join(homedir(), ".ccc-notifier");
+export function cccnHome(): string {
+  const home = process.env.CCCN_HOME || join(homedir(), ".ccc-notifier");
   try {
     mkdirSync(home, { recursive: true });
   } catch {
@@ -22,27 +22,27 @@ export function acnHome(): string {
 }
 
 /**
- * 通知処理中に起きたエラーを `${acnHome()}/error.log` に追記する。
+ * 通知処理中に起きたエラーを `${cccnHome()}/error.log` に追記する。
  * この関数自体が失敗しても黙殺し、決して例外を投げない。
  */
 export function appendNotifyError(context: string, err: unknown): void {
   try {
     const message = err instanceof Error ? err.message : String(err);
     const line = `[${new Date().toISOString()}] [${context}] ${message}\n`;
-    appendFileSync(join(acnHome(), "error.log"), line, "utf8");
+    appendFileSync(join(cccnHome(), "error.log"), line, "utf8");
   } catch {
     // ログ書き込み自体の失敗も黙殺する。
   }
 }
 
 /**
- * DRY RUN 時の送信内容を `${acnHome()}/last-notify.json` に保存する。
+ * DRY RUN 時の送信内容を `${cccnHome()}/last-notify.json` に保存する。
  * 既存内容を読み込み、対象チャンネルのキーだけを差し替えてマージ保存する。
  * 失敗しても黙殺する(ベストエフォート)。
  */
 export function writeDryRun(channel: "os" | "slack", payload: unknown): void {
   try {
-    const file = join(acnHome(), "last-notify.json");
+    const file = join(cccnHome(), "last-notify.json");
     let existing: Record<string, unknown> = {};
     if (existsSync(file)) {
       try {

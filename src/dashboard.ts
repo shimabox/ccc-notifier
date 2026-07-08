@@ -408,9 +408,9 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 .tick-label{fill:var(--muted); font-size:11px; font-variant-numeric:tabular-nums;}
 .bar-name{fill:var(--ink); font-size:13px; font-weight:550;}
 .bar-val{fill:var(--ink2); font-size:12px; font-variant-numeric:tabular-nums;}
-.acn-band{fill:transparent; cursor:pointer;}
-.acn-band:hover{fill:var(--ink); fill-opacity:0.05;}
-.acn-band.sel{fill:var(--s1); fill-opacity:0.10;}
+.cccn-band{fill:transparent; cursor:pointer;}
+.cccn-band:hover{fill:var(--ink); fill-opacity:0.05;}
+.cccn-band.sel{fill:var(--s1); fill-opacity:0.10;}
 
 .grid2{display:grid; grid-template-columns:1.15fr 1fr; gap:22px; align-items:start;}
 
@@ -452,12 +452,12 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 
 .foot{color:var(--muted); font-size:12px; margin-top:32px; text-align:center;}
 
-.acn-tip{position:fixed; z-index:50; pointer-events:none; background:var(--surface); color:var(--ink); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow); padding:9px 11px; font-size:12px; max-width:280px;}
-.acn-tip .tip-title{font-weight:640; margin-bottom:6px; font-variant-numeric:tabular-nums;}
-.acn-tip .tip-row{display:flex; align-items:center; gap:8px; margin:2px 0;}
-.acn-tip .tip-key{display:inline-block; width:9px; height:9px; border-radius:2px; flex:0 0 auto;}
-.acn-tip .tip-name{color:var(--ink2); flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.acn-tip .tip-val{font-variant-numeric:tabular-nums; font-weight:560;}
+.cccn-tip{position:fixed; z-index:50; pointer-events:none; background:var(--surface); color:var(--ink); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow); padding:9px 11px; font-size:12px; max-width:280px;}
+.cccn-tip .tip-title{font-weight:640; margin-bottom:6px; font-variant-numeric:tabular-nums;}
+.cccn-tip .tip-row{display:flex; align-items:center; gap:8px; margin:2px 0;}
+.cccn-tip .tip-key{display:inline-block; width:9px; height:9px; border-radius:2px; flex:0 0 auto;}
+.cccn-tip .tip-name{color:var(--ink2); flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.cccn-tip .tip-val{font-variant-numeric:tabular-nums; font-weight:560;}
 
 @media (max-width: 780px){
   .kpi{grid-template-columns:repeat(2,1fr);}
@@ -472,7 +472,7 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 
 const APP_JS = `<script>
 (function(){
-  var el = document.getElementById('acn-data');
+  var el = document.getElementById('cccn-data');
   if(!el){ return; }
   var data;
   try { data = JSON.parse(el.textContent || '{}'); } catch(e){ return; }
@@ -525,12 +525,12 @@ const APP_JS = `<script>
   // ---- 状態(sessionStorage に保存し、自動リロード(meta refresh)を跨いでも維持)----
   function ssGet(k){ try { return sessionStorage.getItem(k); } catch(e){ return null; } }
   function ssSet(k, v){ try { sessionStorage.setItem(k, v); } catch(e){} }
-  var GRAN = ssGet('acn-gran'); if(['day','week','month'].indexOf(GRAN) < 0) GRAN = 'day';
+  var GRAN = ssGet('cccn-gran'); if(['day','week','month'].indexOf(GRAN) < 0) GRAN = 'day';
   // 既定は「起動した日」を初期選択する(未保存時)。明示的な通算は '__all__'、その他は保存キー。
-  var storedSel = ssGet('acn-sel');
+  var storedSel = ssGet('cccn-sel');
   var SEL = (storedSel === null) ? defaultSel(GRAN) : (storedSel === '__all__' ? null : storedSel);
-  function setGran(g){ GRAN = g; ssSet('acn-gran', g); }
-  function setSel(v){ SEL = v; ssSet('acn-sel', v === null ? '__all__' : v); }
+  function setGran(g){ GRAN = g; ssSet('cccn-gran', g); }
+  function setSel(v){ SEL = v; ssSet('cccn-sel', v === null ? '__all__' : v); }
   var lastRenderedGran = null; // 直前に描画した粒度。変わったとき(=バケット数が変わるとき)だけ右端へ寄せる。
 
   function buildBuckets(gran){
@@ -582,8 +582,8 @@ const APP_JS = `<script>
   function clearNode(node){ while(node.firstChild){ node.removeChild(node.firstChild); } }
 
   // ---- 日別/週別/月別 チャート ----
-  var chartEl = document.getElementById('acn-chart');
-  var tip = document.getElementById('acn-tip');
+  var chartEl = document.getElementById('cccn-chart');
+  var tip = document.getElementById('cccn-tip');
 
   function renderChart(){
     if(!chartEl) return;
@@ -663,7 +663,7 @@ const APP_JS = `<script>
         xl.textContent = bucketLabel(b.key, GRAN);
         svg.appendChild(xl);
       }
-      var band2 = svgEl('rect', { 'class':'acn-band'+(b.key===SEL?' sel':''), x:f2(ml+band*i), y:mt, width:f2(band), height:plotH });
+      var band2 = svgEl('rect', { 'class':'cccn-band'+(b.key===SEL?' sel':''), x:f2(ml+band*i), y:mt, width:f2(band), height:plotH });
       band2.setAttribute('data-i', String(i));
       (function(bucket){
         band2.addEventListener('pointermove', function(e){ showTip(e, bucket); });
@@ -684,7 +684,7 @@ const APP_JS = `<script>
     var scroller = chartEl.parentNode;
     if(scroller){
       if(lastRenderedGran === null){
-        var saved = parseInt(ssGet('acn-chart-scroll'), 10);
+        var saved = parseInt(ssGet('cccn-chart-scroll'), 10);
         scroller.scrollLeft = isNaN(saved) ? scroller.scrollWidth : saved;
       } else if(GRAN !== lastRenderedGran){
         scroller.scrollLeft = scroller.scrollWidth;
@@ -726,7 +726,7 @@ const APP_JS = `<script>
   }
 
   // ---- モデル別内訳 ----
-  var modelEl = document.getElementById('acn-bymodel');
+  var modelEl = document.getElementById('cccn-bymodel');
   function renderByModel(sub){
     if(!modelEl) return;
     clearNode(modelEl);
@@ -766,7 +766,7 @@ const APP_JS = `<script>
   }
 
   // ---- プロジェクト別 ----
-  var projEl = document.getElementById('acn-byproject');
+  var projEl = document.getElementById('cccn-byproject');
   function renderByProject(sub){
     if(!projEl) return;
     clearNode(projEl);
@@ -800,7 +800,7 @@ const APP_JS = `<script>
   }
 
   // ---- 月予算(選択中の月に連動)----
-  var budgetEl = document.getElementById('acn-budget');
+  var budgetEl = document.getElementById('cccn-budget');
   var BUDGET = +data.budget || 0;
   var BUDGET_RATE = +data.budgetRate || 0;
   function monthKeyOf(t){ var d = new Date(t); if(isNaN(d.getTime())) return null; return d.getFullYear() + '-' + pad(d.getMonth()+1); }
@@ -925,7 +925,7 @@ const APP_JS = `<script>
   }
 
   // ---- 選択ラベル・コントロール ----
-  var selLabelEl = document.getElementById('acn-sel-label');
+  var selLabelEl = document.getElementById('cccn-sel-label');
   function updateSelLabel(sub){
     if(!selLabelEl) return;
     var usd = 0, jpy = 0;
@@ -938,7 +938,7 @@ const APP_JS = `<script>
   function updateControls(){
     var gbtns = document.querySelectorAll('[data-gran]');
     for(var i=0;i<gbtns.length;i++){ gbtns[i].classList.toggle('active', gbtns[i].getAttribute('data-gran') === GRAN); }
-    var allBtn = document.getElementById('acn-all');
+    var allBtn = document.getElementById('cccn-all');
     if(allBtn) allBtn.classList.toggle('active', SEL === null);
   }
 
@@ -959,24 +959,24 @@ const APP_JS = `<script>
   for(var i=0;i<gbtns.length;i++){
     (function(btn){ btn.addEventListener('click', function(){ setGran(btn.getAttribute('data-gran')); setSel(null); render(); }); })(gbtns[i]);
   }
-  var allBtn = document.getElementById('acn-all');
+  var allBtn = document.getElementById('cccn-all');
   if(allBtn) allBtn.addEventListener('click', function(){ setSel(null); render(); });
   if(search){
-    var saved = ssGet('acn-search');
+    var saved = ssGet('cccn-search');
     if(saved !== null) search.value = saved;
-    search.addEventListener('input', function(){ ssSet('acn-search', search.value); applyFilter(); });
+    search.addEventListener('input', function(){ ssSet('cccn-search', search.value); applyFilter(); });
   }
 
   render();
 
   // 自動リロードを跨いでスクロール位置を維持する(ロード時に復元 → 以後は保存のみ)。
-  var savedScroll = ssGet('acn-scroll');
+  var savedScroll = ssGet('cccn-scroll');
   if(savedScroll !== null){ var sy = parseInt(savedScroll, 10); if(!isNaN(sy)){ try { window.scrollTo(0, sy); } catch(e){} } }
-  window.addEventListener('scroll', function(){ ssSet('acn-scroll', String(window.scrollY)); });
+  window.addEventListener('scroll', function(){ ssSet('cccn-scroll', String(window.scrollY)); });
 
   // チャートの横スクロール位置も保存する(リロード跨ぎの復元用。復元は renderChart の初回で行う)。
   var chartScroller = chartEl ? chartEl.parentNode : null;
-  if(chartScroller){ chartScroller.addEventListener('scroll', function(){ ssSet('acn-chart-scroll', String(chartScroller.scrollLeft)); }); }
+  if(chartScroller){ chartScroller.addEventListener('scroll', function(){ ssSet('cccn-chart-scroll', String(chartScroller.scrollLeft)); }); }
 })();
 </script>`;
 
@@ -1010,9 +1010,9 @@ function budgetCard(budgetUSD: number, month: PeriodTotals, fallbackRate: number
   const width = Math.max(0, Math.min(100, pct));
   const level = pct >= 100 ? "over" : pct >= 70 ? "warn" : "ok";
   const budgetJpy = budgetUSD * fallbackRate;
-  // サーバは初期表示(当月)を描画し、ブラウザ側が選択中の月に合わせて #acn-budget を差し替える。
+  // サーバは初期表示(当月)を描画し、ブラウザ側が選択中の月に合わせて #cccn-budget を差し替える。
   return (
-    `<section class="card" id="acn-budget">` +
+    `<section class="card" id="cccn-budget">` +
     `<h2>月予算 / Monthly budget<span class="stat-sub"> 今月(暦月)</span></h2>` +
     `<div class="budget-bar"><div class="budget-fill lvl-${level}" style="width:${width.toFixed(1)}%"></div></div>` +
     `<div class="budget-foot">` +
@@ -1100,8 +1100,8 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     autoUpdateFoot +
     `<div class="foot">ccc-notifier v${esc(version)} · データはローカルのみ / all data stays local</div>` +
     `</div>` +
-    `<div id="acn-tip" class="acn-tip" hidden></div>` +
-    `<script id="acn-data" type="application/json">${dataJson}</script>` +
+    `<div id="cccn-tip" class="cccn-tip" hidden></div>` +
+    `<script id="cccn-data" type="application/json">${dataJson}</script>` +
     APP_JS +
     `</body></html>`;
 
@@ -1162,11 +1162,11 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<button type="button" data-gran="week">週</button>` +
     `<button type="button" data-gran="month">月</button>` +
     `</div>` +
-    `<button type="button" id="acn-all" class="btn">通算</button>` +
-    `<span id="acn-sel-label" class="sel-label"></span>` +
+    `<button type="button" id="cccn-all" class="btn">通算</button>` +
+    `<span id="cccn-sel-label" class="sel-label"></span>` +
     `</div>` +
     renderLegend(map.slots) +
-    `<div class="chart-scroll"><div id="acn-chart"></div></div>` +
+    `<div class="chart-scroll"><div id="cccn-chart"></div></div>` +
     `</section>`;
 
   // ---- モデル別 + プロジェクト別(選択連動) ----
@@ -1175,12 +1175,12 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<section class="card">` +
     `<h2>モデル別内訳 / By model</h2>` +
     `<p class="note">選択中の期間(既定は通算)のコスト降順。複数モデルのターンは各モデルに1ずつ計上。</p>` +
-    `<div class="table-wrap" id="acn-bymodel"></div>` +
+    `<div class="table-wrap" id="cccn-bymodel"></div>` +
     `</section>` +
     `<section class="card">` +
     `<h2>プロジェクト別 / By project</h2>` +
     `<p class="note">選択中の期間のプロジェクト(ディレクトリ basename)単位・コスト降順。</p>` +
-    `<div class="table-wrap" id="acn-byproject"></div>` +
+    `<div class="table-wrap" id="cccn-byproject"></div>` +
     `</section>` +
     `</div>`;
 

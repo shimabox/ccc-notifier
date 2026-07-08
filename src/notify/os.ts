@@ -192,7 +192,7 @@ export async function notifyOS(record: TurnRecord, cfg: Config, todayUSD?: numbe
 
     const { title, body } = formatSummary(record, cfg, todayUSD);
 
-    if (process.env.ACN_DRY_RUN === "1") {
+    if (process.env.CCCN_DRY_RUN === "1") {
       writeDryRun("os", { title, body });
       return;
     }

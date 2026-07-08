@@ -139,12 +139,12 @@ describe("runReport", () => {
   let tmpHome: string;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "acn-cli-test-report-"));
-    process.env.ACN_HOME = tmpHome;
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-cli-test-report-"));
+    process.env.CCCN_HOME = tmpHome;
   });
 
   afterEach(() => {
-    delete process.env.ACN_HOME;
+    delete process.env.CCCN_HOME;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -326,17 +326,17 @@ describe("runDoctor", () => {
   let badSettingsPath: string;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "acn-cli-test-doctor-"));
-    process.env.ACN_HOME = tmpHome;
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-cli-test-doctor-"));
+    process.env.CCCN_HOME = tmpHome;
 
-    // ACN_CLAUDE_PROJECTS: 一時dir配下に proj/x.jsonl として transcript フィクスチャを配置
+    // CCCN_CLAUDE_PROJECTS: 一時dir配下に proj/x.jsonl として transcript フィクスチャを配置
     projectsDir = join(tmpHome, "claude-projects");
     mkdirSync(join(projectsDir, "proj"), { recursive: true });
     copyFileSync(
       fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url)),
       join(projectsDir, "proj", "x.jsonl"),
     );
-    process.env.ACN_CLAUDE_PROJECTS = projectsDir;
+    process.env.CCCN_CLAUDE_PROJECTS = projectsDir;
 
     // hook コマンドが指すスクリプトパスとして実在するダミーファイルを用意する
     // (script path 存在チェックが ⚠️ にならず ✅ になることを確認するため)。
@@ -373,22 +373,22 @@ describe("runDoctor", () => {
     badSettingsPath = join(tmpHome, "settings-bad.json");
     writeFileSync(badSettingsPath, rawFixture, "utf8");
 
-    process.env.ACN_DRY_RUN = "1";
+    process.env.CCCN_DRY_RUN = "1";
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in test")));
   });
 
   afterEach(() => {
-    delete process.env.ACN_CLAUDE_PROJECTS;
-    delete process.env.ACN_CLAUDE_SETTINGS;
-    delete process.env.ACN_DRY_RUN;
-    delete process.env.ACN_HOME;
+    delete process.env.CCCN_CLAUDE_PROJECTS;
+    delete process.env.CCCN_CLAUDE_SETTINGS;
+    delete process.env.CCCN_DRY_RUN;
+    delete process.env.CCCN_HOME;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
   it("Stop hook 登録済み・fetch 全滅でも ❌ 無しで 0 を返す", async () => {
-    process.env.ACN_CLAUDE_SETTINGS = goodSettingsPath;
+    process.env.CCCN_CLAUDE_SETTINGS = goodSettingsPath;
 
     const { code, output } = await captureLogs(() => runDoctor());
 
@@ -398,7 +398,7 @@ describe("runDoctor", () => {
   });
 
   it("Stop エントリの無い settings.json では 1 を返す", async () => {
-    process.env.ACN_CLAUDE_SETTINGS = badSettingsPath;
+    process.env.CCCN_CLAUDE_SETTINGS = badSettingsPath;
 
     const { code, output } = await captureLogs(() => runDoctor());
 
@@ -430,7 +430,7 @@ describe("runDoctor", () => {
       "settings-nodepath.json",
       `"/no/such/mise/node/bin/node" "${scriptPath}" track`,
     );
-    process.env.ACN_CLAUDE_SETTINGS = p;
+    process.env.CCCN_CLAUDE_SETTINGS = p;
 
     const { code, output } = await captureLogs(() => runDoctor());
 
@@ -443,7 +443,7 @@ describe("runDoctor", () => {
   it("hook の第1トークンがベア名 'node' なら Node 実行パス警告を出さない", async () => {
     const scriptPath = join(tmpHome, "ccc-notifier-dist", "cli.js");
     const p = writeSettingsWithCommand("settings-barenode.json", `node "${scriptPath}" track`);
-    process.env.ACN_CLAUDE_SETTINGS = p;
+    process.env.CCCN_CLAUDE_SETTINGS = p;
 
     const { code, output } = await captureLogs(() => runDoctor());
 
@@ -460,10 +460,10 @@ describe("main sweep", () => {
   let projectsRoot: string;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "acn-cli-test-sweep-"));
-    projectsRoot = mkdtempSync(join(tmpdir(), "acn-cli-test-sweep-proj-"));
-    process.env.ACN_HOME = tmpHome;
-    process.env.ACN_CLAUDE_PROJECTS = projectsRoot;
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-cli-test-sweep-"));
+    projectsRoot = mkdtempSync(join(tmpdir(), "cccn-cli-test-sweep-proj-"));
+    process.env.CCCN_HOME = tmpHome;
+    process.env.CCCN_CLAUDE_PROJECTS = projectsRoot;
     // 実ネットワークに出ない保険(単価 builtin / fx fixed 150 に決定的にフォールバック)。
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 
@@ -479,8 +479,8 @@ describe("main sweep", () => {
   });
 
   afterEach(() => {
-    delete process.env.ACN_HOME;
-    delete process.env.ACN_CLAUDE_PROJECTS;
+    delete process.env.CCCN_HOME;
+    delete process.env.CCCN_CLAUDE_PROJECTS;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     rmSync(tmpHome, { recursive: true, force: true });

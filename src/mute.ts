@@ -2,7 +2,7 @@
 //
 // 抑止するのは OS/Slack 通知のみ。track の履歴記録・ダッシュボード再生成は止めない
 // (「静かにしてほしいが計上は続けたい」が典型ユースケースのため)。
-// 状態は ACN_HOME/muted.json({ until: string | null })。config.json には触れない。
+// 状態は CCCN_HOME/muted.json({ until: string | null })。config.json には触れない。
 
 import { clearMuteState, isMuted, readMuteState, writeMuteState } from "./store";
 

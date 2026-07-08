@@ -108,24 +108,24 @@ function runCli(args: string[], opts: { env: NodeJS.ProcessEnv; stdin?: string }
 }
 
 // ============ サンドボックス ============
-// 各テストで ACN_HOME・fixture transcript のコピー・settings.json のコピー・
-// ACN_CLAUDE_PROJECTS 用ディレクトリを一時領域に作り直す。実ホーム
+// 各テストで CCCN_HOME・fixture transcript のコピー・settings.json のコピー・
+// CCCN_CLAUDE_PROJECTS 用ディレクトリを一時領域に作り直す。実ホーム
 // (~/.claude や ~/.ccc-notifier)には一切触れない。
 
 interface Sandbox {
   tmp: string;
-  acnHome: string;
+  cccnHome: string;
   transcriptPath: string; // track の stdin (transcript_path) に使う fixture のコピー
-  settingsPath: string; // ACN_CLAUDE_SETTINGS に使う fixture のコピー
-  projectsDir: string; // ACN_CLAUDE_PROJECTS。proj/session.jsonl に fixture のコピーを配置
+  settingsPath: string; // CCCN_CLAUDE_SETTINGS に使う fixture のコピー
+  projectsDir: string; // CCCN_CLAUDE_PROJECTS。proj/session.jsonl に fixture のコピーを配置
   env: NodeJS.ProcessEnv;
 }
 
 function createSandbox(): Sandbox {
-  const tmp = mkdtempSync(join(tmpdir(), "acn-e2e-"));
+  const tmp = mkdtempSync(join(tmpdir(), "cccn-e2e-"));
 
-  const acnHome = join(tmp, "acn-home");
-  const cacheDir = join(acnHome, "cache");
+  const cccnHome = join(tmp, "cccn-home");
+  const cacheDir = join(cccnHome, "cache");
   mkdirSync(cacheDir, { recursive: true });
 
   // 為替を決定的にする: costJPY = costUSD × 150 が常に確定するよう、新鮮な fx キャッシュを
@@ -182,14 +182,14 @@ function createSandbox(): Sandbox {
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    ACN_HOME: acnHome,
-    ACN_DRY_RUN: "1",
-    ACN_CLAUDE_SETTINGS: settingsPath,
-    ACN_CLAUDE_PROJECTS: projectsDir,
-    ACN_CLI_PATH: CLI_PATH,
+    CCCN_HOME: cccnHome,
+    CCCN_DRY_RUN: "1",
+    CCCN_CLAUDE_SETTINGS: settingsPath,
+    CCCN_CLAUDE_PROJECTS: projectsDir,
+    CCCN_CLI_PATH: CLI_PATH,
   };
 
-  return { tmp, acnHome, transcriptPath, settingsPath, projectsDir, env };
+  return { tmp, cccnHome, transcriptPath, settingsPath, projectsDir, env };
 }
 
 function cleanupSandbox(sb: Sandbox): void {
@@ -206,8 +206,8 @@ function stdinFor(transcriptPath: string): string {
   return raw.replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(transcriptPath));
 }
 
-function readHistory(acnHome: string): TurnRecord[] {
-  const file = join(acnHome, "history.jsonl");
+function readHistory(cccnHome: string): TurnRecord[] {
+  const file = join(cccnHome, "history.jsonl");
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8")
     .split("\n")
@@ -254,7 +254,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
 
-    const rows = readHistory(sb.acnHome);
+    const rows = readHistory(sb.cccnHome);
     expect(rows).toHaveLength(1);
     const rec = rows[0];
 
@@ -282,13 +282,13 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(rec.costByModel!["claude-fable-5"]).toBeCloseTo(0.261, 10);
     expect(rec.costByModel!["claude-haiku-4-5"]).toBeCloseTo(0.006, 10);
 
-    const notify = readJson(join(sb.acnHome, "last-notify.json"));
+    const notify = readJson(join(sb.cccnHome, "last-notify.json"));
     expect(notify.os.title).toContain("$0.267");
     expect(notify.os.title).toContain("¥40");
     expect(notify.os.title).toContain("API換算");
 
     // track による report.html 自動再生成(dashboard.autoRegenerate 既定 true)。
-    const reportPath = join(sb.acnHome, "report.html");
+    const reportPath = join(sb.cccnHome, "report.html");
     expect(existsSync(reportPath)).toBe(true);
     const reportHtml = readFileSync(reportPath, "utf8");
     expect(reportHtml).toContain("ccc-notifier");
@@ -302,12 +302,12 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
 
     const first = await runCli(["track"], { env: sb.env, stdin });
     expect(first.code).toBe(0);
-    expect(readHistory(sb.acnHome)).toHaveLength(1);
+    expect(readHistory(sb.cccnHome)).toHaveLength(1);
 
     const second = await runCli(["track"], { env: sb.env, stdin });
     expect(second.code).toBe(0);
     expect(second.stdout).toBe("");
-    expect(readHistory(sb.acnHome)).toHaveLength(1);
+    expect(readHistory(sb.cccnHome)).toHaveLength(1);
   });
 
   // ---- 3. 追記継続 ----
@@ -315,7 +315,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const stdin = stdinFor(sb.transcriptPath);
 
     await runCli(["track"], { env: sb.env, stdin });
-    expect(readHistory(sb.acnHome)).toHaveLength(1);
+    expect(readHistory(sb.cccnHome)).toHaveLength(1);
 
     const newLine = {
       parentUuid: "u3",
@@ -349,7 +349,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
 
-    const rows = readHistory(sb.acnHome);
+    const rows = readHistory(sb.cccnHome);
     expect(rows).toHaveLength(2);
     const added = rows[1];
     expect(added.costUSD).toBeCloseTo(0.05, 10); // 1000 出力トークン × $50/1e6
@@ -363,12 +363,12 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const a = await runCli(["track"], { env: sb.env, stdin: "not json" });
     expect(a.code).toBe(0);
     expect(a.stdout).toBe("");
-    expect(readHistory(sb.acnHome)).toHaveLength(0);
+    expect(readHistory(sb.cccnHome)).toHaveLength(0);
 
     const empty = await runCli(["track"], { env: sb.env, stdin: "" });
     expect(empty.code).toBe(0);
     expect(empty.stdout).toBe("");
-    expect(readHistory(sb.acnHome)).toHaveLength(0);
+    expect(readHistory(sb.cccnHome)).toHaveLength(0);
 
     const b = await runCli(["track"], {
       env: sb.env,
@@ -376,21 +376,21 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     });
     expect(b.code).toBe(0);
     expect(b.stdout).toBe("");
-    expect(readHistory(sb.acnHome)).toHaveLength(0);
+    expect(readHistory(sb.cccnHome)).toHaveLength(0);
 
     // 不正入力3種のいずれでも通知は一切発火しない。
-    expect(existsSync(join(sb.acnHome, "last-notify.json"))).toBe(false);
+    expect(existsSync(join(sb.cccnHome, "last-notify.json"))).toBe(false);
   });
 
   // ---- 5. カーソル破損耐性 ----
   it("5. track: cursors.json が壊れていても exit 0 で正常に1行記録し、二重計上しない", async () => {
-    writeFileSync(join(sb.acnHome, "cursors.json"), "broken{{{", "utf8");
+    writeFileSync(join(sb.cccnHome, "cursors.json"), "broken{{{", "utf8");
 
     const result = await runCli(["track"], { env: sb.env, stdin: stdinFor(sb.transcriptPath) });
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
 
-    const rows = readHistory(sb.acnHome);
+    const rows = readHistory(sb.cccnHome);
     expect(rows).toHaveLength(1);
     expect(rows[0].apiCalls).toBe(2);
     expect(rows[0].costUSD).toBeCloseTo(0.267, 10);
@@ -426,11 +426,11 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     // バックアップ (.bak-*) が生成されている。
     expect(findBackups(sb.settingsPath).length).toBeGreaterThanOrEqual(1);
 
-    // ACN_HOME/config.json が生成されている。
-    expect(existsSync(join(sb.acnHome, "config.json"))).toBe(true);
+    // CCCN_HOME/config.json が生成されている。
+    expect(existsSync(join(sb.cccnHome, "config.json"))).toBe(true);
 
     // last-notify.json にテスト通知が書かれている。
-    const notifyAfterInit1 = readJson(join(sb.acnHome, "last-notify.json"));
+    const notifyAfterInit1 = readJson(join(sb.cccnHome, "last-notify.json"));
     expect(typeof notifyAfterInit1.os.title).toBe("string");
     expect(notifyAfterInit1.os.title).toContain("💰");
 
@@ -458,12 +458,12 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(afterUninstall1.unknownFutureKey).toEqual(before.unknownFutureKey);
     expect(afterUninstall1.hooks.PermissionRequest).toEqual(before.hooks.PermissionRequest);
     expect(afterUninstall1.hooks.SessionStart).toEqual(before.hooks.SessionStart);
-    expect(existsSync(sb.acnHome)).toBe(true); // --purge 無しではデータディレクトリは残る
+    expect(existsSync(sb.cccnHome)).toBe(true); // --purge 無しではデータディレクトリは残る
 
     // --- uninstall --yes --purge ---
     const uninstall2 = await runCli(["uninstall", "--yes", "--purge"], { env: sb.env });
     expect(uninstall2.code).toBe(0);
-    expect(existsSync(sb.acnHome)).toBe(false);
+    expect(existsSync(sb.cccnHome)).toBe(false);
   });
 
   // ---- 7. exit code 規約 ----
@@ -495,7 +495,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
   it("9. report: track で2ターン記録した後、--json --days 9999 の合計値が期待どおりで、表形式も exit 0", async () => {
     const stdin = stdinFor(sb.transcriptPath);
     await runCli(["track"], { env: sb.env, stdin });
-    expect(readHistory(sb.acnHome)).toHaveLength(1);
+    expect(readHistory(sb.cccnHome)).toHaveLength(1);
 
     const newLine = {
       parentUuid: "u3",
@@ -523,7 +523,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     };
     appendFileSync(sb.transcriptPath, "\n" + JSON.stringify(newLine) + "\n", "utf8");
     await runCli(["track"], { env: sb.env, stdin });
-    expect(readHistory(sb.acnHome)).toHaveLength(2);
+    expect(readHistory(sb.cccnHome)).toHaveLength(2);
 
     const jsonResult = await runCli(["report", "--json", "--days", "9999"], { env: sb.env });
     expect(jsonResult.code).toBe(0);
@@ -550,7 +550,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
 
-    const rows = readHistory(sb.acnHome);
+    const rows = readHistory(sb.cccnHome);
     expect(rows).toHaveLength(1);
     const rec = rows[0];
     // メインは GOLDEN どおり(SA は混入しない)。
@@ -565,26 +565,26 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     // dashboard を生成すると、SA のモデル(Sonnet 5)と「うちサブエージェント」が HTML に現れる。
     const dash = await runCli(["dashboard", "--no-open"], { env: sb.env });
     expect(dash.code).toBe(0);
-    const html = readFileSync(join(sb.acnHome, "report.html"), "utf8");
+    const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
     expect(html).toContain("Sonnet 5");
     expect(html).toContain("うちサブエージェント");
   });
 
   // ---- 11. sweep: dry-run はサマリのみ、本実行で ingest:"sweep" の履歴が入る ----
   it('11. sweep: --dry-run prints a summary without writing, then a real run backfills ingest:"sweep" history', async () => {
-    // 走査対象 = ACN_CLAUDE_PROJECTS(projectsDir)/proj/session.jsonl(transcript-basic フィクスチャ)。
+    // 走査対象 = CCCN_CLAUDE_PROJECTS(projectsDir)/proj/session.jsonl(transcript-basic フィクスチャ)。
     const dry = await runCli(["sweep", "--dry-run"], { env: sb.env });
     expect(dry.code).toBe(0);
     expect(dry.stdout).toContain("dry-run: 書き込みは行っていません");
     expect(dry.stdout).toContain("走査:");
     // dry-run では history を書かない。
-    expect(readHistory(sb.acnHome)).toHaveLength(0);
+    expect(readHistory(sb.cccnHome)).toHaveLength(0);
 
     const real = await runCli(["sweep"], { env: sb.env });
     expect(real.code).toBe(0);
     expect(real.stdout).toContain("走査:");
 
-    const rows = readHistory(sb.acnHome);
+    const rows = readHistory(sb.cccnHome);
     expect(rows.length).toBeGreaterThanOrEqual(1);
     expect(rows.every((r) => r.ingest === "sweep")).toBe(true);
     // transcript-basic を1ターンに復元(GOLDEN 0.267)。

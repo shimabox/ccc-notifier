@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config, TurnRecord } from "../src/types";
 import { formatJPY, formatSummary, formatTokens, formatUSD, modelDisplayName } from "../src/format";
-import { acnHome, appendNotifyError, writeDryRun } from "../src/notify/util";
+import { cccnHome, appendNotifyError, writeDryRun } from "../src/notify/util";
 import { notifyOS } from "../src/notify/os";
 import { notifySlack } from "../src/notify/slack";
 
@@ -164,17 +164,17 @@ describe("notify/util", () => {
   let tmpHome: string;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "acn-util-"));
-    process.env.ACN_HOME = tmpHome;
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-util-"));
+    process.env.CCCN_HOME = tmpHome;
   });
 
   afterEach(() => {
     rmSync(tmpHome, { recursive: true, force: true });
-    delete process.env.ACN_HOME;
+    delete process.env.CCCN_HOME;
   });
 
-  it("acnHome creates the data directory and returns its path", () => {
-    const home = acnHome();
+  it("cccnHome creates the data directory and returns its path", () => {
+    const home = cccnHome();
     expect(home).toBe(tmpHome);
     expect(existsSync(home)).toBe(true);
   });
@@ -204,9 +204,9 @@ describe("notifyOS", () => {
   const originalPlatform = process.platform;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "acn-notify-os-"));
-    process.env.ACN_HOME = tmpHome;
-    delete process.env.ACN_DRY_RUN;
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-notify-os-"));
+    process.env.CCCN_HOME = tmpHome;
+    delete process.env.CCCN_DRY_RUN;
     mockSpawn.mockReset();
     fakeChild = createFakeChild();
     mockSpawn.mockImplementation(() => fakeChild);
@@ -214,14 +214,14 @@ describe("notifyOS", () => {
 
   afterEach(() => {
     rmSync(tmpHome, { recursive: true, force: true });
-    delete process.env.ACN_HOME;
-    delete process.env.ACN_DRY_RUN;
-    delete process.env.ACN_FORCE_WSL;
+    delete process.env.CCCN_HOME;
+    delete process.env.CCCN_DRY_RUN;
+    delete process.env.CCCN_FORCE_WSL;
     setPlatform(originalPlatform);
   });
 
   it("writes title/body under the 'os' key in last-notify.json during DRY_RUN", async () => {
-    process.env.ACN_DRY_RUN = "1";
+    process.env.CCCN_DRY_RUN = "1";
     await notifyOS(baseRecord, baseConfig);
 
     const parsed = JSON.parse(readFileSync(join(tmpHome, "last-notify.json"), "utf8"));
@@ -288,7 +288,7 @@ describe("notifyOS", () => {
     expect(decoded).toContain(Buffer.from(expected.body, "utf8").toString("base64"));
     // 送信元表示用の専用 AUMID を使う。
     expect(decoded).toContain("ccc-notifier.notify");
-    // 環境変数 ACN_TITLE/ACN_BODY はもう渡さない。
+    // 環境変数 CCCN_TITLE/CCCN_BODY はもう渡さない。
     expect(options.env).toBeUndefined();
   });
 
@@ -331,7 +331,7 @@ describe("notifyOS", () => {
 
   it("routes to the powershell toast on WSL (platform=linux) instead of notify-send", async () => {
     setPlatform("linux");
-    process.env.ACN_FORCE_WSL = "1";
+    process.env.CCCN_FORCE_WSL = "1";
     try {
       const pending = notifyOS(baseRecord, baseConfig);
       fakeChild.emit("exit", 0);
@@ -342,13 +342,13 @@ describe("notifyOS", () => {
       expect(command).toBe("powershell.exe");
       expect(args).toContain("-EncodedCommand");
     } finally {
-      delete process.env.ACN_FORCE_WSL;
+      delete process.env.CCCN_FORCE_WSL;
     }
   });
 
   it("logs (does not swallow) a spawn error on WSL, unlike plain Linux", async () => {
     setPlatform("linux");
-    process.env.ACN_FORCE_WSL = "1";
+    process.env.CCCN_FORCE_WSL = "1";
     try {
       const pending = notifyOS(baseRecord, baseConfig);
       fakeChild.emit("error", new Error("spawn powershell.exe ENOENT"));
@@ -358,7 +358,7 @@ describe("notifyOS", () => {
       expect(errLog).toContain("notifyOS");
       expect(errLog).toContain("spawn powershell.exe ENOENT");
     } finally {
-      delete process.env.ACN_FORCE_WSL;
+      delete process.env.CCCN_FORCE_WSL;
     }
   });
 
@@ -387,19 +387,19 @@ describe("notifySlack", () => {
   };
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "acn-notify-slack-"));
-    process.env.ACN_HOME = tmpHome;
-    delete process.env.ACN_DRY_RUN;
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-notify-slack-"));
+    process.env.CCCN_HOME = tmpHome;
+    delete process.env.CCCN_DRY_RUN;
   });
 
   afterEach(() => {
     rmSync(tmpHome, { recursive: true, force: true });
-    delete process.env.ACN_HOME;
-    delete process.env.ACN_DRY_RUN;
+    delete process.env.CCCN_HOME;
+    delete process.env.CCCN_DRY_RUN;
   });
 
   it("writes header/section/context blocks and truncates the prompt during DRY_RUN", async () => {
-    process.env.ACN_DRY_RUN = "1";
+    process.env.CCCN_DRY_RUN = "1";
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -420,7 +420,7 @@ describe("notifySlack", () => {
   });
 
   it("sends the full prompt when sendFullPrompt is true", async () => {
-    process.env.ACN_DRY_RUN = "1";
+    process.env.CCCN_DRY_RUN = "1";
     vi.stubGlobal("fetch", vi.fn());
 
     const fullPromptConfig: Config = {

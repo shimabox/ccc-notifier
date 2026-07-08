@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { Config, Cursor, DEFAULT_CONFIG, TurnRecord } from "./types";
 
-export interface AcnPaths {
+export interface CccnPaths {
   home: string;
   configFile: string;
   historyFile: string;
@@ -32,11 +32,11 @@ const ERROR_LOG_MAX_BYTES = 1024 * 1024; // 1MB
 
 /**
  * データディレクトリ配下の各パスを返す。
- * - ACN_HOME は呼び出しのたびに評価する(モジュールロード時に固定しない)。
+ * - CCCN_HOME は呼び出しのたびに評価する(モジュールロード時に固定しない)。
  * - home / cacheDir はここで冪等に mkdirSync(recursive) しておく。
  */
-export function paths(): AcnPaths {
-  const home = process.env.ACN_HOME || join(homedir(), ".ccc-notifier");
+export function paths(): CccnPaths {
+  const home = process.env.CCCN_HOME || join(homedir(), ".ccc-notifier");
   const cacheDir = join(home, "cache");
   mkdirSync(home, { recursive: true });
   mkdirSync(cacheDir, { recursive: true });
@@ -146,7 +146,7 @@ export function readConfig(): Config {
 
 // ---- 通知ミュート(muted.json) ----
 //
-// `acn mute` / `acn unmute` が管理する通知の一時停止状態。抑止するのは OS/Slack 通知のみで、
+// `cccn mute` / `cccn unmute` が管理する通知の一時停止状態。抑止するのは OS/Slack 通知のみで、
 // 履歴の記録・ダッシュボード再生成は止めない。config.json とは独立のマーカーファイルにする
 // ことで、ユーザーの config を CLI が書き換えない方針(readConfig のコメント参照)を保つ。
 

@@ -46,7 +46,7 @@ export async function notifySlack(record: TurnRecord, cfg: Config, todayUSD?: nu
       ],
     };
 
-    if (process.env.ACN_DRY_RUN === "1") {
+    if (process.env.CCCN_DRY_RUN === "1") {
       writeDryRun("slack", { payload });
       return;
     }

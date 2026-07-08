@@ -1,8 +1,8 @@
 // test/dashboard.test.ts
 //
-// runDashboard を直接 import し、一時 ACN_HOME に seed した履歴から生成される HTML を検証する。
+// runDashboard を直接 import し、一時 CCCN_HOME に seed した履歴から生成される HTML を検証する。
 // 日/週/月・通算の集計と描画はブラウザ側(埋め込み JSON + JS)で行うため、サーバ側テストでは
-//  - 埋め込みデータ(#acn-data)の形と数値(全ターン・slot 別コスト)
+//  - 埋め込みデータ(#cccn-data)の形と数値(全ターン・slot 別コスト)
 //  - セキュリティ不変条件(外部参照ゼロ / </script> 脱出防止 / 危険プロンプト非実行 / 10,000字切詰め)
 //  - 期間フィルタ(--days)・出力先(--out)・自動リロード(meta refresh)・空状態
 //  - 操作 UI(粒度トグル・通算ボタン・各コンテナ)の存在
@@ -25,16 +25,16 @@ let tmpHome: string;
 let prevHome: string | undefined;
 
 beforeEach(() => {
-  prevHome = process.env.ACN_HOME;
-  tmpHome = mkdtempSync(join(tmpdir(), "acn-dashboard-test-"));
-  process.env.ACN_HOME = tmpHome;
+  prevHome = process.env.CCCN_HOME;
+  tmpHome = mkdtempSync(join(tmpdir(), "cccn-dashboard-test-"));
+  process.env.CCCN_HOME = tmpHome;
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
-  if (prevHome === undefined) delete process.env.ACN_HOME;
-  else process.env.ACN_HOME = prevHome;
+  if (prevHome === undefined) delete process.env.CCCN_HOME;
+  else process.env.CCCN_HOME = prevHome;
 });
 
 async function run(argv: string[]): Promise<number> {
@@ -93,12 +93,12 @@ function readHtml(path = join(tmpHome, "report.html")): string {
   return readFileSync(path, "utf8");
 }
 
-const ACN_DATA_OPEN = '<script id="acn-data" type="application/json">';
+const CCCN_DATA_OPEN = '<script id="cccn-data" type="application/json">';
 
 function extractDataRaw(html: string): string {
-  const i = html.indexOf(ACN_DATA_OPEN);
+  const i = html.indexOf(CCCN_DATA_OPEN);
   expect(i).toBeGreaterThanOrEqual(0);
-  const start = i + ACN_DATA_OPEN.length;
+  const start = i + CCCN_DATA_OPEN.length;
   const end = html.indexOf("</script>", start);
   expect(end).toBeGreaterThan(start);
   return html.slice(start, end);
@@ -170,7 +170,7 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(html).not.toContain("@import");
   });
 
-  it("#acn-data は生の </script> を含まず、危険プロンプトの < は \\u003c にエスケープされる", async () => {
+  it("#cccn-data は生の </script> を含まず、危険プロンプトの < は \\u003c にエスケープされる", async () => {
     seedStandard();
     await run(["--no-open"]);
     const raw = extractDataRaw(readHtml());
@@ -220,10 +220,10 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(html).toContain('data-gran="day"');
     expect(html).toContain('data-gran="week"');
     expect(html).toContain('data-gran="month"');
-    expect(html).toContain('id="acn-all"');
-    expect(html).toContain('id="acn-chart"');
-    expect(html).toContain('id="acn-bymodel"');
-    expect(html).toContain('id="acn-byproject"');
+    expect(html).toContain('id="cccn-all"');
+    expect(html).toContain('id="cccn-chart"');
+    expect(html).toContain('id="cccn-bymodel"');
+    expect(html).toContain('id="cccn-byproject"');
     expect(html).toContain('id="turn-body"');
     expect(html).toContain('id="turn-search"');
     expect(html).toContain("通算");
@@ -234,10 +234,10 @@ describe("runDashboard — 標準シナリオ", () => {
     await run(["--no-open"]);
     const html = readHtml();
     expect(html).toContain("sessionStorage");
-    expect(html).toContain("acn-gran");
-    expect(html).toContain("acn-sel");
-    expect(html).toContain("acn-search");
-    expect(html).toContain("acn-scroll");
+    expect(html).toContain("cccn-gran");
+    expect(html).toContain("cccn-sel");
+    expect(html).toContain("cccn-search");
+    expect(html).toContain("cccn-scroll");
     expect(html).toContain("window.scrollTo");
   });
 });
@@ -417,12 +417,12 @@ describe("runDashboard — 月予算カード", () => {
     writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ monthlyBudgetUSD: usd }), "utf8");
   }
 
-  // カードの有無はコンテナ #acn-budget で判定する(「月予算」の文字列は
+  // カードの有無はコンテナ #cccn-budget で判定する(「月予算」の文字列は
   // クライアント JS 内にも含まれるため、テキスト検索では判定できない)。
-  it("予算未設定(0)ならカード(#acn-budget)は出ない", async () => {
+  it("予算未設定(0)ならカード(#cccn-budget)は出ない", async () => {
     appendTurn(makeTurn({ costUSD: 10, costJPY: 1500 })); // 今月
     await run(["--no-open"]);
-    expect(readHtml()).not.toContain('id="acn-budget"');
+    expect(readHtml()).not.toContain('id="cccn-budget"');
   });
 
   it("予算設定時: 当月使用額 / 予算 / 使用率% とバー幅(初期=当月)が出る", async () => {
@@ -431,7 +431,7 @@ describe("runDashboard — 月予算カード", () => {
     setBudget(400);
     await run(["--no-open"]);
     const html = readHtml();
-    expect(html).toContain('id="acn-budget"');
+    expect(html).toContain('id="cccn-budget"');
     expect(html).toContain("<b>$124.00</b> / $400.00");
     expect(html).toContain("31.0% used");
     expect(html).toContain('budget-fill lvl-ok" style="width:31.0%');

@@ -28,7 +28,7 @@ function erApiResponse(rate: number) {
 let cacheDir: string;
 
 beforeEach(() => {
-  cacheDir = mkdtempSync(join(tmpdir(), 'acn-fx-test-'));
+  cacheDir = mkdtempSync(join(tmpdir(), 'cccn-fx-test-'));
 });
 
 afterEach(() => {
