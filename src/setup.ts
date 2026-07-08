@@ -23,6 +23,7 @@ import * as p from "@clack/prompts";
 import type { TurnRecord } from "./types";
 import { paths, readConfig } from "./store";
 import { notifyOS } from "./notify/os";
+import { notifySlack } from "./notify/slack";
 
 // 本ツールの hook エントリの識別マーカー: command 文字列にこれを含む Stop エントリを「自分のもの」とみなす。
 const HOOK_MARKER = "ccc-notifier";
@@ -130,6 +131,7 @@ function makeTestRecord(): TurnRecord {
 interface InitFlags {
   yes: boolean;
   osOnly: boolean;
+  slackOnly: boolean;
   slackWebhook?: string;
   label?: string;
   rate?: string;
@@ -148,11 +150,12 @@ function takeValue(argv: string[], i: number, prefix: string): string | undefine
 }
 
 function parseInitFlags(argv: string[]): InitFlags {
-  const flags: InitFlags = { yes: false, osOnly: false };
+  const flags: InitFlags = { yes: false, osOnly: false, slackOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") flags.yes = true;
     else if (a === "--os-only") flags.osOnly = true;
+    else if (a === "--slack-only") flags.slackOnly = true;
     else if (a === "--slack-webhook" || a.startsWith("--slack-webhook=")) {
       flags.slackWebhook = takeValue(argv, i, "--slack-webhook");
       if (!a.includes("=")) i++;
@@ -256,7 +259,23 @@ export async function runInit(argv: string[]): Promise<number> {
 
   if (flags.yes) {
     // 非対話(CI / テスト)。フラグで与えられた値のみ適用する(未指定キーは既存値を維持)。
-    if (flags.osOnly) {
+    if (flags.slackOnly) {
+      // Slack のみ(OS 通知なし)。webhook が無いと通知手段がゼロになるため必須。
+      if (flags.osOnly) {
+        console.error("--slack-only と --os-only は同時に指定できません");
+        return 1;
+      }
+      if (flags.slackWebhook === undefined) {
+        console.error("--slack-only は --slack-webhook で Webhook URL を指定してください");
+        return 1;
+      }
+      cfg.notify.os = false;
+      cfg.notify.slack = {
+        webhookUrl: flags.slackWebhook,
+        promptChars: SLACK_PROMPT_CHARS,
+        sendFullPrompt: false,
+      };
+    } else if (flags.osOnly) {
       cfg.notify.slack = null;
     } else if (flags.slackWebhook !== undefined) {
       cfg.notify.slack = {
@@ -299,7 +318,8 @@ export async function runInit(argv: string[]): Promise<number> {
       message: "通知チャネルを選択してください",
       options: [
         { value: "os", label: "OS 通知のみ" },
-        { value: "slack", label: "OS 通知 + Slack" },
+        { value: "both", label: "OS 通知 + Slack" },
+        { value: "slack", label: "Slack のみ(OS 通知なし)" },
       ],
       initialValue: "os",
     });
@@ -308,7 +328,7 @@ export async function runInit(argv: string[]): Promise<number> {
       return 1;
     }
 
-    if (channel === "slack") {
+    if (channel === "both" || channel === "slack") {
       const webhook = await p.text({
         message: "Slack Incoming Webhook URL",
         placeholder: "https://hooks.slack.com/services/...",
@@ -324,6 +344,7 @@ export async function runInit(argv: string[]): Promise<number> {
         promptChars: SLACK_PROMPT_CHARS,
         sendFullPrompt: false,
       };
+      cfg.notify.os = channel === "both"; // 「Slack のみ」は OS 通知を無効化する
     } else {
       cfg.notify.slack = null;
     }
@@ -392,7 +413,12 @@ export async function runInit(argv: string[]): Promise<number> {
   if (!result.ok) return 1;
 
   // 5. テスト通知(ACN_DRY_RUN 下では last-notify.json に書かれるだけ)。
-  await notifyOS(makeTestRecord(), cfg);
+  //    OS が有効なら OS 通知を、Slack を設定していれば Slack 通知も送り、その場で設定を確認できるようにする。
+  const testRecord = makeTestRecord();
+  await notifyOS(testRecord, cfg);
+  if (cfg.notify.slack) {
+    await notifySlack(testRecord, cfg);
+  }
 
   // 6. 完了メッセージ。
   console.log("");
