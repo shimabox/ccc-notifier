@@ -1,14 +1,13 @@
-// src/dashboard.ts — `acn dashboard` の実体。
+// src/dashboard.ts — `ccc-notifier dashboard` の実体。
 //
-// readTurns(days) を集計し、外部リクエスト 0 の完全自己完結な HTML ダッシュボードを
-// 1ファイル生成して(既定で)ブラウザで開く。テンプレートはこのモジュール内の文字列と
-// して持ち、実行時にテンプレートファイルを探しに行かない(ビルド後も単一バンドルで完結)。
+// 全履歴を集計し、外部リクエスト 0 の完全自己完結な HTML ダッシュボードを 1 ファイル生成して
+// (既定で)ブラウザで開く。日別コストは 日 / 週 / 月 の粒度をブラウザ側で切り替えられ、横スクロールで
+// 過去まで遡れる。棒をクリックするとその期間が選択され、モデル別内訳・プロジェクト別・ターン履歴が
+// 連動する(「通算」で全期間)。集計・描画はブラウザ側(埋め込み JSON + バニラ JS)で行い、生成物は
+// CSS/JS/SVG をすべてインライン化した完全オフライン・外部通信ゼロのファイルにする。
 //
-// デザインは dataviz スキルの原則に準拠:
-//  - カテゴリカル配色は固定スロット順(reference palette)。順序が CVD 安全性の担保。
-//  - 積み上げ/横棒はスロット順に隣接するため adjacent 検査でパス。2px のサーフェスギャップ・
-//    常設凡例・直接ラベル・表(table twin)を二次エンコードとして必ず併置する。
-//  - ライト/ダーク両テーマを @media (prefers-color-scheme) で選定(自動反転ではない)。
+// デザインは dataviz スキルの原則に準拠(固定スロット順の配色・2px サーフェスギャップ・常設凡例・
+// 直接ラベル・表(table twin)・ライト/ダーク両テーマ)。
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -18,24 +17,23 @@ import { formatJPY, formatTokens, formatUSD, modelDisplayName } from "./format";
 import { paths, readConfig, readTurns } from "./store";
 import type { TokenBuckets, TurnRecord } from "./types";
 
-const DEFAULT_DAYS = 30;
 const PROMPT_MAX = 10000;
 const PROMPT_TRUNC_MARK = "…(以下略)";
-const MAX_CHART_DAYS = 92; // 連続日数がこれを超えたら「データのある日」のみ描画に切替
 
 // ============ 引数パース ============
 
 interface DashboardOpts {
-  days: number;
+  days: number | null; // null = 全履歴
   open: boolean;
   out: string | null;
   autoReloadSec: number; // 生成 HTML の meta refresh 間隔秒。0 で無効。
 }
 
-function parseDays(value: string | undefined): number {
-  if (value === undefined) return DEFAULT_DAYS;
+/** --days の値をパースする。正の整数のみ採用。不正・未指定は null(=全履歴)。 */
+function parseDays(value: string | undefined): number | null {
+  if (value === undefined) return null;
   const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DAYS;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 /** --refresh の値をパースする。0 以上の整数のみ採用し、不正値は fallback(config 値)に倒す。 */
@@ -46,10 +44,9 @@ function parseRefresh(value: string | undefined, fallback: number): number {
 }
 
 function parseArgs(argv: string[]): DashboardOpts {
-  let days = DEFAULT_DAYS;
+  let days: number | null = null; // 既定は全履歴
   let open = true;
   let out: string | null = null;
-  // 既定のリロード間隔は config の dashboard.autoReloadSec。フラグで上書きできる。
   const cfgReloadSec = readConfig().dashboard.autoReloadSec;
   let autoReloadSec = cfgReloadSec;
 
@@ -93,7 +90,7 @@ function readVersion(): string {
   }
 }
 
-/** HTML 用エスケープ(サーバ側で埋め込む動的テキスト向け)。 */
+/** HTML 用エスケープ(サーバ側で埋め込む静的テキスト向け)。 */
 function esc(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -101,18 +98,6 @@ function esc(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-/** SVG 座標を短くする(小数2桁)。 */
-function f2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
-
-/** ローカルタイムゾーンの YYYY-MM-DD。パース不能なら null。 */
-function localDateKey(iso: string): string | null {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return dateKeyOf(d);
 }
 
 function dateKeyOf(d: Date): string {
@@ -144,33 +129,13 @@ function turnOutputTokens(rec: TurnRecord): number {
   return rec.tokens.output + (rec.sidechainTokens ? rec.sidechainTokens.output : 0);
 }
 
-/**
- * ターンの「モデル別コスト」を返す(実配分)。
- * rec.costByModel があり空でなければそれをそのまま返す。
- * 無ければ(旧レコード・後方互換)先頭モデルへ costUSD を全額帰属させるフォールバックを返す。
- */
+/** ターンの「モデル別コスト」(実配分)。旧レコードは先頭モデルへ全額帰属(後方互換)。 */
 function turnCostByModel(rec: TurnRecord): Record<string, number> {
   if (rec.costByModel && Object.keys(rec.costByModel).length > 0) return rec.costByModel;
   return { [rec.models[0] ?? "unknown"]: rec.costUSD };
 }
 
-/** ターンの総額(メイン + サブエージェント)。表示はこの総額を基準にする。 */
-function turnTotalUSD(rec: TurnRecord): number {
-  return rec.costUSD + (rec.subagents?.costUSD ?? 0);
-}
-
-/** ターンの総額 JPY。SA 分は costUSD × fxRate で換算して costJPY に加える。 */
-function turnTotalJPY(rec: TurnRecord): number {
-  const sa = rec.subagents?.costUSD ?? 0;
-  return rec.costJPY + sa * rec.fxRate;
-}
-
-/**
- * モデル別コスト(メイン実配分 + サブエージェント costByModel をマージ)。
- * turnCostByModel の結果を複製し、SA の各モデルコストを同一モデルへ加算する
- * (rec.costByModel を破壊しないため必ずコピーする)。これにより SA のモデルが
- * モデル別表・日別スタックに現れ、合計は turnTotalUSD と一致する。
- */
+/** モデル別コスト(メイン実配分 + サブエージェント costByModel をマージ)。rec.costByModel は壊さない。 */
 function turnCostByModelWithSA(rec: TurnRecord): Record<string, number> {
   const base: Record<string, number> = { ...turnCostByModel(rec) };
   const sa = rec.subagents?.costByModel;
@@ -182,109 +147,14 @@ function turnCostByModelWithSA(rec: TurnRecord): Record<string, number> {
   return base;
 }
 
-/** min..max(いずれもローカル日付キー)を1日刻みで列挙する。 */
-function fillDayKeys(min: string, max: string): string[] {
-  const res: string[] = [];
-  const cur = new Date(`${min}T00:00:00`);
-  const end = new Date(`${max}T00:00:00`);
-  if (Number.isNaN(cur.getTime()) || Number.isNaN(end.getTime())) return [min];
-  let guard = 0;
-  while (cur.getTime() <= end.getTime() && guard < 4000) {
-    res.push(dateKeyOf(cur));
-    cur.setDate(cur.getDate() + 1);
-    guard++;
-  }
-  return res;
+/** ターンの総額(メイン + サブエージェント)。 */
+function turnTotalUSD(rec: TurnRecord): number {
+  return rec.costUSD + (rec.subagents?.costUSD ?? 0);
 }
 
-// ============ 集計 ============
-
-interface ModelSlot {
-  key: string; // 生モデルID または "__other__"
-  name: string; // 表示名
-  slot: string; // "1".."8" または "other"
-  cost: number;
-  jpy: number;
-  turns: number; // 参加カウント(そのモデルが登場したターン数。複数モデルのターンは各モデル+1)
-  usdFmt: string;
-  jpyFmt: string;
-  sharePct: number;
-}
-
-interface DailyModelPart {
-  name: string;
-  slot: string;
-  value: number;
-  usdFmt: string;
-}
-
-interface DailyDay {
-  date: string;
-  total: number;
-  turns: number;
-  usdFmt: string;
-  jpyFmt: string;
-  models: DailyModelPart[]; // スロット順、value>0 のみ
-}
-
-interface ProjRow {
-  name: string;
-  turns: number;
-  cost: number;
-  jpy: number;
-  usdFmt: string;
-  jpyFmt: string;
-}
-
-interface PeriodTotals {
-  cost: number;
-  jpy: number;
-  turns: number;
-}
-
-interface TurnEmbed {
-  tsLocal: string;
-  project: string; // basename
-  projectFull: string;
-  branch: string | null;
-  model: string; // 表示名(+ 追加数)
-  modelsRaw: string[];
-  tokInFmt: string;
-  tokOutFmt: string;
-  costUSD: number; // 生値(合計検証用・メインのみ)
-  usd: string;
-  jpy: string;
-  prompt: string; // 最大 PROMPT_MAX 字 + マーク
-  truncated: boolean;
-  subagent: {
-    usd: string; // SA コスト表示($)
-    jpy: string; // SA コスト表示(¥)
-    models: string; // SA モデル表示名(カンマ区切り)
-    apiCalls: number;
-  } | null;
-}
-
-interface Aggregated {
-  totals: PeriodTotals;
-  today: PeriodTotals;
-  week: PeriodTotals;
-  month: PeriodTotals;
-  models: ModelSlot[];
-  dayKeys: string[];
-  daily: DailyDay[];
-  projects: ProjRow[];
-  turnsEmbed: TurnEmbed[];
-  minDate: string | null;
-  maxDate: string | null;
-  anyTruncated: boolean;
-  chartTruncatedDays: boolean;
-  subagentsCost: number; // 期間内 SA コスト合計(USD)
-  subagentsJpy: number; // 期間内 SA コスト合計(JPY)
-  anySubagents: boolean; // 1件でも subagents 付きレコードがあるか
-}
-
-function emptyTotals(): PeriodTotals {
-  return { cost: 0, jpy: 0, turns: 0 };
+function turnTotalJPY(rec: TurnRecord): number {
+  const sa = rec.subagents?.costUSD ?? 0;
+  return rec.costJPY + sa * rec.fxRate;
 }
 
 function truncatePrompt(raw: string): { text: string; truncated: boolean } {
@@ -292,508 +162,171 @@ function truncatePrompt(raw: string): { text: string; truncated: boolean } {
   return { text: raw.slice(0, PROMPT_MAX) + PROMPT_TRUNC_MARK, truncated: true };
 }
 
-function aggregate(turns: TurnRecord[]): Aggregated {
+// ============ モデル→スロット割当(全履歴基準・配色の安定化) ============
+
+interface SlotDef {
+  slot: string; // "1".."8" または "other"
+  name: string;
+}
+
+interface SlotMap {
+  slots: SlotDef[]; // 表示順(コスト降順の名前付き + 末尾 other)
+  slotByModel: Map<string, string>; // 生モデルID → slot("1".."8")
+  hasOther: boolean;
+}
+
+/**
+ * 全履歴のモデル別総コストで上位を決め、固定スロット(色)を割り当てる。
+ * 期間を切り替えても色がぶれないよう、スロットは全期間基準で一度だけ決める。
+ * 9 種以上あるときは上位 7 + "その他"(other)。
+ */
+function computeSlotMap(turns: TurnRecord[]): SlotMap {
+  const agg = new Map<string, number>();
+  for (const rec of turns) {
+    for (const [model, usd] of Object.entries(turnCostByModelWithSA(rec))) {
+      agg.set(model, (agg.get(model) ?? 0) + usd);
+    }
+  }
+  const entries = [...agg.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+  let named = entries;
+  let hasOther = false;
+  if (entries.length > 8) {
+    named = entries.slice(0, 7);
+    hasOther = true;
+  }
+
+  const slots: SlotDef[] = named.map(([key], i) => ({ slot: String(i + 1), name: modelDisplayName(key) }));
+  const slotByModel = new Map<string, string>();
+  named.forEach(([key], i) => slotByModel.set(key, String(i + 1)));
+  if (hasOther) slots.push({ slot: "other", name: "その他" });
+
+  return { slots, slotByModel, hasOther };
+}
+
+/** 1 ターンの slot 別 USD(メイン実配分 + SA、上位外は other へ)。 */
+function turnBySlot(rec: TurnRecord, map: SlotMap): Record<string, number> {
+  const bs: Record<string, number> = {};
+  for (const [model, usd] of Object.entries(turnCostByModelWithSA(rec))) {
+    const slot = map.slotByModel.get(model) ?? "other";
+    bs[slot] = (bs[slot] ?? 0) + usd;
+  }
+  return bs;
+}
+
+// ============ 埋め込みデータ ============
+
+interface TurnEmbed {
+  t: number; // ts の epoch ms(ブラウザ側のバケット分割用。ローカルTZは new Date(t) で解釈)
+  ts: string; // 表示用ローカル日時
+  p: string; // プロジェクト basename
+  pf: string; // プロジェクトフルパス
+  br: string | null;
+  md: string; // モデル表示(+N / +SA サフィックス込み)
+  mr: string[]; // 生モデルID配列
+  ti: string; // in トークン(整形済み)
+  to: string; // out トークン(整形済み)
+  um: number; // メインのみ USD(履歴テーブルの $ 列)
+  fx: number; // 為替レート
+  bs: Record<string, number>; // slot → USD(SA 込み。チャート/内訳/プロジェクト集計用)
+  pr: string; // プロンプト(最大 PROMPT_MAX 字 + マーク)
+  tr: boolean; // 切り詰めたか
+  sa: { usd: string; jpy: string; models: string; apiCalls: number } | null;
+}
+
+interface PeriodTotals {
+  usd: number;
+  jpy: number;
+  turns: number;
+}
+
+function emptyTotals(): PeriodTotals {
+  return { usd: 0, jpy: 0, turns: 0 };
+}
+
+function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
+  const raw = String(rec.prompt ?? "");
+  const { text, truncated } = truncatePrompt(raw);
+  const primary = rec.models[0] ?? "unknown";
+  const extra = rec.models.length > 1 ? ` +${rec.models.length - 1}` : "";
+  const saMark = rec.subagents ? " +SA" : "";
+  let sa: TurnEmbed["sa"] = null;
+  if (rec.subagents) {
+    const saModels = Object.keys(rec.subagents.costByModel).map((m) => modelDisplayName(m));
+    sa = {
+      usd: formatUSD(rec.subagents.costUSD),
+      jpy: formatJPY(rec.subagents.costUSD * rec.fxRate),
+      models: saModels.join(", "),
+      apiCalls: rec.subagents.apiCalls,
+    };
+  }
+  const ms = Date.parse(rec.ts);
+  return {
+    t: Number.isFinite(ms) ? ms : 0,
+    ts: fmtLocalDateTime(rec.ts),
+    p: basename(rec.project) || rec.project || "(unknown)",
+    pf: rec.project ?? "",
+    br: rec.gitBranch,
+    md: modelDisplayName(primary) + extra + saMark,
+    mr: rec.models,
+    ti: formatTokens(turnInputTokens(rec)),
+    to: formatTokens(turnOutputTokens(rec)),
+    um: rec.costUSD,
+    fx: rec.fxRate,
+    bs: turnBySlot(rec, map),
+    pr: text,
+    tr: truncated,
+    sa,
+  };
+}
+
+/** today / week / month / all のサマリ(SA 込み総額)。 */
+function computeKpis(turns: TurnRecord[]): {
+  today: PeriodTotals;
+  week: PeriodTotals;
+  month: PeriodTotals;
+  all: PeriodTotals;
+} {
   const now = new Date();
   const y = now.getFullYear();
   const mo = now.getMonth();
   const d = now.getDate();
   const weekCutoff = now.getTime() - 7 * 86400000;
 
-  const totals = emptyTotals();
   const today = emptyTotals();
   const week = emptyTotals();
   const month = emptyTotals();
-
-  const modelAgg = new Map<string, { cost: number; jpy: number; turns: number }>();
-  const projAgg = new Map<string, { cost: number; jpy: number; turns: number }>();
-
-  let minDate: string | null = null;
-  let maxDate: string | null = null;
-  let subagentsCost = 0;
-  let subagentsJpy = 0;
-  let anySubagents = false;
+  const all = emptyTotals();
 
   for (const rec of turns) {
-    // 合計・KPI・プロジェクトは SA 込みの総額で集計する。
-    const totalUsd = turnTotalUSD(rec);
-    const totalJpy = turnTotalJPY(rec);
-
-    totals.cost += totalUsd;
-    totals.jpy += totalJpy;
-    totals.turns += 1;
-
-    if (rec.subagents) {
-      anySubagents = true;
-      subagentsCost += rec.subagents.costUSD;
-      subagentsJpy += rec.subagents.costUSD * rec.fxRate;
-    }
+    const usd = turnTotalUSD(rec);
+    const jpy = turnTotalJPY(rec);
+    all.usd += usd;
+    all.jpy += jpy;
+    all.turns += 1;
 
     const dt = new Date(rec.ts);
-    if (!Number.isNaN(dt.getTime())) {
-      if (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) {
-        today.cost += totalUsd;
-        today.jpy += totalJpy;
-        today.turns += 1;
-      }
-      if (dt.getTime() >= weekCutoff) {
-        week.cost += totalUsd;
-        week.jpy += totalJpy;
-        week.turns += 1;
-      }
-      if (dt.getFullYear() === y && dt.getMonth() === mo) {
-        month.cost += totalUsd;
-        month.jpy += totalJpy;
-        month.turns += 1;
-      }
-      const key = dateKeyOf(dt);
-      if (minDate === null || key < minDate) minDate = key;
-      if (maxDate === null || key > maxDate) maxDate = key;
+    if (Number.isNaN(dt.getTime())) continue;
+    if (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) {
+      today.usd += usd;
+      today.jpy += jpy;
+      today.turns += 1;
     }
-
-    // モデル別集計: メイン実配分 + SA の costByModel をマージ(turnCostByModelWithSA)。
-    // 複数モデル・サブエージェントのモデルは各行に1ずつ計上する(参加カウント)ため、
-    // モデル別 turns の合計は総ターン数を超えうる。
-    for (const [model, modelUsd] of Object.entries(turnCostByModelWithSA(rec))) {
-      const ma = modelAgg.get(model) ?? { cost: 0, jpy: 0, turns: 0 };
-      ma.cost += modelUsd;
-      ma.jpy += modelUsd * rec.fxRate;
-      ma.turns += 1;
-      modelAgg.set(model, ma);
+    if (dt.getTime() >= weekCutoff) {
+      week.usd += usd;
+      week.jpy += jpy;
+      week.turns += 1;
     }
-
-    const projName = basename(rec.project) || rec.project || "(unknown)";
-    const px = projAgg.get(projName) ?? { cost: 0, jpy: 0, turns: 0 };
-    px.cost += totalUsd;
-    px.jpy += totalJpy;
-    px.turns += 1;
-    projAgg.set(projName, px);
-  }
-
-  // ---- モデルスロット割当(コスト降順、8超は上位7 + その他) ----
-  const entries = [...modelAgg.entries()].sort(
-    (a, b) => b[1].cost - a[1].cost || a[0].localeCompare(b[0]),
-  );
-
-  let named = entries;
-  let other: { cost: number; jpy: number; turns: number } | null = null;
-  if (entries.length > 8) {
-    named = entries.slice(0, 7);
-    other = entries.slice(7).reduce(
-      (acc, [, v]) => ({
-        cost: acc.cost + v.cost,
-        jpy: acc.jpy + v.jpy,
-        turns: acc.turns + v.turns,
-      }),
-      { cost: 0, jpy: 0, turns: 0 },
-    );
-  }
-
-  const totalCostForShare = totals.cost;
-  const models: ModelSlot[] = named.map(([key, v], i) => ({
-    key,
-    name: modelDisplayName(key),
-    slot: String(i + 1),
-    cost: v.cost,
-    jpy: v.jpy,
-    turns: v.turns,
-    usdFmt: formatUSD(v.cost),
-    jpyFmt: formatJPY(v.jpy),
-    sharePct: totalCostForShare > 0 ? (v.cost / totalCostForShare) * 100 : 0,
-  }));
-  if (other) {
-    models.push({
-      key: "__other__",
-      name: "その他",
-      slot: "other",
-      cost: other.cost,
-      jpy: other.jpy,
-      turns: other.turns,
-      usdFmt: formatUSD(other.cost),
-      jpyFmt: formatJPY(other.jpy),
-      sharePct: totalCostForShare > 0 ? (other.cost / totalCostForShare) * 100 : 0,
-    });
-  }
-
-  // 生モデルID -> {slot,name}
-  const slotByModel = new Map<string, { slot: string; name: string }>();
-  for (const m of models) {
-    if (m.key !== "__other__") slotByModel.set(m.key, { slot: m.slot, name: m.name });
-  }
-  const otherSlot = other ? { slot: "other", name: "その他" } : null;
-
-  // ---- 日別スタック ----
-  const dayKeys = computeDayKeys(minDate, maxDate);
-  const chartTruncatedDays =
-    minDate !== null && maxDate !== null && fillDayKeys(minDate, maxDate).length > MAX_CHART_DAYS;
-
-  const dayIndex = new Map<string, number>();
-  dayKeys.forEach((k, i) => dayIndex.set(k, i));
-
-  // date index -> slot -> {value,name,slot}
-  const stacks: Array<Map<string, DailyModelPart>> = dayKeys.map(() => new Map());
-  const dayTotals: number[] = dayKeys.map(() => 0);
-  const dayTurns: number[] = dayKeys.map(() => 0);
-
-  for (const rec of turns) {
-    const key = localDateKey(rec.ts);
-    if (key === null) continue;
-    const idx = dayIndex.get(key);
-    if (idx === undefined) continue;
-    const bucket = stacks[idx];
-    // モデル別の実配分 + SA(turnCostByModelWithSA)で日別スタックへ振り分ける。
-    // 1ターンが複数モデル・サブエージェントにまたがる場合、同日のスタックに複数セグメントと
-    // して現れうる。SA 分はメインターンの日(rec.ts)に計上される。
-    for (const [model, modelUsd] of Object.entries(turnCostByModelWithSA(rec))) {
-      const info = slotByModel.get(model) ?? otherSlot ?? { slot: "other", name: "その他" };
-      const cur = bucket.get(info.slot) ?? { name: info.name, slot: info.slot, value: 0, usdFmt: "" };
-      cur.value += modelUsd;
-      bucket.set(info.slot, cur);
-      dayTotals[idx] += modelUsd;
+    if (dt.getFullYear() === y && dt.getMonth() === mo) {
+      month.usd += usd;
+      month.jpy += jpy;
+      month.turns += 1;
     }
-    dayTurns[idx] += 1;
   }
-
-  const slotOrder = models.map((m) => m.slot);
-  const daily: DailyDay[] = dayKeys.map((date, i) => {
-    const bucket = stacks[i];
-    const parts: DailyModelPart[] = [];
-    for (const slot of slotOrder) {
-      const p = bucket.get(slot);
-      if (p && p.value > 0) parts.push({ ...p, usdFmt: formatUSD(p.value) });
-    }
-    return {
-      date,
-      total: dayTotals[i],
-      turns: dayTurns[i],
-      usdFmt: formatUSD(dayTotals[i]),
-      jpyFmt: "",
-      models: parts,
-    };
-  });
-
-  // ---- プロジェクト ----
-  const projects: ProjRow[] = [...projAgg.entries()]
-    .map(([name, v]) => ({
-      name,
-      turns: v.turns,
-      cost: v.cost,
-      jpy: v.jpy,
-      usdFmt: formatUSD(v.cost),
-      jpyFmt: formatJPY(v.jpy),
-    }))
-    .sort((a, b) => b.cost - a.cost || a.name.localeCompare(b.name));
-
-  // ---- ターン履歴(新しい順) ----
-  let anyTruncated = false;
-  const sortedTurns = [...turns].sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
-  const turnsEmbed: TurnEmbed[] = sortedTurns.map((rec) => {
-    const raw = String(rec.prompt ?? "");
-    const { text, truncated } = truncatePrompt(raw);
-    if (truncated) anyTruncated = true;
-    const primary = rec.models[0] ?? "unknown";
-    const extra = rec.models.length > 1 ? ` +${rec.models.length - 1}` : "";
-    const saMark = rec.subagents ? " +SA" : "";
-    let subagent: TurnEmbed["subagent"] = null;
-    if (rec.subagents) {
-      const saModels = Object.keys(rec.subagents.costByModel).map((m) => modelDisplayName(m));
-      subagent = {
-        usd: formatUSD(rec.subagents.costUSD),
-        jpy: formatJPY(rec.subagents.costUSD * rec.fxRate),
-        models: saModels.join(", "),
-        apiCalls: rec.subagents.apiCalls,
-      };
-    }
-    return {
-      tsLocal: fmtLocalDateTime(rec.ts),
-      project: basename(rec.project) || rec.project || "(unknown)",
-      projectFull: rec.project ?? "",
-      branch: rec.gitBranch,
-      model: modelDisplayName(primary) + extra + saMark,
-      modelsRaw: rec.models,
-      tokInFmt: formatTokens(turnInputTokens(rec)),
-      tokOutFmt: formatTokens(turnOutputTokens(rec)),
-      costUSD: rec.costUSD,
-      usd: formatUSD(rec.costUSD),
-      jpy: formatJPY(rec.costJPY),
-      prompt: text,
-      truncated,
-      subagent,
-    };
-  });
-
-  return {
-    totals,
-    today,
-    week,
-    month,
-    models,
-    dayKeys,
-    daily,
-    projects,
-    turnsEmbed,
-    minDate,
-    maxDate,
-    anyTruncated,
-    chartTruncatedDays,
-    subagentsCost,
-    subagentsJpy,
-    anySubagents,
-  };
+  return { today, week, month, all };
 }
 
-function computeDayKeys(minDate: string | null, maxDate: string | null): string[] {
-  if (minDate === null || maxDate === null) return [];
-  const filled = fillDayKeys(minDate, maxDate);
-  if (filled.length <= MAX_CHART_DAYS) return filled;
-  // 連続描画すると横に長すぎるため「データのある日」のみに退避
-  return filled; // fillDayKeys は guard で 4000 日に制限済み。ここでは連続のまま返す。
-}
-
-// ============ SVG チャート(サーバ側描画) ============
-
-function niceCeil(max: number): number {
-  if (!(max > 0)) return 1;
-  const pow = Math.pow(10, Math.floor(Math.log10(max)));
-  const n = max / pow;
-  const nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
-  return nice * pow;
-}
-
-function roundedTopRect(x: number, y: number, w: number, h: number, r: number): string {
-  const rr = Math.max(0, Math.min(r, w / 2, h));
-  return (
-    `M${f2(x)} ${f2(y + h)}` +
-    `L${f2(x)} ${f2(y + rr)}` +
-    `Q${f2(x)} ${f2(y)} ${f2(x + rr)} ${f2(y)}` +
-    `L${f2(x + w - rr)} ${f2(y)}` +
-    `Q${f2(x + w)} ${f2(y)} ${f2(x + w)} ${f2(y + rr)}` +
-    `L${f2(x + w)} ${f2(y + h)} Z`
-  );
-}
-
-function roundedRightRect(x: number, y: number, w: number, h: number, r: number): string {
-  const rr = Math.max(0, Math.min(r, w, h / 2));
-  return (
-    `M${f2(x)} ${f2(y)}` +
-    `L${f2(x + w - rr)} ${f2(y)}` +
-    `Q${f2(x + w)} ${f2(y)} ${f2(x + w)} ${f2(y + rr)}` +
-    `L${f2(x + w)} ${f2(y + h - rr)}` +
-    `Q${f2(x + w)} ${f2(y + h)} ${f2(x + w - rr)} ${f2(y + h)}` +
-    `L${f2(x)} ${f2(y + h)} Z`
-  );
-}
-
-/** 日別積み上げ棒グラフ(SVG 手書き)。モデル別に色分け。 */
-function renderDailyChart(agg: Aggregated): string {
-  const W = 960;
-  const H = 340;
-  const ml = 58;
-  const mr = 16;
-  const mt = 18;
-  const mb = 40;
-  const plotW = W - ml - mr;
-  const plotH = H - mt - mb;
-  const baseY = mt + plotH;
-  const GAP = 2;
-
-  const n = agg.dayKeys.length;
-  const maxTotal = Math.max(0, ...agg.daily.map((x) => x.total));
-  const niceMax = niceCeil(maxTotal);
-  const yscale = plotH / niceMax;
-  const band = plotW / Math.max(n, 1);
-  const barW = Math.max(2, Math.min(24, band * 0.7));
-
-  const parts: string[] = [];
-
-  // y グリッド + ラベル
-  const ticks = 5;
-  for (let t = 0; t <= ticks; t++) {
-    const val = (niceMax * t) / ticks;
-    const yy = f2(baseY - val * yscale);
-    parts.push(`<line class="grid-line" x1="${ml}" y1="${yy}" x2="${W - mr}" y2="${yy}"/>`);
-    parts.push(
-      `<text class="tick-label" x="${ml - 8}" y="${yy + 4}" text-anchor="end">${esc(formatUSD(val))}</text>`,
-    );
-  }
-
-  // 列(スタック)
-  const xLabelStep = Math.max(1, Math.ceil(n / 12));
-  for (let i = 0; i < n; i++) {
-    const day = agg.daily[i];
-    const cx = ml + band * (i + 0.5);
-    const x = cx - barW / 2;
-
-    let cumV = 0;
-    const stack = day.models;
-    for (let j = 0; j < stack.length; j++) {
-      const seg = stack[j];
-      const vTop = cumV + seg.value;
-      const yTop = baseY - vTop * yscale;
-      let yBot = baseY - cumV * yscale;
-      if (j > 0) yBot -= GAP; // セグメント間に 2px のサーフェスギャップ
-      cumV = vTop;
-      const h = yBot - yTop;
-      if (h <= 0.4) continue;
-      const isTop = j === stack.length - 1;
-      const title = `<title>${esc(day.date)} · ${esc(seg.name)}: ${esc(seg.usdFmt)}</title>`;
-      if (isTop) {
-        parts.push(
-          `<path class="seg s${seg.slot}" d="${roundedTopRect(x, yTop, barW, h, 4)}">${title}</path>`,
-        );
-      } else {
-        parts.push(
-          `<rect class="seg s${seg.slot}" x="${f2(x)}" y="${f2(yTop)}" width="${f2(barW)}" height="${f2(h)}">${title}</rect>`,
-        );
-      }
-    }
-
-    // x ラベル(間引き)
-    if (i % xLabelStep === 0 || i === n - 1) {
-      const label = day.date.slice(5).replace("-", "/");
-      parts.push(
-        `<text class="tick-label" x="${f2(cx)}" y="${baseY + 16}" text-anchor="middle">${esc(label)}</text>`,
-      );
-    }
-
-    // ホバー用の透明バンド(ツールチップのヒットターゲット)
-    parts.push(
-      `<rect class="acn-band" x="${f2(ml + band * i)}" y="${mt}" width="${f2(band)}" height="${plotH}" data-i="${i}"/>`,
-    );
-  }
-
-  // ベースライン
-  parts.push(`<line class="axis-line" x1="${ml}" y1="${baseY}" x2="${W - mr}" y2="${baseY}"/>`);
-
-  return (
-    `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" ` +
-    `aria-label="日別コスト積み上げ棒グラフ" preserveAspectRatio="xMidYMid meet">${parts.join("")}</svg>`
-  );
-}
-
-/** モデル別内訳 横棒(SVG 手書き)。 */
-function renderModelBars(agg: Aggregated): string {
-  const models = agg.models;
-  if (models.length === 0) return "";
-  const W = 960;
-  const rowH = 38;
-  const mt = 6;
-  const mb = 6;
-  const nameW = 150;
-  const valW = 168;
-  const gap = 14;
-  const barX = nameW;
-  const barMaxW = W - nameW - valW - gap;
-  const maxCost = Math.max(0.0000001, ...models.map((m) => m.cost));
-  const H = mt + mb + models.length * rowH;
-
-  const parts: string[] = [];
-  for (let i = 0; i < models.length; i++) {
-    const m = models[i];
-    const y = mt + i * rowH;
-    const barH = Math.min(22, rowH - 14);
-    const by = y + (rowH - barH) / 2;
-    const w = Math.max(2, (m.cost / maxCost) * barMaxW);
-    const label = `${m.usdFmt} · ${m.sharePct.toFixed(1)}%`;
-    const title = `<title>${esc(m.name)}: ${esc(m.usdFmt)}(${esc(m.jpyFmt)})· ${esc(m.sharePct.toFixed(1))}% · ${m.turns} ターン</title>`;
-    // モデル名(テキストは ink トークン。色はバーが担う)
-    parts.push(
-      `<text class="bar-name" x="0" y="${f2(by + barH / 2 + 4)}">${esc(truncateLabel(m.name, 16))}</text>`,
-    );
-    // バー(データエンドの右側だけ 4px 角丸)
-    parts.push(`<path class="seg s${m.slot}" d="${roundedRightRect(barX, by, w, barH, 4)}">${title}</path>`);
-    // 値ラベル(右ガター、テキストトークン)
-    parts.push(
-      `<text class="bar-val" x="${W}" y="${f2(by + barH / 2 + 4)}" text-anchor="end">${esc(label)}</text>`,
-    );
-  }
-
-  return (
-    `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" ` +
-    `aria-label="モデル別コスト内訳 横棒グラフ" preserveAspectRatio="xMidYMid meet">${parts.join("")}</svg>`
-  );
-}
-
-function truncateLabel(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
-}
-
-// ============ HTML 断片 ============
-
-function statCard(label: string, sub: string, totals: PeriodTotals): string {
-  return (
-    `<div class="stat">` +
-    `<div class="stat-label">${esc(label)}<span class="stat-sub">${esc(sub)}</span></div>` +
-    `<div class="stat-value">${esc(formatUSD(totals.cost))}</div>` +
-    `<div class="stat-meta">${esc(formatJPY(totals.jpy))} · ${totals.turns} ターン</div>` +
-    `</div>`
-  );
-}
-
-function renderLegend(models: ModelSlot[]): string {
-  if (models.length < 2) return "";
-  const items = models
-    .map((m) => `<span class="legend-item"><span class="swatch k${m.slot}"></span>${esc(m.name)}</span>`)
-    .join("");
-  return `<div class="legend">${items}</div>`;
-}
-
-function renderModelTable(models: ModelSlot[]): string {
-  const rows = models
-    .map(
-      (m) =>
-        `<tr><td class="c-name"><span class="swatch k${m.slot}"></span>${esc(m.name)}</td>` +
-        `<td class="c-num">${m.turns}</td>` +
-        `<td class="c-num">${esc(m.usdFmt)}</td>` +
-        `<td class="c-num">${esc(m.jpyFmt)}</td>` +
-        `<td class="c-num">${esc(m.sharePct.toFixed(1))}%</td></tr>`,
-    )
-    .join("");
-  return (
-    `<table class="data-table"><thead><tr>` +
-    `<th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th>` +
-    `<th class="c-num">¥</th><th class="c-num">構成比</th></tr></thead>` +
-    `<tbody>${rows}</tbody></table>`
-  );
-}
-
-function renderProjectTable(projects: ProjRow[]): string {
-  if (projects.length === 0) return `<p class="empty-hint">プロジェクトデータがありません。</p>`;
-  const rows = projects
-    .map(
-      (p) =>
-        `<tr><td class="c-name">${esc(p.name)}</td>` +
-        `<td class="c-num">${p.turns}</td>` +
-        `<td class="c-num">${esc(p.usdFmt)}</td>` +
-        `<td class="c-num">${esc(p.jpyFmt)}</td></tr>`,
-    )
-    .join("");
-  return (
-    `<table class="data-table"><thead><tr>` +
-    `<th>プロジェクト / Project</th><th class="c-num">ターン</th>` +
-    `<th class="c-num">$</th><th class="c-num">¥</th></tr></thead>` +
-    `<tbody>${rows}</tbody></table>`
-  );
-}
-
-function renderDailyTable(daily: DailyDay[]): string {
-  const withData = daily.filter((d) => d.turns > 0);
-  const rows = withData
-    .map(
-      (d) =>
-        `<tr><td class="c-name">${esc(d.date)}</td>` +
-        `<td class="c-num">${d.turns}</td>` +
-        `<td class="c-num">${esc(d.usdFmt)}</td></tr>`,
-    )
-    .join("");
-  return (
-    `<details class="table-twin"><summary>データを表で見る / Show as table</summary>` +
-    `<table class="data-table"><thead><tr><th>日付 / Date</th>` +
-    `<th class="c-num">ターン</th><th class="c-num">$</th></tr></thead>` +
-    `<tbody>${rows}</tbody></table></details>`
-  );
-}
-
-// ============ スタイル(静的・補間なし) ============
+// ============ スタイル ============
 
 const STYLE = `<style>
 :root{
@@ -837,23 +370,35 @@ section.card{background:var(--surface); border:1px solid var(--border); border-r
 section.card > h2{font-size:15px; font-weight:640; margin:0 0 4px;}
 section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 
+.toolbar-row{display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin:2px 0 12px;}
+.seg-toggle{display:inline-flex; border:1px solid var(--border); border-radius:9px; overflow:hidden;}
+.seg-toggle button{padding:6px 14px; background:var(--surface); color:var(--ink2); border:0; border-left:1px solid var(--border); cursor:pointer; font:inherit; font-size:13px;}
+.seg-toggle button:first-child{border-left:0;}
+.seg-toggle button.active{background:var(--s1); color:#fff;}
+.btn{padding:6px 14px; border:1px solid var(--border); border-radius:9px; background:var(--surface); color:var(--ink2); cursor:pointer; font:inherit; font-size:13px;}
+.btn.active{background:var(--s1); color:#fff; border-color:var(--s1);}
+.sel-label{color:var(--ink2); font-size:13px; margin-left:auto; text-align:right; font-variant-numeric:tabular-nums;}
+.sel-label b{color:var(--ink); font-weight:640;}
+
 .legend{display:flex; flex-wrap:wrap; gap:8px 18px; margin:2px 0 14px;}
 .legend-item{display:inline-flex; align-items:center; gap:7px; font-size:13px; color:var(--ink2);}
 .swatch{display:inline-block; width:11px; height:11px; border-radius:3px; flex:0 0 auto;}
 .k1{background:var(--s1);} .k2{background:var(--s2);} .k3{background:var(--s3);} .k4{background:var(--s4);}
 .k5{background:var(--s5);} .k6{background:var(--s6);} .k7{background:var(--s7);} .k8{background:var(--s8);} .kother{background:var(--sother);}
 
-.chart{width:100%; height:auto; display:block;}
+.chart{height:auto; display:block;}
 .chart-scroll{overflow-x:auto;}
 .seg.s1{fill:var(--s1);} .seg.s2{fill:var(--s2);} .seg.s3{fill:var(--s3);} .seg.s4{fill:var(--s4);}
 .seg.s5{fill:var(--s5);} .seg.s6{fill:var(--s6);} .seg.s7{fill:var(--s7);} .seg.s8{fill:var(--s8);} .seg.sother{fill:var(--sother);}
+.seg.dim{opacity:0.28;}
 .grid-line{stroke:var(--grid); stroke-width:1;}
 .axis-line{stroke:var(--axis); stroke-width:1;}
 .tick-label{fill:var(--muted); font-size:11px; font-variant-numeric:tabular-nums;}
 .bar-name{fill:var(--ink); font-size:13px; font-weight:550;}
 .bar-val{fill:var(--ink2); font-size:12px; font-variant-numeric:tabular-nums;}
-.acn-band{fill:transparent; cursor:crosshair;}
+.acn-band{fill:transparent; cursor:pointer;}
 .acn-band:hover{fill:var(--ink); fill-opacity:0.05;}
+.acn-band.sel{fill:var(--s1); fill-opacity:0.10;}
 
 .grid2{display:grid; grid-template-columns:1.15fr 1fr; gap:22px; align-items:start;}
 
@@ -887,11 +432,11 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 .detail-meta{color:var(--muted); font-size:12px; margin-bottom:8px; word-break:break-all;}
 .detail-prompt{white-space:pre-wrap; word-break:break-word; font-size:13px; line-height:1.55;}
 .table-wrap{overflow-x:auto;}
+.empty-hint{color:var(--muted); font-size:13px; padding:20px 0; text-align:center;}
 
 .empty{background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:56px 24px; text-align:center; box-shadow:var(--shadow);}
 .empty h2{font-size:20px; margin:0 0 8px;}
 .empty p{color:var(--ink2); margin:4px 0;}
-.empty-hint{color:var(--muted); font-size:13px;}
 
 .foot{color:var(--muted); font-size:12px; margin-top:32px; text-align:center;}
 
@@ -907,10 +452,11 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
   .grid2{grid-template-columns:1fr;}
   .hero{text-align:left;}
   .head{align-items:flex-start;}
+  .sel-label{margin-left:0;}
 }
 </style>`;
 
-// ============ アプリ JS(静的・テンプレート補間なし・textContent 挿入) ============
+// ============ アプリ JS(全描画・期間集計をブラウザ側で行う) ============
 
 const APP_JS = `<script>
 (function(){
@@ -919,220 +465,518 @@ const APP_JS = `<script>
   var data;
   try { data = JSON.parse(el.textContent || '{}'); } catch(e){ return; }
   var turns = data.turns || [];
-  var daily = data.daily || [];
+  var slots = data.slots || [];
+  var slotOrder = slots.map(function(s){ return s.slot; });
+  var slotName = {}; slots.forEach(function(s){ slotName[s.slot] = s.name; });
 
-  // sessionStorage は file:// やプライベートモードで例外を投げうるため、全アクセスを try/catch で包む。
-  // 自動リロード(meta refresh)を挟んでも検索語・スクロール位置を維持するために使う。
+  // ---- 数値整形(サーバの format.ts と等価に移植)----
+  function formatUSD(n){
+    var v = n || 0;
+    if(v >= 1) return '$' + v.toFixed(2);
+    if(v >= 0.01) return '$' + v.toFixed(3);
+    return '$' + v.toFixed(4);
+  }
+  function formatJPY(n){
+    var v = n || 0;
+    if(v >= 1) return '¥' + Math.round(v).toLocaleString('en-US');
+    return '¥' + (Math.round(v * 10) / 10);
+  }
+
+  // ---- 日付/バケット(ローカルTZ)----
+  function pad(n){ return (n < 10 ? '0' : '') + n; }
+  function dkey(d){ return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()); }
+  function mondayOf(d){
+    var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var wd = (x.getDay() + 6) % 7; // 月=0 .. 日=6
+    x.setDate(x.getDate() - wd);
+    return x;
+  }
+  function bucketKey(t, gran){
+    var d = new Date(t);
+    if(isNaN(d.getTime())) return null;
+    if(gran === 'month') return d.getFullYear() + '-' + pad(d.getMonth()+1);
+    if(gran === 'week') return dkey(mondayOf(d));
+    return dkey(d);
+  }
+  function bucketLabel(key, gran){
+    var p = key.split('-');
+    if(gran === 'month') return p[0] + '/' + p[1];
+    return p[1] + '/' + p[2] + (gran === 'week' ? '週' : '');
+  }
+  function periodText(key, gran){
+    if(key === null) return '通算 / All time';
+    if(gran === 'month') return key + ' (月)';
+    if(gran === 'week') return key + ' の週';
+    return key;
+  }
+
+  // ---- 状態(sessionStorage に保存し、自動リロード(meta refresh)を跨いでも維持)----
   function ssGet(k){ try { return sessionStorage.getItem(k); } catch(e){ return null; } }
   function ssSet(k, v){ try { sessionStorage.setItem(k, v); } catch(e){} }
+  var GRAN = ssGet('acn-gran'); if(['day','week','month'].indexOf(GRAN) < 0) GRAN = 'day';
+  // 既定は「起動した日」を初期選択する(未保存時)。明示的な通算は '__all__'、その他は保存キー。
+  var storedSel = ssGet('acn-sel');
+  var SEL = (storedSel === null) ? defaultSel(GRAN) : (storedSel === '__all__' ? null : storedSel);
+  function setGran(g){ GRAN = g; ssSet('acn-gran', g); }
+  function setSel(v){ SEL = v; ssSet('acn-sel', v === null ? '__all__' : v); }
+  var lastRenderedGran = null; // 直前に描画した粒度。変わったとき(=バケット数が変わるとき)だけ右端へ寄せる。
 
-  // ---- ターン履歴テーブル ----
-  var tbody = document.getElementById('turn-body');
-  var rows = [];
+  function buildBuckets(gran){
+    var map = {}; var keys = [];
+    for(var i=0;i<turns.length;i++){
+      var tn = turns[i];
+      var k = bucketKey(tn.t, gran);
+      if(k === null) continue;
+      var b = map[k];
+      if(!b){ b = map[k] = { key:k, total:0, turns:0, bs:{} }; keys.push(k); }
+      b.turns++;
+      var bs = tn.bs || {};
+      for(var s in bs){ if(bs.hasOwnProperty(s)){ b.bs[s] = (b.bs[s]||0) + bs[s]; b.total += bs[s]; } }
+    }
+    keys.sort();
+    return keys.map(function(k){ return map[k]; });
+  }
+
+  // 起動時の既定選択: 起動日(今日)にデータがあればその日、無ければ直近のデータがある期間。
+  // データが全く無ければ null(通算)。
+  function defaultSel(gran){
+    var buckets = buildBuckets(gran);
+    if(buckets.length === 0) return null;
+    var todayKey = bucketKey(Date.now(), gran);
+    for(var i=0;i<buckets.length;i++){ if(buckets[i].key === todayKey) return todayKey; }
+    return buckets[buckets.length - 1].key; // 最新のデータがある期間(バケットは昇順ソート済み)
+  }
+
+  function turnsInSelection(){
+    if(SEL === null) return turns;
+    return turns.filter(function(tn){ return bucketKey(tn.t, GRAN) === SEL; });
+  }
+
+  // ---- SVG ヘルパー ----
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  function svgEl(tag, attrs){
+    var e = document.createElementNS(SVGNS, tag);
+    if(attrs){ for(var k in attrs){ if(attrs.hasOwnProperty(k)) e.setAttribute(k, attrs[k]); } }
+    return e;
+  }
+  function niceCeil(max){
+    if(!(max > 0)) return 1;
+    var pow = Math.pow(10, Math.floor(Math.log10(max)));
+    var n = max / pow;
+    var nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return nice * pow;
+  }
+  function f2(n){ return Math.round(n * 100) / 100; }
   function clearNode(node){ while(node.firstChild){ node.removeChild(node.firstChild); } }
 
-  for (var i=0;i<turns.length;i++){
-    (function(t){
-      var tr = document.createElement('tr');
-      tr.className = 'turn-row';
-      tr.tabIndex = 0;
-      tr.title = 'クリックで全文表示 / click to expand';
-      function cell(text, cls){
-        var td = document.createElement('td');
-        if(cls){ td.className = cls; }
-        td.textContent = text;
-        tr.appendChild(td);
-        return td;
-      }
-      cell(t.tsLocal || '', 'c-time');
-      cell(t.project || '', 'c-proj');
-      cell(t.model || '', 'c-model');
-      cell(t.tokInFmt || '', 'c-num');
-      cell(t.tokOutFmt || '', 'c-num');
-      cell(t.usd || '', 'c-num');
-      cell(t.jpy || '', 'c-num');
-      var full = t.prompt || '';
-      var head = full.length > 80 ? full.slice(0,80) + '…' : full;
-      cell(head.length ? head : '(プロンプトなし)', 'c-prompt');
-
-      var dtr = document.createElement('tr');
-      dtr.className = 'turn-detail';
-      dtr.hidden = true;
-      var dtd = document.createElement('td');
-      dtd.colSpan = 8;
-      var meta = document.createElement('div');
-      meta.className = 'detail-meta';
-      var metaParts = [];
-      if(t.projectFull){ metaParts.push(t.projectFull); }
-      if(t.branch){ metaParts.push(t.branch); }
-      if(t.modelsRaw && t.modelsRaw.length){ metaParts.push(t.modelsRaw.join(', ')); }
-      meta.textContent = metaParts.join('  ·  ');
-      dtd.appendChild(meta);
-      // サブエージェントがあるターンは内訳を1行追加(textContent で安全に挿入)。
-      if(t.subagent){
-        var saLine = document.createElement('div');
-        saLine.className = 'detail-meta';
-        saLine.textContent = 'サブエージェント: ' + (t.subagent.usd||'') + '(' + (t.subagent.jpy||'') + ')· ' + (t.subagent.models||'') + ' · APIコール ' + (t.subagent.apiCalls||0);
-        dtd.appendChild(saLine);
-      }
-      var pre = document.createElement('div');
-      pre.className = 'detail-prompt';
-      pre.textContent = full.length ? full : '(プロンプトなし)';
-      dtd.appendChild(pre);
-      dtr.appendChild(dtd);
-
-      function toggle(){
-        dtr.hidden = !dtr.hidden;
-        if(dtr.hidden){ tr.classList.remove('open'); } else { tr.classList.add('open'); }
-      }
-      tr.addEventListener('click', toggle);
-      tr.addEventListener('keydown', function(e){
-        if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(); }
-      });
-
-      tbody.appendChild(tr);
-      tbody.appendChild(dtr);
-
-      var s = ((full) + ' ' + (t.project||'') + ' ' + (t.projectFull||'') + ' ' + (t.model||'') + ' ' + ((t.modelsRaw||[]).join(' '))).toLowerCase();
-      rows.push({ tr: tr, dtr: dtr, s: s });
-    })(turns[i]);
-  }
-
-  var search = document.getElementById('turn-search');
-  var count = document.getElementById('turn-count');
-  function applyFilter(){
-    var q = ((search && search.value) || '').trim().toLowerCase();
-    var shown = 0;
-    for (var i=0;i<rows.length;i++){
-      var match = !q || rows[i].s.indexOf(q) >= 0;
-      rows[i].tr.hidden = !match;
-      if(!match){ rows[i].dtr.hidden = true; rows[i].tr.classList.remove('open'); }
-      if(match){ shown++; }
-    }
-    if(count){ count.textContent = shown + ' 件'; }
-  }
-  if(search){
-    // 自動リロード後も検索語を維持する: ロード時に復元 → applyFilter、入力のたびに保存。
-    var savedSearch = ssGet('acn-search');
-    if(savedSearch !== null){ search.value = savedSearch; }
-    search.addEventListener('input', function(){ ssSet('acn-search', search.value); applyFilter(); });
-  }
-  applyFilter();
-
-  // ---- 日別チャートのツールチップ ----
+  // ---- 日別/週別/月別 チャート ----
+  var chartEl = document.getElementById('acn-chart');
   var tip = document.getElementById('acn-tip');
-  function showTip(evt, idx){
-    var d = daily[idx];
-    if(!d || !tip){ return; }
-    clearNode(tip);
-    var h = document.createElement('div');
-    h.className = 'tip-title';
-    h.textContent = d.date + '  合計 ' + (d.usdFmt || '') + '  ·  ' + (d.turns||0) + ' ターン';
-    tip.appendChild(h);
-    var models = d.models || [];
-    if(models.length === 0){
-      var none = document.createElement('div');
-      none.className = 'tip-row';
-      none.textContent = '(コストなし)';
-      tip.appendChild(none);
+
+  function renderChart(){
+    if(!chartEl) return;
+    var scroller0 = chartEl.parentNode;
+    var prevScroll = scroller0 ? scroller0.scrollLeft : 0; // clearNode 前に現在のスクロール位置を退避
+    clearNode(chartEl);
+    var buckets = buildBuckets(GRAN);
+    if(buckets.length === 0){
+      var p = document.createElement('p'); p.className = 'empty-hint';
+      p.textContent = 'データがありません';
+      chartEl.appendChild(p);
+      return;
     }
-    for (var i=0;i<models.length;i++){
-      var row = document.createElement('div');
-      row.className = 'tip-row';
-      var key = document.createElement('span');
-      key.className = 'tip-key k' + models[i].slot;
-      var name = document.createElement('span');
-      name.className = 'tip-name';
-      name.textContent = models[i].name;
-      var val = document.createElement('span');
-      val.className = 'tip-val';
-      val.textContent = models[i].usdFmt;
-      row.appendChild(key);
-      row.appendChild(name);
-      row.appendChild(val);
+    var H = 320, ml = 58, mr = 16, mt = 18, mb = 40;
+    var plotH = H - mt - mb;
+    var baseY = mt + plotH;
+    var GAP = 2;
+    var n = buckets.length;
+    // 帯幅はコンテナ幅から決める: バケットが少なければ横幅いっぱいに広げ、多ければ最小幅で
+    // 横スクロールさせる(svg 自身の px 幅で描くため .chart は width:100% にしない)。
+    var scroller = chartEl.parentNode;
+    var avail = (scroller && scroller.clientWidth) ? scroller.clientWidth : 900;
+    var band = Math.max(28, Math.min(90, (avail - ml - mr) / n));
+    var barW = Math.min(26, band * 0.7);
+    var plotW = band * n;
+    var W = ml + plotW + mr;
+
+    var maxTotal = 0;
+    buckets.forEach(function(b){ if(b.total > maxTotal) maxTotal = b.total; });
+    var niceMax = niceCeil(maxTotal);
+    var yscale = plotH / niceMax;
+    // 選択中バケットが現在の粒度に存在するときだけ他を淡色化する(データ無しの日を選ぶと
+    // 全部暗くなるのを避ける)。
+    var selPresent = false;
+    for(var sp=0; sp<buckets.length; sp++){ if(buckets[sp].key === SEL){ selPresent = true; break; } }
+
+    var svg = svgEl('svg', { 'class':'chart', viewBox:'0 0 ' + W + ' ' + H, role:'img',
+      'aria-label':'コスト積み上げ棒グラフ', preserveAspectRatio:'xMidYMid meet' });
+    svg.setAttribute('width', String(W));
+    svg.setAttribute('height', String(H));
+
+    var ticks = 5;
+    for(var t=0;t<=ticks;t++){
+      var val = niceMax * t / ticks;
+      var yy = f2(baseY - val * yscale);
+      svg.appendChild(svgEl('line', { 'class':'grid-line', x1:ml, y1:yy, x2:W-mr, y2:yy }));
+      var lbl = svgEl('text', { 'class':'tick-label', x:ml-8, y:yy+4, 'text-anchor':'end' });
+      lbl.textContent = formatUSD(val);
+      svg.appendChild(lbl);
+    }
+
+    // ラベルは幅で間引く(帯幅よりラベルが広いと重なるため)。
+    var labelPx = bucketLabel(buckets[0].key, GRAN).length * 7.5 + 8;
+    var xStep = Math.max(1, Math.ceil(labelPx / band));
+    for(var i=0;i<n;i++){
+      var b = buckets[i];
+      var cx = ml + band * (i + 0.5);
+      var x = cx - barW/2;
+      var dim = (SEL !== null && selPresent && b.key !== SEL);
+      var cumV = 0;
+      for(var j=0;j<slotOrder.length;j++){
+        var slot = slotOrder[j];
+        var v = b.bs[slot] || 0;
+        if(v <= 0) continue;
+        var vTop = cumV + v;
+        var yTop = baseY - vTop * yscale;
+        var yBot = baseY - cumV * yscale;
+        if(cumV > 0) yBot -= GAP;
+        cumV = vTop;
+        var h = yBot - yTop;
+        if(h <= 0.4) continue;
+        var rect = svgEl('rect', { 'class':'seg s'+slot+(dim?' dim':''), x:f2(x), y:f2(yTop), width:f2(barW), height:f2(h) });
+        svg.appendChild(rect);
+      }
+      if(i % xStep === 0 || i === n-1){
+        var xl = svgEl('text', { 'class':'tick-label', x:f2(cx), y:baseY+16, 'text-anchor':'middle' });
+        xl.textContent = bucketLabel(b.key, GRAN);
+        svg.appendChild(xl);
+      }
+      var band2 = svgEl('rect', { 'class':'acn-band'+(b.key===SEL?' sel':''), x:f2(ml+band*i), y:mt, width:f2(band), height:plotH });
+      band2.setAttribute('data-i', String(i));
+      (function(bucket){
+        band2.addEventListener('pointermove', function(e){ showTip(e, bucket); });
+        band2.addEventListener('pointerenter', function(e){ showTip(e, bucket); });
+        band2.addEventListener('pointerleave', function(){ if(tip) tip.hidden = true; });
+        band2.addEventListener('click', function(){
+          setSel(SEL === bucket.key ? null : bucket.key);
+          if(tip) tip.hidden = true;
+          render();
+        });
+      })(b);
+      svg.appendChild(band2);
+    }
+    svg.appendChild(svgEl('line', { 'class':'axis-line', x1:ml, y1:baseY, x2:W-mr, y2:baseY }));
+    chartEl.appendChild(svg);
+    // スクロール位置: 初回はリロード跨ぎで復元(無ければ右端=最新)、粒度が変わったら右端、
+    // それ以外(選択の変更など同一粒度の再描画)は直前のスクロール位置を維持する。
+    var scroller = chartEl.parentNode;
+    if(scroller){
+      if(lastRenderedGran === null){
+        var saved = parseInt(ssGet('acn-chart-scroll'), 10);
+        scroller.scrollLeft = isNaN(saved) ? scroller.scrollWidth : saved;
+      } else if(GRAN !== lastRenderedGran){
+        scroller.scrollLeft = scroller.scrollWidth;
+      } else {
+        scroller.scrollLeft = prevScroll;
+      }
+    }
+    lastRenderedGran = GRAN;
+  }
+
+  function showTip(evt, bucket){
+    if(!tip) return;
+    clearNode(tip);
+    var h = document.createElement('div'); h.className = 'tip-title';
+    h.textContent = periodText(bucket.key, GRAN) + '  合計 ' + formatUSD(bucket.total) + '  ·  ' + bucket.turns + ' ターン';
+    tip.appendChild(h);
+    for(var j=0;j<slotOrder.length;j++){
+      var slot = slotOrder[j];
+      var v = bucket.bs[slot] || 0;
+      if(v <= 0) continue;
+      var row = document.createElement('div'); row.className = 'tip-row';
+      var key = document.createElement('span'); key.className = 'tip-key k'+slot;
+      var name = document.createElement('span'); name.className = 'tip-name'; name.textContent = slotName[slot] || slot;
+      var val = document.createElement('span'); val.className = 'tip-val'; val.textContent = formatUSD(v);
+      row.appendChild(key); row.appendChild(name); row.appendChild(val);
       tip.appendChild(row);
     }
     tip.hidden = false;
     positionTip(evt);
   }
   function positionTip(evt){
-    if(!tip){ return; }
-    var pad = 14;
-    var r = tip.getBoundingClientRect();
-    var x = evt.clientX + pad;
-    var y = evt.clientY + pad;
+    if(!tip) return;
+    var pad = 14; var r = tip.getBoundingClientRect();
+    var x = evt.clientX + pad, y = evt.clientY + pad;
     if(x + r.width > window.innerWidth - 8){ x = evt.clientX - r.width - pad; }
     if(y + r.height > window.innerHeight - 8){ y = evt.clientY - r.height - pad; }
     tip.style.left = (x < 8 ? 8 : x) + 'px';
     tip.style.top = (y < 8 ? 8 : y) + 'px';
   }
-  var bands = document.querySelectorAll('.acn-band');
-  for (var b=0;b<bands.length;b++){
-    (function(band){
-      var idx = parseInt(band.getAttribute('data-i'), 10);
-      band.addEventListener('pointermove', function(e){ showTip(e, idx); });
-      band.addEventListener('pointerenter', function(e){ showTip(e, idx); });
-      band.addEventListener('pointerleave', function(){ if(tip){ tip.hidden = true; } });
-    })(bands[b]);
+
+  // ---- モデル別内訳 ----
+  var modelEl = document.getElementById('acn-bymodel');
+  function renderByModel(sub){
+    if(!modelEl) return;
+    clearNode(modelEl);
+    var usd = {}, jpy = {}, tcount = {}, total = 0;
+    sub.forEach(function(tn){
+      var bs = tn.bs || {}, fx = tn.fx || 0;
+      for(var s in bs){ if(bs.hasOwnProperty(s) && bs[s] > 0){
+        usd[s] = (usd[s]||0) + bs[s]; jpy[s] = (jpy[s]||0) + bs[s]*fx; total += bs[s];
+        tcount[s] = (tcount[s]||0) + 1;
+      } }
+    });
+    var table = document.createElement('table'); table.className = 'data-table';
+    var thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">構成比</th></tr>';
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    var any = false;
+    for(var j=0;j<slotOrder.length;j++){
+      var slot = slotOrder[j];
+      if(!(usd[slot] > 0)) continue;
+      any = true;
+      var share = total > 0 ? (usd[slot]/total*100) : 0;
+      var tr = document.createElement('tr');
+      var c1 = document.createElement('td'); c1.className = 'c-name';
+      var sw = document.createElement('span'); sw.className = 'swatch k'+slot; c1.appendChild(sw);
+      c1.appendChild(document.createTextNode(slotName[slot] || slot));
+      var c2 = document.createElement('td'); c2.className = 'c-num'; c2.textContent = String(tcount[slot]||0);
+      var c3 = document.createElement('td'); c3.className = 'c-num'; c3.textContent = formatUSD(usd[slot]);
+      var c4 = document.createElement('td'); c4.className = 'c-num'; c4.textContent = formatJPY(jpy[slot]);
+      var c5 = document.createElement('td'); c5.className = 'c-num'; c5.textContent = share.toFixed(1) + '%';
+      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c5);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    if(!any){ var p = document.createElement('p'); p.className='empty-hint'; p.textContent='この期間のデータはありません'; modelEl.appendChild(p); return; }
+    modelEl.appendChild(table);
   }
 
-  // ---- 自動リロードでもスクロール位置を維持する ----
-  // ロード時に保存値へスクロール復元し、以後は scroll のたびに現在位置を保存する(代入のみ)。
-  var savedScroll = ssGet('acn-scroll');
-  if(savedScroll !== null){
-    var sy = parseInt(savedScroll, 10);
-    if(!isNaN(sy)){ try { window.scrollTo(0, sy); } catch(e){} }
+  // ---- プロジェクト別 ----
+  var projEl = document.getElementById('acn-byproject');
+  function renderByProject(sub){
+    if(!projEl) return;
+    clearNode(projEl);
+    var agg = {};
+    sub.forEach(function(tn){
+      var bs = tn.bs || {}, fx = tn.fx || 0, total = 0;
+      for(var s in bs){ if(bs.hasOwnProperty(s)) total += bs[s]; }
+      var name = tn.p || '(unknown)';
+      var a = agg[name] || (agg[name] = { usd:0, jpy:0, turns:0 });
+      a.usd += total; a.jpy += total*fx; a.turns++;
+    });
+    var rows = Object.keys(agg).map(function(name){ var a = agg[name]; return { name:name, usd:a.usd, jpy:a.jpy, turns:a.turns }; });
+    rows.sort(function(a,b){ return b.usd - a.usd || a.name.localeCompare(b.name); });
+    if(rows.length === 0){ var p = document.createElement('p'); p.className='empty-hint'; p.textContent='この期間のデータはありません'; projEl.appendChild(p); return; }
+    var table = document.createElement('table'); table.className = 'data-table';
+    var thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>プロジェクト / Project</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th></tr>';
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    rows.forEach(function(r){
+      var tr = document.createElement('tr');
+      var c1 = document.createElement('td'); c1.className='c-name'; c1.textContent = r.name;
+      var c2 = document.createElement('td'); c2.className='c-num'; c2.textContent = String(r.turns);
+      var c3 = document.createElement('td'); c3.className='c-num'; c3.textContent = formatUSD(r.usd);
+      var c4 = document.createElement('td'); c4.className='c-num'; c4.textContent = formatJPY(r.jpy);
+      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    projEl.appendChild(table);
   }
+
+  // ---- ターン履歴 ----
+  // 全期間だと数千行になりページが極端に長く・重くなるため、DOM 描画は最大 HIST_CAP 件に抑える。
+  // 検索は選択中の全ターンを対象にし、一致件数を件数表示に出す(先頭 HIST_CAP 件だけ描画)。
+  var HIST_CAP = 200;
+  var tbody = document.getElementById('turn-body');
+  var search = document.getElementById('turn-search');
+  var count = document.getElementById('turn-count');
+  var histData = []; // 選択中の期間のターン(新しい順)
+
+  function matchStr(t){
+    return ((t.pr||'') + ' ' + (t.p||'') + ' ' + (t.pf||'') + ' ' + (t.md||'') + ' ' + ((t.mr||[]).join(' '))).toLowerCase();
+  }
+
+  function buildRow(t){
+    var tr = document.createElement('tr');
+    tr.className = 'turn-row'; tr.tabIndex = 0; tr.title = 'クリックで全文表示 / click to expand';
+    function cell(text, cls){ var td = document.createElement('td'); if(cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; }
+    cell(t.ts || '', 'c-time');
+    cell(t.p || '', 'c-proj');
+    cell(t.md || '', 'c-model');
+    cell(t.ti || '', 'c-num');
+    cell(t.to || '', 'c-num');
+    cell(formatUSD(t.um || 0), 'c-num');
+    cell(formatJPY((t.um || 0) * (t.fx || 0)), 'c-num');
+    var full = t.pr || '';
+    var head = full.length > 80 ? full.slice(0,80) + '…' : full;
+    cell(head.length ? head : '(プロンプトなし)', 'c-prompt');
+
+    var dtr = document.createElement('tr'); dtr.className = 'turn-detail'; dtr.hidden = true;
+    var dtd = document.createElement('td'); dtd.colSpan = 8;
+    var meta = document.createElement('div'); meta.className = 'detail-meta';
+    var mp = [];
+    if(t.pf) mp.push(t.pf);
+    if(t.br) mp.push(t.br);
+    if(t.mr && t.mr.length) mp.push(t.mr.join(', '));
+    meta.textContent = mp.join('  ·  ');
+    dtd.appendChild(meta);
+    if(t.sa){
+      var saLine = document.createElement('div'); saLine.className = 'detail-meta';
+      saLine.textContent = 'サブエージェント: ' + (t.sa.usd||'') + '(' + (t.sa.jpy||'') + ')· ' + (t.sa.models||'') + ' · APIコール ' + (t.sa.apiCalls||0);
+      dtd.appendChild(saLine);
+    }
+    var pre = document.createElement('div'); pre.className = 'detail-prompt';
+    pre.textContent = full.length ? full : '(プロンプトなし)';
+    dtd.appendChild(pre); dtr.appendChild(dtd);
+    function toggle(){ dtr.hidden = !dtr.hidden; if(dtr.hidden) tr.classList.remove('open'); else tr.classList.add('open'); }
+    tr.addEventListener('click', toggle);
+    tr.addEventListener('keydown', function(e){ if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(); } });
+    tbody.appendChild(tr); tbody.appendChild(dtr);
+  }
+
+  function renderHistory(sub){
+    if(!tbody) return;
+    histData = sub.slice().sort(function(a,b){ return b.t - a.t; });
+    applyFilter();
+  }
+  function applyFilter(){
+    if(!tbody) return;
+    clearNode(tbody);
+    var q = ((search && search.value) || '').trim().toLowerCase();
+    var matched = 0, shown = 0;
+    for(var i=0;i<histData.length;i++){
+      var t = histData[i];
+      if(q && matchStr(t).indexOf(q) < 0) continue;
+      matched++;
+      if(shown < HIST_CAP){ buildRow(t); shown++; }
+    }
+    if(count){ count.textContent = (matched > shown) ? (matched + ' 件中 ' + shown + ' 件を表示') : (matched + ' 件'); }
+  }
+
+  // ---- 選択ラベル・コントロール ----
+  var selLabelEl = document.getElementById('acn-sel-label');
+  function updateSelLabel(sub){
+    if(!selLabelEl) return;
+    var usd = 0, jpy = 0;
+    sub.forEach(function(tn){ var fx = tn.fx||0; var bs = tn.bs||{}; for(var s in bs){ if(bs.hasOwnProperty(s)){ usd += bs[s]; jpy += bs[s]*fx; } } });
+    clearNode(selLabelEl);
+    var b = document.createElement('b'); b.textContent = periodText(SEL, GRAN);
+    selLabelEl.appendChild(b);
+    selLabelEl.appendChild(document.createTextNode('  ' + formatUSD(usd) + ' · ' + formatJPY(jpy) + ' · ' + sub.length + ' ターン'));
+  }
+  function updateControls(){
+    var gbtns = document.querySelectorAll('[data-gran]');
+    for(var i=0;i<gbtns.length;i++){ gbtns[i].classList.toggle('active', gbtns[i].getAttribute('data-gran') === GRAN); }
+    var allBtn = document.getElementById('acn-all');
+    if(allBtn) allBtn.classList.toggle('active', SEL === null);
+  }
+
+  // ---- 全体レンダリング ----
+  function render(){
+    var sub = turnsInSelection();
+    renderChart();
+    renderByModel(sub);
+    renderByProject(sub);
+    renderHistory(sub);
+    updateSelLabel(sub);
+    updateControls();
+  }
+
+  // イベント配線。
+  var gbtns = document.querySelectorAll('[data-gran]');
+  for(var i=0;i<gbtns.length;i++){
+    (function(btn){ btn.addEventListener('click', function(){ setGran(btn.getAttribute('data-gran')); setSel(null); render(); }); })(gbtns[i]);
+  }
+  var allBtn = document.getElementById('acn-all');
+  if(allBtn) allBtn.addEventListener('click', function(){ setSel(null); render(); });
+  if(search){
+    var saved = ssGet('acn-search');
+    if(saved !== null) search.value = saved;
+    search.addEventListener('input', function(){ ssSet('acn-search', search.value); applyFilter(); });
+  }
+
+  render();
+
+  // 自動リロードを跨いでスクロール位置を維持する(ロード時に復元 → 以後は保存のみ)。
+  var savedScroll = ssGet('acn-scroll');
+  if(savedScroll !== null){ var sy = parseInt(savedScroll, 10); if(!isNaN(sy)){ try { window.scrollTo(0, sy); } catch(e){} } }
   window.addEventListener('scroll', function(){ ssSet('acn-scroll', String(window.scrollY)); });
+
+  // チャートの横スクロール位置も保存する(リロード跨ぎの復元用。復元は renderChart の初回で行う)。
+  var chartScroller = chartEl ? chartEl.parentNode : null;
+  if(chartScroller){ chartScroller.addEventListener('scroll', function(){ ssSet('acn-chart-scroll', String(chartScroller.scrollLeft)); }); }
 })();
 </script>`;
+
+// ============ HTML 断片(サーバ描画・静的) ============
+
+function statCard(label: string, sub: string, totals: PeriodTotals): string {
+  return (
+    `<div class="stat">` +
+    `<div class="stat-label">${esc(label)}<span class="stat-sub">${esc(sub)}</span></div>` +
+    `<div class="stat-value">${esc(formatUSD(totals.usd))}</div>` +
+    `<div class="stat-meta">${esc(formatJPY(totals.jpy))} · ${totals.turns} ターン</div>` +
+    `</div>`
+  );
+}
+
+function renderLegend(slots: SlotDef[]): string {
+  if (slots.length < 2) return "";
+  const items = slots
+    .map((m) => `<span class="legend-item"><span class="swatch k${m.slot}"></span>${esc(m.name)}</span>`)
+    .join("");
+  return `<div class="legend">${items}</div>`;
+}
 
 // ============ フルページ組み立て ============
 
 function escapeJsonForScript(json: string): string {
-  // type="application/json" は実行されないが、</script> による脱出を防ぐため '<' を < に
-  // エスケープする。U+2028/U+2029 も念のためエスケープ。
   return json
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
 }
 
-function periodLabel(days: number): string {
-  return days >= 3650 ? "全期間" : `直近 ${days} 日間`;
-}
-
 function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   const version = readVersion();
-  const agg = aggregate(turns);
   const generatedAt = fmtLocalDateTime(new Date().toISOString());
-  const period = periodLabel(opts.days);
+  const period = opts.days === null ? "全期間" : `直近 ${opts.days} 日間`;
+
+  const map = computeSlotMap(turns);
+  const kpi = computeKpis(turns);
+  const turnsEmbed = turns.map((rec) => buildTurnEmbed(rec, map));
+  const anyTruncated = turnsEmbed.some((t) => t.tr);
+  const anySub = turns.some((r) => r.subagents);
+  let subUsd = 0;
+  let subJpy = 0;
+  for (const r of turns) {
+    if (r.subagents) {
+      subUsd += r.subagents.costUSD;
+      subJpy += r.subagents.costUSD * r.fxRate;
+    }
+  }
+
+  // 日付レンジ(表示用)。
+  let minMs = Infinity;
+  let maxMs = -Infinity;
+  for (const t of turnsEmbed) {
+    if (t.t > 0) {
+      if (t.t < minMs) minMs = t.t;
+      if (t.t > maxMs) maxMs = t.t;
+    }
+  }
   const rangeText =
-    agg.minDate && agg.maxDate
-      ? agg.minDate === agg.maxDate
-        ? agg.minDate
-        : `${agg.minDate} 〜 ${agg.maxDate}`
+    Number.isFinite(minMs) && Number.isFinite(maxMs)
+      ? `${dateKeyOf(new Date(minMs))} 〜 ${dateKeyOf(new Date(maxMs))}`
       : "—";
 
-  // 埋め込みデータ(#acn-data)。プロンプト等のユーザーデータはここにのみ入れ、描画は textContent。
-  const embed = {
-    version,
-    generatedAt,
-    period,
-    days: opts.days,
-    totals: agg.totals,
-    daily: agg.daily.map((d) => ({
-      date: d.date,
-      turns: d.turns,
-      usdFmt: d.usdFmt,
-      models: d.models.map((m) => ({ name: m.name, slot: m.slot, usdFmt: m.usdFmt })),
-    })),
-    turns: agg.turnsEmbed,
-  };
+  const embed = { version, generatedAt, slots: map.slots, turns: turnsEmbed };
   const dataJson = escapeJsonForScript(JSON.stringify(embed));
 
-  // meta refresh / フッタ表示に使う「有効なリロード秒」。非有限・0以下は無効(0)へ正規化し、
-  // content 属性へは常に安全な整数だけを埋め込む(config 由来の異常値による属性破壊を防ぐ)。
   const reloadSec =
     Number.isFinite(opts.autoReloadSec) && opts.autoReloadSec > 0 ? Math.floor(opts.autoReloadSec) : 0;
   const refreshMeta = reloadSec > 0 ? `<meta http-equiv="refresh" content="${reloadSec}">` : "";
@@ -1185,67 +1029,69 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<div class="sub muted">生成 ${esc(generatedAt)} / generated</div>` +
     `</div>` +
     `<div class="hero">` +
-    `<div class="hero-label">合計 / Total</div>` +
-    `<div class="hero-value">${esc(formatUSD(agg.totals.cost))}</div>` +
-    `<div class="hero-meta">${esc(formatJPY(agg.totals.jpy))} · ${agg.totals.turns} ターン</div>` +
-    (agg.anySubagents
-      ? `<div class="hero-meta">うちサブエージェント ${esc(formatUSD(agg.subagentsCost))}(${esc(formatJPY(agg.subagentsJpy))})</div>`
+    `<div class="hero-label">通算 / Total</div>` +
+    `<div class="hero-value">${esc(formatUSD(kpi.all.usd))}</div>` +
+    `<div class="hero-meta">${esc(formatJPY(kpi.all.jpy))} · ${kpi.all.turns} ターン</div>` +
+    (anySub
+      ? `<div class="hero-meta">うちサブエージェント ${esc(formatUSD(subUsd))}(${esc(formatJPY(subJpy))})</div>`
       : "") +
     `</div>` +
     `</div>`;
 
   // ---- KPI ----
-  const kpi =
+  const kpiSection =
     `<div class="kpi">` +
-    statCard("今日", "Today", agg.today) +
-    statCard("今週", "直近7日", agg.week) +
-    statCard("今月", "暦月", agg.month) +
-    statCard("期間合計", period, agg.totals) +
+    statCard("今日", "Today", kpi.today) +
+    statCard("今週", "直近7日", kpi.week) +
+    statCard("今月", "暦月", kpi.month) +
+    statCard("通算", "全期間", kpi.all) +
     `</div>`;
 
-  // ---- 日別チャート ----
-  const dailyNote =
-    (agg.chartTruncatedDays
-      ? `期間が広いため棒が細く表示されます(チャートは横スクロールできます)。`
-      : `モデル別の実配分で集計しています(旧バージョンで記録されたターンは主モデルに全額帰属)。`) +
-    ` サブエージェント分を含みます(完了タイミングにより次ターン以降の日に計上されることがあります)。`;
-  const dailySection =
+  // ---- 日別コスト(粒度切替・選択・通算) ----
+  const chartSection =
     `<section class="card">` +
-    `<h2>日別コスト / Daily cost</h2>` +
-    `<p class="note">${esc(dailyNote)} モデル別に色分け。棒にカーソルを合わせると内訳を表示します。</p>` +
-    renderLegend(agg.models) +
-    `<div class="chart-scroll">${renderDailyChart(agg)}</div>` +
-    renderDailyTable(agg.daily) +
+    `<h2>コスト推移 / Cost over time</h2>` +
+    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「通算」で全期間に戻ります。モデル別に色分け。</p>` +
+    `<div class="toolbar-row">` +
+    `<div class="seg-toggle">` +
+    `<button type="button" data-gran="day">日</button>` +
+    `<button type="button" data-gran="week">週</button>` +
+    `<button type="button" data-gran="month">月</button>` +
+    `</div>` +
+    `<button type="button" id="acn-all" class="btn">通算</button>` +
+    `<span id="acn-sel-label" class="sel-label"></span>` +
+    `</div>` +
+    renderLegend(map.slots) +
+    `<div class="chart-scroll"><div id="acn-chart"></div></div>` +
     `</section>`;
 
-  // ---- モデル別 + プロジェクト別 ----
+  // ---- モデル別 + プロジェクト別(選択連動) ----
   const breakdownSection =
     `<div class="grid2">` +
     `<section class="card">` +
     `<h2>モデル別内訳 / By model</h2>` +
-    `<p class="note">コスト降順。バー長=コスト、右の数値は $ と構成比。</p>` +
-    `<div class="chart-scroll">${renderModelBars(agg)}</div>` +
-    `<div class="table-wrap">${renderModelTable(agg.models)}</div>` +
-    `<p class="note">複数モデルを使ったターンは各モデルの行に1ずつ計上(ターン数の合計は総ターン数を超えることがあります)。</p>` +
+    `<p class="note">選択中の期間(既定は通算)のコスト降順。複数モデルのターンは各モデルに1ずつ計上。</p>` +
+    `<div class="table-wrap" id="acn-bymodel"></div>` +
     `</section>` +
     `<section class="card">` +
     `<h2>プロジェクト別 / By project</h2>` +
-    `<p class="note">プロジェクト名(ディレクトリ basename)単位・コスト降順。</p>` +
-    `<div class="table-wrap">${renderProjectTable(agg.projects)}</div>` +
+    `<p class="note">選択中の期間のプロジェクト(ディレクトリ basename)単位・コスト降順。</p>` +
+    `<div class="table-wrap" id="acn-byproject"></div>` +
     `</section>` +
     `</div>`;
 
   // ---- ターン履歴 ----
-  const truncNote = agg.anyTruncated
-    ? `<p class="note">※ プロンプトは1件あたり最大 ${PROMPT_MAX.toLocaleString("en-US")} 字まで表示します(超過分は「${esc(PROMPT_TRUNC_MARK)}」と表示)。</p>`
-    : `<p class="note">行をクリックするとプロンプト全文を展開します。プロンプトは最大 ${PROMPT_MAX.toLocaleString("en-US")} 字まで保存・表示します。</p>`;
+  const capNote = "件数が多い場合は新しい順に先頭200件のみ描画します(検索や、上のグラフで期間を選ぶと絞り込めます)。";
+  const truncNote = anyTruncated
+    ? `<p class="note">選択中の期間のターンを新しい順に表示します。${capNote}プロンプトは1件あたり最大 ${PROMPT_MAX.toLocaleString("en-US")} 字まで(超過分は「${esc(PROMPT_TRUNC_MARK)}」)。行クリックで全文展開。</p>`
+    : `<p class="note">選択中の期間のターンを新しい順に表示します。${capNote}行クリックでプロンプト全文を展開します。</p>`;
   const historySection =
     `<section class="card">` +
     `<h2>ターン履歴 / History</h2>` +
     truncNote +
     `<div class="toolbar">` +
     `<input id="turn-search" class="search" type="search" placeholder="プロンプト・プロジェクト・モデルで検索 / search…" autocomplete="off">` +
-    `<span class="count"><span id="turn-count">${agg.turnsEmbed.length}</span></span>` +
+    `<span class="count"><span id="turn-count">0</span></span>` +
     `</div>` +
     `<div class="table-wrap"><table class="turns"><thead><tr>` +
     `<th>時刻</th><th>プロジェクト</th><th>モデル</th>` +
@@ -1254,7 +1100,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `</tr></thead><tbody id="turn-body"></tbody></table></div>` +
     `</section>`;
 
-  return head + header + kpi + dailySection + breakdownSection + historySection + foot;
+  return head + header + kpiSection + chartSection + breakdownSection + historySection + foot;
 }
 
 // ============ ブラウザ起動 ============
@@ -1288,19 +1134,17 @@ function openInBrowser(path: string): void {
 
 /**
  * ダッシュボード HTML を生成してファイルへ書き出す(副作用は書き込みのみ)。
- * - readTurns(days) → renderDashboard → mkdir(dirname) + writeFileSync。
- * - console 出力・ブラウザ起動はしない。失敗は throw する(呼び出し側が処理する)。
- * - autoReloadSec > 0 のとき、生成 HTML の <head> に meta refresh を出力する。
- * runDashboard と track の自動再生成(フェイルセーフ経路)の共通コア。
+ * days 省略(undefined)/ null で全履歴。console 出力・ブラウザ起動はしない。失敗は throw。
  */
 export function writeDashboardHtml(opts: {
-  days: number;
+  days?: number | null;
   outPath: string;
   autoReloadSec: number;
 }): void {
-  const turns = readTurns(opts.days);
+  const days = opts.days ?? null;
+  const turns = readTurns(days ?? undefined);
   const html = renderDashboard(turns, {
-    days: opts.days,
+    days,
     open: false,
     out: opts.outPath,
     autoReloadSec: opts.autoReloadSec,

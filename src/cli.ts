@@ -40,6 +40,11 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Backfill uncounted history (active sessions are skipped)",
   },
   {
+    cmd: "history <clear|redact> [--days N] [--yes]",
+    ja: "履歴を削除(clear=レコードごと / redact=プロンプトのみ。--days で古い分だけ)",
+    en: "Delete history (clear=records / redact=prompts only; --days limits to older)",
+  },
+  {
     cmd: "mute [30m|2h|1d]",
     ja: "通知を一時停止(期間省略で無期限。記録は続く)",
     en: "Pause notifications (indefinitely if no duration; tracking continues)",
@@ -173,6 +178,10 @@ export async function main(argv: string[]): Promise<number> {
       case "sweep": {
         const { runSweep } = await import("./sweep");
         return await runSweep(rest);
+      }
+      case "history": {
+        const { runHistory } = await import("./history");
+        return await runHistory(rest);
       }
       case "mute": {
         const { runMute } = await import("./mute");
