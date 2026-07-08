@@ -208,6 +208,29 @@ describe("runInit — config.json への反映", () => {
     const code = await runInit(["--yes", "--os-only", "--budget", "-5"]);
     expect(code).toBe(1);
   });
+
+  it("--slack-only --slack-webhook で OS 通知を無効化し Slack のみにする", async () => {
+    const code = await runInit([
+      "--yes",
+      "--slack-only",
+      "--slack-webhook",
+      "https://hooks.slack.com/services/XXX",
+    ]);
+    expect(code).toBe(0);
+    const cfg = JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8"));
+    expect(cfg.notify.os).toBe(false);
+    expect(cfg.notify.slack.webhookUrl).toBe("https://hooks.slack.com/services/XXX");
+  });
+
+  it("--slack-only を webhook 無しで指定するとエラー(exit 1)", async () => {
+    expect(await runInit(["--yes", "--slack-only"])).toBe(1);
+  });
+
+  it("--slack-only と --os-only の同時指定はエラー(exit 1)", async () => {
+    expect(
+      await runInit(["--yes", "--slack-only", "--os-only", "--slack-webhook", "https://hooks.slack.com/services/XXX"]),
+    ).toBe(1);
+  });
 });
 
 // ============ 6. uninstall ============
@@ -316,5 +339,33 @@ describe("runInit — テスト通知", () => {
     expect(typeof lastNotify.os.title).toBe("string");
     expect(lastNotify.os.title).toContain("💰");
     expect(typeof lastNotify.os.body).toBe("string");
+  });
+
+  it("Slack 設定時は init のテスト通知に slack も含まれる", async () => {
+    const code = await runInit([
+      "--yes",
+      "--slack-webhook",
+      "https://hooks.slack.com/services/XXX",
+    ]);
+    expect(code).toBe(0);
+
+    const lastNotify = JSON.parse(readFileSync(join(homeDir, "last-notify.json"), "utf8"));
+    expect(lastNotify.os).toBeDefined(); // OS も併用
+    expect(lastNotify.slack).toBeDefined();
+    expect(lastNotify.slack.payload.blocks).toHaveLength(3);
+  });
+
+  it("--slack-only なら init のテスト通知は slack のみ(os は書かれない)", async () => {
+    const code = await runInit([
+      "--yes",
+      "--slack-only",
+      "--slack-webhook",
+      "https://hooks.slack.com/services/XXX",
+    ]);
+    expect(code).toBe(0);
+
+    const lastNotify = JSON.parse(readFileSync(join(homeDir, "last-notify.json"), "utf8"));
+    expect(lastNotify.slack).toBeDefined();
+    expect(lastNotify.os).toBeUndefined(); // OS 無効なので notifyOS は書かない
   });
 });
