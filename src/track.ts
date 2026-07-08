@@ -190,7 +190,7 @@ export async function runTrack(stdinText: string): Promise<void> {
         (async () => {
           try {
             writeDashboardHtml({
-              days: cfg.dashboard.days,
+              days: null, // 全履歴を埋め込む(粒度切替・過去・通算をブラウザ側で扱うため)
               outPath: join(paths().home, "report.html"),
               autoReloadSec: cfg.dashboard.autoReloadSec,
             });
