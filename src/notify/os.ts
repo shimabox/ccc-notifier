@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Config, TurnRecord } from "../types";
 import { formatSummary } from "../format";
+import { isWSL } from "../env";
 import { appendNotifyError, writeDryRun } from "./util";
 
 const NOTIFY_TIMEOUT_MS = 3000;
@@ -58,18 +59,36 @@ function spawnLinuxNotify(title: string, body: string): ChildProcess {
   return spawn("notify-send", [title, body], { stdio: "ignore" });
 }
 
+/** 通知バックエンドの種別と、spawn 失敗("error" イベント)を握りつぶすか。 */
+export type NotifyBackend = { kind: "darwin" | "win32" | "linux"; swallowError: boolean };
+
 /**
- * 現在の OS に応じた通知コマンドを spawn する。
+ * 現在の実行環境に応じた通知バックエンドを選ぶ(spawn しない純粋関数・テスト用に export)。
+ * - WSL2 は process.platform === "linux" だが notify-send は届かないのが普通なので、
+ *   Windows interop 経由で powershell.exe のトースト(win32 バックエンド)に橋渡しする。
+ *   powershell.exe は通常 PATH 上にあり失敗は稀なので、素の Linux と違い失敗は記録する。
+ * - 素の Linux は notify-send。通知デーモン不在によるコマンド不在は日常的なため握りつぶす。
+ */
+export function selectNotifyBackend(): NotifyBackend {
+  if (process.platform === "darwin") return { kind: "darwin", swallowError: false };
+  if (process.platform === "win32") return { kind: "win32", swallowError: false };
+  if (isWSL()) return { kind: "win32", swallowError: false };
+  return { kind: "linux", swallowError: true };
+}
+
+/**
+ * 選択したバックエンドに応じた通知コマンドを spawn する。
  * swallowError: true の場合、spawn 自体の失敗("error" イベント)を error.log に記録しない。
  */
 function spawnNotifyChild(title: string, body: string): { child: ChildProcess; swallowError: boolean } {
-  if (process.platform === "darwin") {
-    return { child: spawnDarwinNotify(title, body), swallowError: false };
+  const backend = selectNotifyBackend();
+  if (backend.kind === "darwin") {
+    return { child: spawnDarwinNotify(title, body), swallowError: backend.swallowError };
   }
-  if (process.platform === "win32") {
-    return { child: spawnWin32Notify(title, body), swallowError: false };
+  if (backend.kind === "win32") {
+    return { child: spawnWin32Notify(title, body), swallowError: backend.swallowError };
   }
-  return { child: spawnLinuxNotify(title, body), swallowError: true };
+  return { child: spawnLinuxNotify(title, body), swallowError: backend.swallowError };
 }
 
 /**

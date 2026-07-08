@@ -216,6 +216,7 @@ describe("notifyOS", () => {
     rmSync(tmpHome, { recursive: true, force: true });
     delete process.env.ACN_HOME;
     delete process.env.ACN_DRY_RUN;
+    delete process.env.ACN_FORCE_WSL;
     setPlatform(originalPlatform);
   });
 
@@ -321,6 +322,39 @@ describe("notifyOS", () => {
     const [command] = mockSpawn.mock.calls[0] as [string, string[], Record<string, unknown>];
     expect(command).toBe("notify-send");
     expect(existsSync(join(tmpHome, "error.log"))).toBe(false);
+  });
+
+  it("routes to the powershell toast on WSL (platform=linux) instead of notify-send", async () => {
+    setPlatform("linux");
+    process.env.ACN_FORCE_WSL = "1";
+    try {
+      const pending = notifyOS(baseRecord, baseConfig);
+      fakeChild.emit("exit", 0);
+      await pending;
+
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      const [command, args] = mockSpawn.mock.calls[0] as [string, string[], Record<string, unknown>];
+      expect(command).toBe("powershell.exe");
+      expect(args).toContain("-EncodedCommand");
+    } finally {
+      delete process.env.ACN_FORCE_WSL;
+    }
+  });
+
+  it("logs (does not swallow) a spawn error on WSL, unlike plain Linux", async () => {
+    setPlatform("linux");
+    process.env.ACN_FORCE_WSL = "1";
+    try {
+      const pending = notifyOS(baseRecord, baseConfig);
+      fakeChild.emit("error", new Error("spawn powershell.exe ENOENT"));
+      await expect(pending).resolves.toBeUndefined();
+
+      const errLog = readFileSync(join(tmpHome, "error.log"), "utf8");
+      expect(errLog).toContain("notifyOS");
+      expect(errLog).toContain("spawn powershell.exe ENOENT");
+    } finally {
+      delete process.env.ACN_FORCE_WSL;
+    }
   });
 
   it("kills the child and resolves after a 3s timeout if it never exits", async () => {
