@@ -8,7 +8,7 @@
   },
   "bin": {
     "ccc-notifier": "dist/cli.js",
-    "ccc": "dist/cli.js"
+    "cccn": "dist/cli.js"
   },
   "files": [
     "dist"
