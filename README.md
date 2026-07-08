@@ -362,6 +362,7 @@ npx ccc-notifier unmute     # すぐに再開
    - 非対話: `npx ccc-notifier init --yes --slack-webhook "https://hooks.slack.com/services/XXX"`
    - `~/.ccc-notifier/config.json` を直接編集し、`notify.slack` に `{ "webhookUrl": "...", "promptChars": 100, "sendFullPrompt": false }` を設定
 3. Slack にはタイトル・トークン/コスト概要・プロンプト冒頭(既定100字、`sendFullPrompt: true` で全文)の3ブロックが送信されます。送信は3秒でタイムアウトし、失敗しても(Webhook設定ミスなどがあっても)Claude Code の応答自体には一切影響しません
+4. 設定できたか確認するには `npx ccc-notifier doctor` を実行します。Slack を設定していれば **Slack にもテスト通知が実際に送信**されるので、チャンネルに届いたかで確認できます(OS 通知も同時に送られます)。実送信せず中身だけ見たい場合は `ACN_DRY_RUN=1 npx ccc-notifier doctor` とすると、送信内容が `~/.ccc-notifier/last-notify.json` に書き出されます。届かないときは `~/.ccc-notifier/error.log` に `notifySlack` の記録が残ります
 
 ## プライバシー / Privacy
 

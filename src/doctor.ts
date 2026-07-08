@@ -13,6 +13,7 @@ import { computeCost, loadPriceTable } from "./pricing";
 import { getUsdJpy } from "./fx";
 import { formatUSD } from "./format";
 import { notifyOS } from "./notify/os";
+import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
 import { isMuted, paths, readConfig, readMuteState } from "./store";
@@ -306,11 +307,6 @@ async function checkNotification(cfg: Config): Promise<boolean> {
       );
     }
 
-    if (!cfg.notify.os) {
-      log("warn", "notify.os が無効なため、テスト通知はスキップされました");
-      return true;
-    }
-
     const dummy: TurnRecord = {
       schemaVersion: 1,
       ts: new Date().toISOString(),
@@ -328,13 +324,30 @@ async function checkNotification(cfg: Config): Promise<boolean> {
       prompt: "doctor によるテスト通知です",
     };
 
-    await notifyOS(dummy, cfg);
+    const dryRun = process.env.ACN_DRY_RUN === "1";
+    const dryHint = `(ACN_DRY_RUN=1 のため ${paths().lastNotifyFile} の内容で確認できます)`;
 
-    if (process.env.ACN_DRY_RUN === "1") {
-      log("ok", `テスト通知を送信しました(ACN_DRY_RUN=1 のため ${paths().lastNotifyFile} の内容で確認できます)`);
+    // OS 通知(有効なときのみ)。
+    if (cfg.notify.os) {
+      await notifyOS(dummy, cfg);
+      log("ok", `OS のテスト通知を送信しました${dryRun ? dryHint : "(OS通知が表示されたか確認してください)"}`);
     } else {
-      log("ok", "テスト通知を送信しました(OS通知が表示されたか確認してください)");
+      log("warn", "notify.os が無効なため、OS のテスト通知はスキップしました");
     }
+
+    // Slack 通知(webhook を設定しているときのみ)。notifySlack は throw しない。
+    if (cfg.notify.slack) {
+      await notifySlack(dummy, cfg);
+      log(
+        "ok",
+        `Slack のテスト通知を送信しました${dryRun ? dryHint : "(Slack チャンネルに届いたか確認してください。届かない場合は error.log を参照)"}`,
+      );
+    }
+
+    if (!cfg.notify.os && !cfg.notify.slack) {
+      log("warn", "OS・Slack とも無効なため、テスト通知は送信していません");
+    }
+
     return true;
   } catch (err) {
     // notifyOS は契約上 throw しないが、念のため ⚠️ に倒す。
