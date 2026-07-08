@@ -357,6 +357,10 @@ npx ccc-notifier unmute     # すぐに再開
 
 ## Slack 通知の有効化 / Enabling Slack Notifications
 
+Slack を設定すると、指定したチャンネルへ次のように通知が届きます(タイトル・トークン/コスト概要・プロンプト冒頭の3ブロック):
+
+![Slack 通知の例](docs/images/slack-notification.png)
+
 1. Slack で Incoming Webhook を発行します(Slack App の管理画面で *Incoming Webhooks* を有効化 → *Add New Webhook to Workspace* → 通知したいチャンネルを選択すると `https://hooks.slack.com/services/...` 形式の URL が発行されます)
 2. 次のいずれかの方法で設定します。
    - `npx ccc-notifier init` を実行し、「通知チャネル」で *OS通知 + Slack*(OS通知と併用)または *Slackのみ*(OS通知なし)を選んで URL を貼り付ける
