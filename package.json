@@ -2,6 +2,28 @@
   "name": "ccc-notifier",
   "version": "0.1.0",
   "description": "Claude Code Cost notifier: per-prompt cost notifications (USD/JPY) with local history and HTML dashboard",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "cost",
+    "usage",
+    "notifier",
+    "notification",
+    "cli",
+    "dashboard",
+    "slack"
+  ],
+  "license": "MIT",
+  "author": "shimabox (https://github.com/shimabox)",
+  "homepage": "https://github.com/shimabox/ccc-notifier#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shimabox/ccc-notifier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shimabox/ccc-notifier/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -16,9 +38,9 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
-  "license": "MIT",
   "dependencies": {
     "@clack/prompts": "^1.7.0"
   },
