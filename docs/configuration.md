@@ -1,0 +1,38 @@
+# 設定 / Configuration
+
+[← README に戻る](../README.md)
+
+`init` で答えた内容は `~/.ccc-notifier/config.json` に保存されます(Claude Code 自体の `~/.claude/settings.json` とは別のファイルです)。直接編集しても構いません。
+
+| キー | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `notify.os` | boolean | `true` | OS通知(macOS通知センター / Windowsトースト通知など)を送るか |
+| `notify.slack.webhookUrl` | string | - | Slack Incoming Webhook の URL。無効化する場合は `notify.slack` 自体を `null` にする |
+| `notify.slack.promptChars` | number | `100` | Slack に送るプロンプト冒頭の文字数 |
+| `notify.slack.sendFullPrompt` | boolean | `false` | `true` にするとプロンプト全文を Slack に送信(既定は冒頭のみ) |
+| `minNotifyUSD` | number | `0` | この金額(USD)未満のターンは通知しない。**履歴には常に記録されます** |
+| `costLabel` | `"api_equivalent"` \| `"actual"` | `"api_equivalent"` | 金額ラベルの意味づけ(詳細は [金額の意味](cost.md)) |
+| `fx.fallbackRate` | number | `150` | 為替取得に失敗した際に使う固定 USD→JPY レート |
+| `fx.cacheHours` | number | `12` | 為替レートのキャッシュ有効時間(時間単位) |
+| `includeDailyTotal` | boolean | `true` | 通知本文に「今日の累計コスト」を含めるか |
+| `monthlyBudgetUSD` | number | `0` | 月予算(USD)。`0` で無効。ダッシュボードに当月の使用率カードを表示(`budget` コマンド / `init` の `--budget` で設定。詳細は [月予算](monthly-budget.md)) |
+| `dashboard.autoRegenerate` | boolean | `true` | 応答完了(`track`)のたびに `report.html` を自動再生成するか |
+| `dashboard.autoReloadSec` | number | `30` | 生成 HTML の自動リロード間隔(秒)。`0` で自動リロードを無効化 |
+| `dashboard.days` | number | `30` | 自動再生成時に集計する対象期間(日数) |
+
+補足: データ保存先(既定 `~/.ccc-notifier`)は環境変数 `CCCN_HOME` で上書きできます。
+
+## 通知の一時停止と再開 / Pausing & Resuming Notifications
+
+「集中したいから今だけ通知を止めたい」というときは `mute` / `unmute` を使います。止まるのは **OS/Slack 通知だけ**で、コストの記録・ダッシュボードの自動更新はそのまま続きます(あとから履歴で確認できます)。
+
+```bash
+npx ccc-notifier mute       # 無期限で停止(unmute するまで)
+npx ccc-notifier mute 2h    # 2時間だけ停止(期限が来ると自動で再開)
+npx ccc-notifier mute 30m   # 30分だけ停止(m=分 / h=時間 / d=日)
+npx ccc-notifier unmute     # すぐに再開
+```
+
+- 停止状態は `~/.ccc-notifier/muted.json` に保存されます。`config.json` は変更しません
+- 停止中かどうかは `doctor` でも確認できます(停止中は ⚠️ で表示)
+- 恒久的に OS 通知を切りたい場合は `config.json` の `notify.os: false`、金額の小さいターンだけ通知を抑えたい場合は `minNotifyUSD` が向いています(前項「設定」参照)
