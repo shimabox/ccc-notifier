@@ -4,7 +4,7 @@
 // 「既存設定を1項目たりとも壊さない」ことが絶対の品質基準。
 //
 // 契約: src/contracts.md の "src/setup.ts (T7)" セクション参照。
-//   - runInit(argv: string[]): Promise<number>      // --yes --os-only を必ずサポート
+//   - runInit(argv: string[]): Promise<number>      // --yes --os-only --no-notify を必ずサポート
 //   - runUninstall(argv: string[]): Promise<number> // --purge サポート
 
 import {
@@ -132,6 +132,7 @@ interface InitFlags {
   yes: boolean;
   osOnly: boolean;
   slackOnly: boolean;
+  noNotify: boolean;
   slackWebhook?: string;
   label?: string;
   rate?: string;
@@ -150,12 +151,13 @@ function takeValue(argv: string[], i: number, prefix: string): string | undefine
 }
 
 function parseInitFlags(argv: string[]): InitFlags {
-  const flags: InitFlags = { yes: false, osOnly: false, slackOnly: false };
+  const flags: InitFlags = { yes: false, osOnly: false, slackOnly: false, noNotify: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") flags.yes = true;
     else if (a === "--os-only") flags.osOnly = true;
     else if (a === "--slack-only") flags.slackOnly = true;
+    else if (a === "--no-notify") flags.noNotify = true;
     else if (a === "--slack-webhook" || a.startsWith("--slack-webhook=")) {
       flags.slackWebhook = takeValue(argv, i, "--slack-webhook");
       if (!a.includes("=")) i++;
@@ -253,13 +255,32 @@ export async function runInit(argv: string[]): Promise<number> {
 
   // 1. 設定値の決定 —— readConfig()(既存 + デフォルトのマージ済み)を起点に回答を適用する。
   const cfg = readConfig();
-  cfg.notify.os = true; // init は OS 通知を有効化する。
+  // 対話モードの初期選択を既存設定から導出する。特に通知なしモードのユーザーが
+  // (hook の Node パス更新などで)再 init したとき、既定値のまま Enter して
+  // 通知が復活してしまう事故を防ぐ。
+  const initialChannel =
+    !cfg.notify.os && !cfg.notify.slack
+      ? "none"
+      : cfg.notify.slack
+        ? cfg.notify.os
+          ? "both"
+          : "slack"
+        : "os";
+  cfg.notify.os = true; // init は OS 通知を有効化する(通知なし: --no-notify / 対話の "none" で上書き)。
   // 月予算の既定: 既に設定済みならその値、未設定(0)なら $400 を提案する。
   const budgetDefault = cfg.monthlyBudgetUSD > 0 ? cfg.monthlyBudgetUSD : DEFAULT_BUDGET_USD;
 
   if (flags.yes) {
     // 非対話(CI / テスト)。フラグで与えられた値のみ適用する(未指定キーは既存値を維持)。
-    if (flags.slackOnly) {
+    if (flags.noNotify) {
+      // 通知なし(記録・ダッシュボードのみ)。チャネル系フラグとは排他。
+      if (flags.osOnly || flags.slackOnly || flags.slackWebhook !== undefined) {
+        console.error("--no-notify と --os-only / --slack-only / --slack-webhook は同時に指定できません");
+        return 1;
+      }
+      cfg.notify.os = false;
+      cfg.notify.slack = null;
+    } else if (flags.slackOnly) {
       // Slack のみ(OS 通知なし)。webhook が無いと通知手段がゼロになるため必須。
       if (flags.osOnly) {
         console.error("--slack-only と --os-only は同時に指定できません");
@@ -320,8 +341,9 @@ export async function runInit(argv: string[]): Promise<number> {
         { value: "os", label: "OS 通知のみ" },
         { value: "slack", label: "Slack のみ(OS 通知なし)" },
         { value: "both", label: "OS 通知 + Slack" },
+        { value: "none", label: "通知なし(記録・ダッシュボードのみ)" },
       ],
-      initialValue: "os",
+      initialValue: initialChannel,
     });
     if (p.isCancel(channel)) {
       p.cancel("キャンセルしました");
@@ -347,6 +369,7 @@ export async function runInit(argv: string[]): Promise<number> {
       cfg.notify.os = channel === "both"; // 「Slack のみ」は OS 通知を無効化する
     } else {
       cfg.notify.slack = null;
+      cfg.notify.os = channel === "os"; // "none" は通知を無効化する(記録・ダッシュボードは継続)
     }
 
     const labelChoice = await p.select<string>({
@@ -414,10 +437,16 @@ export async function runInit(argv: string[]): Promise<number> {
 
   // 5. テスト通知(CCCN_DRY_RUN 下では last-notify.json に書かれるだけ)。
   //    OS が有効なら OS 通知を、Slack を設定していれば Slack 通知も送り、その場で設定を確認できるようにする。
-  const testRecord = makeTestRecord();
-  await notifyOS(testRecord, cfg);
-  if (cfg.notify.slack) {
-    await notifySlack(testRecord, cfg);
+  //    通知なしモード(両チャネル無効)なら送らず、スキップした旨を明示する。
+  const notifyDisabled = !cfg.notify.os && !cfg.notify.slack;
+  if (notifyDisabled) {
+    console.log("テスト通知: 通知なしモードのためスキップしました");
+  } else {
+    const testRecord = makeTestRecord();
+    await notifyOS(testRecord, cfg);
+    if (cfg.notify.slack) {
+      await notifySlack(testRecord, cfg);
+    }
   }
 
   // 6. 完了メッセージ。
@@ -429,7 +458,13 @@ export async function runInit(argv: string[]): Promise<number> {
       : "  (settings.json を新規作成したためバックアップはありません)",
   );
   console.log(`  設定ファイル: ${cccn.configFile}`);
-  console.log("Claude Code で何か実行すると通知が届きます。確認: npx ccc-notifier doctor");
+  if (notifyDisabled) {
+    console.log(
+      "通知なしモードです。Claude Code の利用は自動で記録されます。ダッシュボード: npx ccc-notifier dashboard",
+    );
+  } else {
+    console.log("Claude Code で何か実行すると通知が届きます。確認: npx ccc-notifier doctor");
+  }
   return 0;
 }
 

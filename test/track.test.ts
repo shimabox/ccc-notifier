@@ -320,6 +320,24 @@ describe("runTrack", () => {
     expect(existsSync(errLog)).toBe(true);
     expect(readFileSync(errLog, "utf8")).toContain("[track:dashboard]");
   });
+
+  // 12. 通知なしモード(notify.os=false, slack=null): 記録・再生成は行うが通知は一切出ない。
+  //     todayTotalUSD の履歴走査もスキップされる(通知タスクを組み立てないため)。
+  it("12. records and regenerates but never notifies in dashboard-only mode (notify.os=false, slack=null)", async () => {
+    writeFileSync(
+      join(tmpHome, "config.json"),
+      JSON.stringify({ notify: { os: false, slack: null } }),
+      "utf8",
+    );
+    const todaySpy = vi.spyOn(store, "todayTotalUSD");
+
+    await runTrack(stdinFor(transcriptPath));
+
+    expect(readHistory()).toHaveLength(1);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
+    expect(existsSync(lastNotifyFile())).toBe(false);
+    expect(todaySpy).not.toHaveBeenCalled();
+  });
 });
 
 // ============ サブエージェント usage の取り込み ============

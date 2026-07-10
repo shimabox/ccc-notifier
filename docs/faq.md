@@ -12,6 +12,7 @@ npx ccc-notifier doctor
 
 - hook が未登録 → `npx ccc-notifier init` を再実行してください
 - `config.json` の `notify.os` が `false` → 意図的に無効化されています
+- 通知なしモード(`notify.os: false` かつ `notify.slack: null`)になっている → `doctor` が「通知なし・ダッシュボードのみモード」と明示します。通知を使いたければ `init` を再実行してチャネルを選び直してください(詳細は [設定 / 通知なしモード](configuration.md#通知なしモード記録ダッシュボードのみ--dashboard-only-mode))
 - そのターンの金額が `minNotifyUSD` 未満 → 通知は来ませんが、履歴(`report`)には記録されています
 
 **Node を更新・削除したら通知が来なくなった**

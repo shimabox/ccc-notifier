@@ -466,6 +466,38 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(existsSync(sb.cccnHome)).toBe(false);
   });
 
+  // ---- 6b. 通知なしモード(--no-notify)一気通貫 ----
+  it("6b. init --yes --no-notify → doctor がダッシュボードのみモードを ✅ で報告する", async () => {
+    // --- init --no-notify ---
+    const init = await runCli(["init", "--yes", "--no-notify"], { env: sb.env });
+    expect(init.code).toBe(0);
+    expect(init.stdout).toContain("テスト通知: 通知なしモードのためスキップしました");
+    expect(init.stdout).toContain("通知なしモードです");
+
+    // config は通知なし、hook は登録される。
+    const cfg = readJson(join(sb.cccnHome, "config.json"));
+    expect(cfg.notify.os).toBe(false);
+    expect(cfg.notify.slack).toBeNull();
+    expect(readJson(sb.settingsPath).hooks.Stop).toHaveLength(1);
+
+    // テスト通知はスキップされる(CCCN_DRY_RUN=1 でも last-notify.json は書かれない)。
+    expect(existsSync(join(sb.cccnHome, "last-notify.json"))).toBe(false);
+
+    // --- doctor ---
+    const doctor = await runCli(["doctor"], { env: sb.env });
+    expect(doctor.code).toBe(0);
+    expect(doctor.stdout).toContain("ダッシュボードのみモード");
+    expect(doctor.stdout).not.toContain("OS・Slack とも無効");
+    expect(doctor.stdout).not.toContain("❌");
+
+    // --- track: 通知は出ないが記録・再生成はされる ---
+    const track = await runCli(["track"], { env: sb.env, stdin: stdinFor(sb.transcriptPath) });
+    expect(track.code).toBe(0);
+    expect(readHistory(sb.cccnHome)).toHaveLength(1);
+    expect(existsSync(join(sb.cccnHome, "report.html"))).toBe(true);
+    expect(existsSync(join(sb.cccnHome, "last-notify.json"))).toBe(false);
+  });
+
   // ---- 7. exit code 規約 ----
   it("7. --version は semver 風文字列で0、--help も0、unknown-cmd は1を返す", async () => {
     const version = await runCli(["--version"], { env: sb.env });
