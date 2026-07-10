@@ -22,7 +22,7 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 - **$ と ¥ を併記** — USD と JPY の両方を毎回表示します(為替レートは自動取得 + キャッシュ + 固定フォールバックの三段構え)
 - **プロンプト全文をローカルに履歴保存** — `~/.ccc-notifier/history.jsonl` にそのターンのプロンプト全文を保存します(外部には送信されません)
 - **HTMLダッシュボード** — `dashboard` コマンドで、サマリー・コスト推移(**日 / 週 / 月**で切替、横スクロールで過去まで)・モデル別/プロジェクト別内訳・検索できるターン履歴を1枚の HTML(完全自己完結・ライト/ダーク対応)に書き出してブラウザで開きます。棒をクリックするとその期間が選択され、内訳・履歴が連動(「通算」で全期間)
-- **月予算(monthly budget)** — 月に使える金額(USD)を設定すると、ダッシュボードに**当月の使用額 / 予算・使用率(%)**をプログレスバーで表示します(`init` の対話、または `ccc-notifier budget <金額>` で設定)
+- **月予算(monthly budget)** — 月に使える金額(USD)を設定すると、ダッシュボードに**当月の使用額 / 予算・使用率(%)** をプログレスバーで表示します(`init` の対話、または `ccc-notifier budget <金額>` で設定)
 - **OS 標準の通知機構のみ使用・追加依存ゼロ** — 通知は macOS では `osascript`、Windows では PowerShell 標準のトースト通知機能のみで送信します(node-notifier 等の外部通知ライブラリには一切依存しません)
 - **全処理ローカル・フェイルセーフ設計** — 通知や集計の処理が失敗しても、Claude Code 本体の応答は絶対にブロックしません
 
@@ -72,7 +72,7 @@ node dist/cli.js init
 
    対話形式で次の4点を聞かれます。
 
-   - 通知チャネル(OS通知のみ / Slackのみ / OS通知+Slack)
+   - 通知チャネル(OS通知のみ / Slackのみ / OS通知+Slack / 通知なし(記録・ダッシュボードのみ))
    - コスト表示ラベル(API換算 / 実額)
    - USD/JPY のフォールバック為替レート(既定 150円)
    - 月の予算(USD、既定 $400。`0` で無効。ダッシュボードに当月の使用率を表示。詳細は [月予算](docs/monthly-budget.md))
@@ -95,6 +95,7 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 | `--os-only` | Slack を無効化し OS通知のみにする |
 | `--slack-webhook <url>` | Slack Incoming Webhook URL を指定して有効化 |
 | `--slack-only` | Slack のみにする(OS 通知を無効化)。`--slack-webhook` と併用が必須 |
+| `--no-notify` | 通知なし(記録・ダッシュボードのみ)。`--os-only` / `--slack-only` / `--slack-webhook` とは併用不可(例: `npx ccc-notifier init --yes --no-notify`。詳細は [設定](docs/configuration.md#通知なしモード記録ダッシュボードのみ--dashboard-only-mode)) |
 | `--label <api_equivalent\|actual>` | コスト表示ラベルを指定 |
 | `--rate <number>` | USD/JPY フォールバックレートを指定 |
 | `--budget <USD>` | 月予算(USD)を指定(0 で無効)。未指定なら既定 **$400**(既存設定があれば維持) |

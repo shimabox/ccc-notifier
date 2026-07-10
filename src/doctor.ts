@@ -296,6 +296,16 @@ async function checkFx(cfg: Config): Promise<boolean> {
 // ---- 6. テスト通知 ----
 async function checkNotification(cfg: Config): Promise<boolean> {
   try {
+    // 通知なしモード(両チャネル無効)は意図的な設定として ✅ で明示する。
+    // notify.os の既定は true のため、両方無効は init の「通知なし」選択・--no-notify・
+    // 手動編集のいずれかによる意図的な状態でしかありえない。ミュートや通知経路の
+    // 診断はこのモードでは無関係なのでスキップする。
+    if (!cfg.notify.os && !cfg.notify.slack) {
+      log("ok", "通知チャネルはすべて無効です(通知なし・ダッシュボードのみモード)。記録とダッシュボードは動作します");
+      log("ok", "通知を有効にするには npx ccc-notifier init を再実行してください");
+      return true;
+    }
+
     // ミュート中の見落とし(「通知が来ない!」)を防ぐため、状態を明示する。
     // テスト通知自体はミュートの影響を受けずに送る(通知経路の診断が目的のため)。
     if (isMuted()) {
@@ -352,10 +362,6 @@ async function checkNotification(cfg: Config): Promise<boolean> {
         "ok",
         `Slack のテスト通知を送信しました${dryRun ? dryHint : "(Slack チャンネルに届いたか確認してください。届かない場合は error.log を参照)"}`,
       );
-    }
-
-    if (!cfg.notify.os && !cfg.notify.slack) {
-      log("warn", "OS・Slack とも無効なため、テスト通知は送信していません");
     }
 
     return true;

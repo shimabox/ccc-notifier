@@ -369,3 +369,59 @@ describe("runInit — テスト通知", () => {
     expect(lastNotify.os).toBeUndefined(); // OS 無効なので notifyOS は書かない
   });
 });
+
+// ============ 10. 通知なしモード(--no-notify) ============
+
+describe("runInit — 通知なしモード(--no-notify)", () => {
+  it("--yes --no-notify で notify.os=false / slack=null になり、hook は登録され、テスト通知は送られない", async () => {
+    const code = await runInit(["--yes", "--no-notify"]);
+    expect(code).toBe(0);
+
+    const cfg = JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8"));
+    expect(cfg.notify.os).toBe(false);
+    expect(cfg.notify.slack).toBeNull();
+
+    // 通知なしでも Stop フックは登録される(記録・ダッシュボードの供給源)。
+    const settings = readSettings();
+    expect(settings.hooks.Stop).toHaveLength(1);
+    expect(stopCommand(settings)).toContain("ccc-notifier");
+
+    // CCCN_DRY_RUN=1 でもテスト通知自体をスキップするため last-notify.json は書かれない。
+    expect(existsSync(join(homeDir, "last-notify.json"))).toBe(false);
+  });
+
+  it("--no-notify とチャネル系フラグの併用はエラー(exit 1)で、config も settings も書かれない", async () => {
+    expect(await runInit(["--yes", "--no-notify", "--os-only"])).toBe(1);
+    expect(
+      await runInit([
+        "--yes",
+        "--no-notify",
+        "--slack-only",
+        "--slack-webhook",
+        "https://hooks.slack.com/services/XXX",
+      ]),
+    ).toBe(1);
+    expect(
+      await runInit(["--yes", "--no-notify", "--slack-webhook", "https://hooks.slack.com/services/XXX"]),
+    ).toBe(1);
+
+    expect(existsSync(join(homeDir, "config.json"))).toBe(false);
+    expect(existsSync(settingsFile)).toBe(false);
+  });
+
+  it("--no-notify でも --label / --budget は反映される", async () => {
+    const code = await runInit(["--yes", "--no-notify", "--label", "actual", "--budget", "123"]);
+    expect(code).toBe(0);
+    const cfg = JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8"));
+    expect(cfg.costLabel).toBe("actual");
+    expect(cfg.monthlyBudgetUSD).toBe(123);
+  });
+
+  it("--no-notify の後に素の --yes で再 init すると OS 通知が再有効化される(既存の流儀)", async () => {
+    await runInit(["--yes", "--no-notify"]);
+    await runInit(["--yes"]);
+    const cfg = JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8"));
+    expect(cfg.notify.os).toBe(true);
+    expect(cfg.notify.slack).toBeNull();
+  });
+});
