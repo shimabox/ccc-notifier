@@ -43,6 +43,14 @@ export function builtinPriceTable(): PriceTable {
     'claude-haiku-4-5': price(1, 5, 1.25, 2, 0.1, 'builtin'),
     'claude-3-5-haiku': price(0.8, 4, 1.0, 1.6, 0.08, 'builtin'),
     'claude-3-haiku': price(0.25, 1.25, 0.3125, 0.5, 0.025, 'builtin'),
+
+    // OpenAI Codex CLI 対応(公式レートに基づく単価。キャッシュ書き込み課金は無いため 0)
+    'gpt-5.5': price(5, 30, 0, 0, 0.5, 'builtin'),
+    'gpt-5.1': price(1.25, 10, 0, 0, 0.125, 'builtin'),
+    'gpt-5': price(1.25, 10, 0, 0, 0.125, 'builtin'),
+    'gpt-5-codex': price(1.25, 10, 0, 0, 0.125, 'builtin'),
+    'gpt-5.1-codex': price(1.25, 10, 0, 0, 0.125, 'builtin'),
+    'o3': price(2, 8, 0, 0, 0.5, 'builtin'),
   };
 }
 
@@ -159,6 +167,9 @@ function toFiniteNumber(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+// LiteLLM 取り込みで採用する OpenAI 系モデルキー(gpt-* / o3 / o3-* / codex-*)
+const LITELLM_OPENAI_KEY_RE = /^(gpt-|o3($|-)|codex-)/;
+
 /** LiteLLM の model_prices_and_context_window.json を PriceTable(litellm 由来分のみ)へ変換する。 */
 function convertLiteLLMPayload(payload: unknown): PriceTable {
   if (payload === null || typeof payload !== 'object') {
@@ -172,6 +183,31 @@ function convertLiteLLMPayload(payload: unknown): PriceTable {
     const entry = rawEntry as Record<string, unknown>;
 
     const provider = entry.litellm_provider;
+
+    // OpenAI(Codex CLI 対応): provider が 'openai' のエントリは gpt-/o3/codex- 系キーのみ採用する。
+    // OpenAI にはキャッシュ書き込み課金が無いため write 系は 0(cacheRead は無ければ 0)。
+    if (provider === 'openai') {
+      const key = rawKey.toLowerCase();
+      if (!LITELLM_OPENAI_KEY_RE.test(key)) continue;
+
+      const inputRaw = toFiniteNumber(entry.input_cost_per_token);
+      const outputRaw = toFiniteNumber(entry.output_cost_per_token);
+      if (inputRaw === null || inputRaw <= 0) continue;
+      if (outputRaw === null || outputRaw <= 0) continue;
+
+      const cacheReadRaw = toFiniteNumber(entry.cache_read_input_token_cost);
+
+      table[key] = {
+        input: inputRaw * 1_000_000,
+        output: outputRaw * 1_000_000,
+        cacheRead: cacheReadRaw !== null ? cacheReadRaw * 1_000_000 : 0,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
+        source: 'litellm',
+      };
+      continue;
+    }
+
     if (typeof provider === 'string' && provider !== 'anthropic') continue;
 
     let key = rawKey.toLowerCase();

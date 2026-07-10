@@ -66,22 +66,24 @@ describe('resolvePrice: longest-prefix match', () => {
 describe('unknown models', () => {
   const table = builtinPriceTable();
 
+  // OpenAI 対応で gpt-* は既知モデルになったため、フィクスチャを架空 ID に変更(2026-07-10)
+
   it('resolvePrice returns null for an unknown model id', () => {
-    expect(resolvePrice('gpt-5', table)).toBeNull();
+    expect(resolvePrice('unknown-model-xyz', table)).toBeNull();
   });
 
   it('computeCost puts unknown models in unknownModels at 0 cost, without duplicates', () => {
     const main: UsageByModel = {
-      'gpt-5': { input: 100, output: 100, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+      'unknown-model-xyz': { input: 100, output: 100, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
     };
     const sidechain: UsageByModel = {
-      'gpt-5': { input: 50, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+      'unknown-model-xyz': { input: 50, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
     };
 
     const result = computeCost(main, sidechain, table);
 
     expect(result.usd).toBe(0);
-    expect(result.unknownModels).toEqual(['gpt-5']);
+    expect(result.unknownModels).toEqual(['unknown-model-xyz']);
   });
 });
 
@@ -116,7 +118,8 @@ describe('loadPriceTable', () => {
           cache_creation_input_token_cost: 0.0000125,
           cache_creation_input_token_cost_above_1hr: 0.00002,
         },
-        'gpt-4': {
+        // OpenAI 対応で gpt-* は既知になったため架空 ID に変更(2026-07-10)
+        'unknown-model-xyz': {
           input_cost_per_token: 0.00001,
           output_cost_per_token: 0.00003,
           litellm_provider: 'openai',
@@ -148,7 +151,7 @@ describe('loadPriceTable', () => {
     expect(testModel2.cacheWrite5m).toBeCloseTo(12.5, 10);
     expect(testModel2.cacheWrite1h).toBeCloseTo(20, 10);
 
-    expect(table['gpt-4']).toBeUndefined();
+    expect(table['unknown-model-xyz']).toBeUndefined();
     expect(table['claude-zero-cost']).toBeUndefined();
 
     // builtin entries survive the merge
@@ -262,5 +265,189 @@ describe('loadPriceTable', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(table['claude-fresh-model']).toEqual(freshTable['claude-fresh-model']);
+  });
+});
+
+// OpenAI Codex CLI 対応(2026-07-10 契約追加分)
+
+describe('builtin OpenAI (Codex CLI) pricing', () => {
+  const table = builtinPriceTable();
+
+  it('gpt-5.5 / gpt-5.1 / gpt-5 / gpt-5-codex / gpt-5.1-codex / o3 have the contracted USD/1M rates', () => {
+    expect(table['gpt-5.5']).toEqual({
+      input: 5,
+      output: 30,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0.5,
+      source: 'builtin',
+    });
+    expect(table['gpt-5.1']).toEqual({
+      input: 1.25,
+      output: 10,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0.125,
+      source: 'builtin',
+    });
+    expect(table['gpt-5']).toEqual({
+      input: 1.25,
+      output: 10,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0.125,
+      source: 'builtin',
+    });
+    expect(table['gpt-5-codex']).toEqual({
+      input: 1.25,
+      output: 10,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0.125,
+      source: 'builtin',
+    });
+    expect(table['gpt-5.1-codex']).toEqual({
+      input: 1.25,
+      output: 10,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0.125,
+      source: 'builtin',
+    });
+    expect(table['o3']).toEqual({
+      input: 2,
+      output: 8,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 0.5,
+      source: 'builtin',
+    });
+  });
+});
+
+describe('resolvePrice: OpenAI (Codex) longest-prefix match', () => {
+  const table = builtinPriceTable();
+
+  it('gpt-5.5-codex-mini and gpt-5.5-xyz both fall back to the gpt-5.5 entry (no dedicated gpt-5.5-codex entry exists)', () => {
+    const base = table['gpt-5.5'];
+    expect(resolvePrice('gpt-5.5-codex-mini', table)).toEqual(base);
+    expect(resolvePrice('gpt-5.5-xyz', table)).toEqual(base);
+  });
+
+  it('o3-mini resolves to the o3 entry via prefix match', () => {
+    expect(resolvePrice('o3-mini', table)).toEqual(table['o3']);
+  });
+});
+
+describe('loadPriceTable: litellm OpenAI (Codex CLI) entries', () => {
+  let cacheDir: string;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cccn-pricing-openai-'));
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await fs.rm(cacheDir, { recursive: true, force: true });
+  });
+
+  it('(c) adopts openai gpt-/codex- entries, keeps anthropic claude, and excludes keys not matching the regex', async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse({
+        'claude-test-model': {
+          input_cost_per_token: 0.000003,
+          output_cost_per_token: 0.000015,
+          litellm_provider: 'anthropic',
+        },
+        'gpt-5.5': {
+          input_cost_per_token: 0.000005,
+          output_cost_per_token: 0.00003,
+          cache_read_input_token_cost: 0.0000005,
+          litellm_provider: 'openai',
+        },
+        'gpt-5.1-codex': {
+          // cache_read_input_token_cost 無し → cacheRead は 0(claude 系の x0.1 フォールバックは適用しない)
+          input_cost_per_token: 0.00000125,
+          output_cost_per_token: 0.00001,
+          litellm_provider: 'openai',
+        },
+        'codex-mini-latest': {
+          input_cost_per_token: 0.0000015,
+          output_cost_per_token: 0.000006,
+          litellm_provider: 'openai',
+        },
+        'text-embedding-3-small': {
+          input_cost_per_token: 0.00000002,
+          output_cost_per_token: 0.00000001,
+          litellm_provider: 'openai',
+        },
+        'gpt-no-output': {
+          input_cost_per_token: 0.000001,
+          litellm_provider: 'openai',
+        },
+      }),
+    );
+
+    const table = await loadPriceTable(cacheDir);
+
+    // openai エントリが USD/MTok 換算で採用される(write 系は 0)
+    const gpt55 = table['gpt-5.5'];
+    expect(gpt55.source).toBe('litellm');
+    expect(gpt55.input).toBeCloseTo(5, 10);
+    expect(gpt55.output).toBeCloseTo(30, 10);
+    expect(gpt55.cacheRead).toBeCloseTo(0.5, 10);
+    expect(gpt55.cacheWrite5m).toBe(0);
+    expect(gpt55.cacheWrite1h).toBe(0);
+
+    // cache_read_input_token_cost 欠損 → cacheRead 0
+    const codex51 = table['gpt-5.1-codex'];
+    expect(codex51.source).toBe('litellm');
+    expect(codex51.input).toBeCloseTo(1.25, 10);
+    expect(codex51.output).toBeCloseTo(10, 10);
+    expect(codex51.cacheRead).toBe(0);
+    expect(codex51.cacheWrite5m).toBe(0);
+    expect(codex51.cacheWrite1h).toBe(0);
+
+    // codex- プレフィックスも採用対象
+    expect(table['codex-mini-latest'].source).toBe('litellm');
+
+    // anthropic の claude 系は従来どおり採用される
+    const claude = table['claude-test-model'];
+    expect(claude.source).toBe('litellm');
+    expect(claude.input).toBeCloseTo(3, 10);
+    expect(claude.output).toBeCloseTo(15, 10);
+
+    // 正規表現に合わない openai キー・output 欠損のエントリは除外される
+    expect(table['text-embedding-3-small']).toBeUndefined();
+    expect(table['gpt-no-output']).toBeUndefined();
+  });
+
+  it('(d) adopts openai o3 (overriding builtin) and o3-mini resolves to it by prefix', async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse({
+        'o3': {
+          input_cost_per_token: 0.000004,
+          output_cost_per_token: 0.000016,
+          cache_read_input_token_cost: 0.000001,
+          litellm_provider: 'openai',
+        },
+      }),
+    );
+
+    const table = await loadPriceTable(cacheDir);
+
+    const o3 = table['o3'];
+    expect(o3.source).toBe('litellm');
+    expect(o3.input).toBeCloseTo(4, 10);
+    expect(o3.output).toBeCloseTo(16, 10);
+    expect(o3.cacheRead).toBeCloseTo(1, 10);
+    expect(o3.cacheWrite5m).toBe(0);
+    expect(o3.cacheWrite1h).toBe(0);
+
+    // litellm の o3 が builtin の o3 を上書きし、o3-mini はプレフィックス一致でそれを解決する
+    expect(resolvePrice('o3-mini', table)).toEqual(o3);
   });
 });
