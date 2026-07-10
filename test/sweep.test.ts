@@ -27,6 +27,9 @@ import { formatJPY, formatUSD } from "../src/format";
 import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
 import type { TurnRecord } from "../src/types";
+// Codex sweep テスト用の追加 import(既存 import ブロックは不変。新規行のみ追加)。
+import { writeFileSync } from "node:fs";
+import { saveCursor } from "../src/store";
 
 const FIXTURE_MULTITURN = fileURLToPath(new URL("./fixtures/transcript-multiturn.jsonl", import.meta.url));
 const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
@@ -351,5 +354,255 @@ describe("runSweep", () => {
     expect(output).toContain("2 ターン");
     expect(output).not.toContain("スキップ:");
     expect(readHistory()).toHaveLength(2);
+  });
+});
+
+// ===========================================================================
+// Codex 走査(過去分の一括回収)
+//
+// 既存の top-level beforeEach/afterEach(CCCN_HOME / CCCN_CLAUDE_PROJECTS / CCCN_DRY_RUN /
+// fetch スタブ)はそのまま活かしつつ、追加で CCCN_CODEX_HOME を一時 dir に隔離する。
+//
+// 【重要・隔離の理由】既存 beforeEach は CCCN_CODEX_HOME を触らないため、実行マシンに実 ~/.codex/
+// sessions があると runSweep が実データを走査してしまい、既存 Claude テストのレコード数アサーション
+// (「2 レコード」等)まで壊す。そこで下記 top-level beforeEach で CCCN_CODEX_HOME を「sessions を
+// 持たない空の一時ホーム」に既定設定する。これで全テスト(既存含む)で Codex 走査は黙ってスキップされ、
+// 既存テストの挙動・アサーションは不変のまま、実データからの汚染だけを防げる(既存コードは無変更)。
+// Codex 用テストはこの一時ホーム配下に sessions/YYYY/MM/DD/rollout-*.jsonl を置いて検証する。
+let codexHomeDir: string;
+let prevCodexHome: string | undefined;
+
+beforeEach(() => {
+  prevCodexHome = process.env.CCCN_CODEX_HOME;
+  codexHomeDir = mkdtempSync(join(tmpdir(), "cccn-sweep-codex-"));
+  process.env.CCCN_CODEX_HOME = codexHomeDir; // sessions 無しの空ホーム = Codex 走査は黙ってスキップ
+});
+
+afterEach(() => {
+  rmSync(codexHomeDir, { recursive: true, force: true });
+  if (prevCodexHome === undefined) delete process.env.CCCN_CODEX_HOME;
+  else process.env.CCCN_CODEX_HOME = prevCodexHome;
+});
+
+const FIXTURES_CODEX_DIR = fileURLToPath(new URL("./fixtures/codex", import.meta.url));
+
+// 実 Codex と同じ uuid 形式のファイル名(session_meta の session_id と対応させる)。
+const NAME_MULTITURN = "rollout-2026-07-10T13-00-00-01234567-aaaa-7000-8000-000000000002.jsonl";
+const NAME_BASIC = "rollout-2026-07-10T12-09-25-01234567-aaaa-7000-8000-000000000001.jsonl";
+
+/**
+ * codex fixture を codexHomeDir/sessions/2026/07/10/<fileName> に配置し、mtime を10分前に戻す
+ * (コピー直後 = 現在 mtime のままだと active guard でスキップされるため。「完了済み」を模す)。
+ */
+function placeCodexRollout(fixtureBasename: string, fileName: string): string {
+  const dir = join(codexHomeDir, "sessions", "2026", "07", "10");
+  mkdirSync(dir, { recursive: true });
+  const dest = join(dir, fileName);
+  copyFileSync(join(FIXTURES_CODEX_DIR, fixtureBasename), dest);
+  const aged = new Date(Date.now() - 10 * 60_000);
+  utimesSync(dest, aged, aged);
+  return dest;
+}
+
+describe("runSweep (codex)", () => {
+  // 1. multiturn を取り込む → 3 レコード(source codex / ingest sweep / モデル gpt-5.5×2 + gpt-5-codex /
+  //    buckets が fixtures README のドラフト正解値どおり)。サマリに「Codex: 3」。
+  it("1. ingests a multiturn rollout as 3 codex records with a Codex summary line", async () => {
+    placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
+
+    const { code, output } = await sweep([]);
+    expect(code).toBe(0);
+    // Codex 行は「うちサブエージェント」行と同じ $(¥)書式(¥ は fx.rate=150 換算)。
+    // 0.0047 + 0.0123 + 0.0010125 = 0.0180125 USD。
+    expect(output).toContain(
+      `Codex: 3 ターン ${formatUSD(0.0180125)}(${formatJPY(0.0180125 * 150)})`,
+    );
+    // Codex 分は総合計にも含まれる(このテストは Codex のみなので newRecords = 3)。
+    expect(output).toContain("新規取り込み: 3 ターン");
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(3);
+
+    for (const r of rows) {
+      expect(r.source).toBe("codex");
+      expect(r.ingest).toBe("sweep");
+      expect(r.sessionId).toBe("01234567-aaaa-7000-8000-000000000002");
+      expect(r.project).toBe("/home/user/proj-b");
+      expect(r.gitBranch).toBeNull();
+      expect(r.sidechainTokens).toBeNull();
+      expect(r.subagents).toBeUndefined();
+      expect(r.fxRate).toBe(150);
+    }
+
+    const [t1, t2, t3] = rows;
+
+    // t1: gpt-5.5 / TokenBuckets {input:600, cacheRead:400, output:50} / cost 0.0047。
+    expect(t1.prompt).toBe("ターン1です");
+    expect(t1.ts).toBe("2026-07-10T13:00:06.000Z");
+    expect(t1.models).toEqual(["gpt-5.5"]);
+    expect(t1.apiCalls).toBe(1);
+    expect(t1.tokens).toEqual({ input: 600, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 400 });
+    expect(t1.costUSD).toBeCloseTo(0.0047, 10);
+    expect(t1.costByModel!["gpt-5.5"]).toBeCloseTo(0.0047, 10);
+    expect(t1.costJPY).toBeCloseTo(0.0047 * 150, 10);
+
+    // t2: gpt-5.5 / {input:1400, cacheRead:1600, output:150}(B+C 合算・破損行はスキップ)/ cost 0.0123 / apiCalls 2。
+    expect(t2.prompt).toBe("ターン2です");
+    expect(t2.ts).toBe("2026-07-10T13:01:21.000Z");
+    expect(t2.models).toEqual(["gpt-5.5"]);
+    expect(t2.apiCalls).toBe(2);
+    expect(t2.tokens).toEqual({ input: 1400, output: 150, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 1600 });
+    expect(t2.costUSD).toBeCloseTo(0.0123, 10);
+
+    // t3: gpt-5-codex / {input:300, cacheRead:300, output:60}(info:null はスキップ)/ cost 0.0010125 / apiCalls 1。
+    expect(t3.prompt).toBe("ターン3です");
+    expect(t3.ts).toBe("2026-07-10T13:02:11.000Z");
+    expect(t3.models).toEqual(["gpt-5-codex"]);
+    expect(t3.apiCalls).toBe(1);
+    expect(t3.tokens).toEqual({ input: 300, output: 60, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 300 });
+    expect(t3.costUSD).toBeCloseTo(0.0010125, 10);
+    expect(t3.costByModel!["gpt-5-codex"]).toBeCloseTo(0.0010125, 10);
+  });
+
+  // 2. --dry-run: 集計表示のみ・書き込みゼロ・カーソル進まず。その後の本実行で 3 レコード入る。
+  it("2. --dry-run prints the codex summary but writes nothing (cursor does not advance)", async () => {
+    placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
+
+    const dry = await sweep(["--dry-run"]);
+    expect(dry.code).toBe(0);
+    expect(dry.output).toContain("dry-run: 書き込みは行っていません");
+    expect(dry.output).toContain("Codex: 3 ターン");
+    // 一切書かない。
+    expect(existsSync(historyFile())).toBe(false);
+    expect(existsSync(cursorsFile())).toBe(false);
+
+    // dry-run 後の本実行はカーソルが進んでいないので最初から取り込める。
+    const real = await sweep([]);
+    expect(real.output).toContain("Codex: 3 ターン");
+    expect(readHistory()).toHaveLength(3);
+  });
+
+  // 3. 2回目の sweep → 新規ゼロ(カーソル去重)。
+  it("3. a second sweep finds nothing new (cursor dedup)", async () => {
+    placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
+
+    await sweep([]);
+    expect(readHistory()).toHaveLength(3);
+
+    const { code, output } = await sweep([]);
+    expect(code).toBe(0);
+    expect(output).toContain("新規はありませんでした");
+    expect(output).not.toContain("Codex:");
+    expect(readHistory()).toHaveLength(3);
+  });
+
+  // 4. hook との相互運用: hook(aggregateCodexTurn)が既に全消費した状態を cursors.json に用意しておく →
+  //    sweep は拾わない(先に sweep しない)。
+  it("4. does not re-ingest a rollout already consumed by the hook cursor", async () => {
+    const dest = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
+    // aggregateCodexTurn がウィンドウ全体を消費したときの newCursor 相当を書いておく:
+    //   offset = ファイル全長 / codexTotals = 最後に観測した total / lastTs = 最後のイベント時刻。
+    saveCursor(dest, {
+      offset: readFileSync(dest).length, // Buffer の byte 長 = ファイルサイズ
+      lastUuid: null,
+      lastTs: "2026-07-10T12:09:34.000Z",
+      seenMessageKeys: [],
+      codexTotals: { input: 17272, cached: 4992, output: 7 },
+    });
+
+    const { code, output } = await sweep([]);
+    expect(code).toBe(0);
+    expect(output).toContain("新規はありませんでした");
+    expect(output).not.toContain("Codex:");
+    expect(readHistory()).toHaveLength(0);
+  });
+
+  // 5. --days 0 相当の古いドラフト除外(取り込まれないがカーソルは進み、2回目も取り込まれない)。
+  //    実行時刻に依存しないよう、multiturn の日付を過去(2020)へずらした確定的な「古い」rollout を使う。
+  it("5. --days 0 drops old codex drafts but still advances the cursor (no revival)", async () => {
+    const dir = join(codexHomeDir, "sessions", "2026", "07", "10");
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, NAME_MULTITURN);
+    const aged = readFileSync(join(FIXTURES_CODEX_DIR, "rollout-multiturn.jsonl"), "utf8").replaceAll(
+      "2026-07-10",
+      "2020-01-01",
+    );
+    writeFileSync(dest, aged, "utf8");
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dest, old, old); // active guard に引っかからないよう mtime も古くする
+
+    const { code, output } = await sweep(["--days", "0"]);
+    expect(code).toBe(0);
+    expect(output).toContain("新規はありませんでした");
+    expect(output).not.toContain("Codex:");
+    expect(readHistory()).toHaveLength(0);
+    // 古いターンでもカーソルは進む(ウィンドウ全体消費)。
+    expect(existsSync(cursorsFile())).toBe(true);
+
+    // 制限なしで再実行してもカーソルが進んでいるため復活しない。
+    const again = await sweep([]);
+    expect(again.output).toContain("新規はありませんでした");
+    expect(readHistory()).toHaveLength(0);
+  });
+
+  // 6. active guard: mtime 直近のファイルはスキップ(カーソルも進めない)。--include-active で取り込まれる。
+  it("6. skips a recently-modified rollout (active guard); --include-active ingests it", async () => {
+    const dest = placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
+    const now = new Date();
+    utimesSync(dest, now, now); // 「今まさに書かれている」状態を模す
+
+    const first = await sweep([]);
+    expect(first.code).toBe(0);
+    expect(first.output).toContain("スキップ: 1 transcript"); // スキップ件数は既存表示に合算される
+    expect(first.output).not.toContain("Codex:");
+    expect(readHistory()).toHaveLength(0);
+    expect(existsSync(cursorsFile())).toBe(false); // カーソル未更新 = 後続の hook/sweep が拾える
+
+    // --include-active でガードを解除すると取り込まれる。
+    const second = await sweep(["--include-active"]);
+    expect(second.output).toContain("Codex: 3 ターン");
+    expect(readHistory()).toHaveLength(3);
+  });
+
+  // 7. codex home 不在 → Claude のみで正常動作(エラーなし・Codex 行なし)。
+  it("7. runs Claude-only cleanly when codex home is absent (no Codex line, no error)", async () => {
+    // detectCodex() が偽になる不在パスへ向ける。
+    process.env.CCCN_CODEX_HOME = join(codexHomeDir, "does-not-exist");
+    placeFixtures({ withSA: false }); // Claude 側は通常どおり動くことを確認
+
+    const { code, output } = await sweep([]);
+    expect(code).toBe(0);
+    expect(output).not.toContain("Codex:");
+    expect(output).toContain("2 ターン");
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r.source).toBeUndefined(); // Claude レコードは source 無し
+  });
+
+  // 8. Claude ルート不在でも Codex が走査可能なら、警告1行を出して Codex のみ走査する(exit 0)。
+  //    旧挙動は「ルート不在 → 即 return 1」だったが、Codex 専用ユーザー(~/.claude/projects を
+  //    持たない)の backfill を成立させるため、両方走査不能のときだけエラーにする意味論へ変更した
+  //    (オーケストレーター認可)。
+  it("8. sweeps Codex-only with a warning when the Claude projects root is missing", async () => {
+    placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
+    rmSync(projectsRoot, { recursive: true, force: true }); // Claude ルート不在を模す
+
+    const { code, output } = await sweep([]);
+    expect(code).toBe(0);
+    expect(output).toContain("Codex のみ走査します");
+    expect(output).toContain("Codex: 3 ターン");
+    expect(readHistory()).toHaveLength(3);
+  });
+
+  // 9. Claude ルートも Codex も走査不能なら従来どおりエラーメッセージ + exit 1。
+  it("9. still fails with exit 1 when neither Claude nor Codex is sweepable", async () => {
+    // codexHomeDir は sessions を持たない空ホーム(top-level 隔離のまま)= Codex 走査不能。
+    rmSync(projectsRoot, { recursive: true, force: true }); // Claude ルート不在を模す
+
+    const { code, output } = await sweep([]);
+    expect(code).toBe(1);
+    expect(output).toContain("走査ルートが見つかりません");
+    expect(readHistory()).toHaveLength(0);
   });
 });
