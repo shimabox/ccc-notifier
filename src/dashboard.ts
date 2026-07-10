@@ -8,6 +8,9 @@
 //
 // デザインは dataviz スキルの原則に準拠(固定スロット順の配色・2px サーフェスギャップ・常設凡例・
 // 直接ラベル・表(table twin)・ライト/ダーク両テーマ)。
+//
+// ソース(Claude / Codex)フィルタ: Codex 由来レコードが1件でもあれば粒度トグルの隣にソースチップを出し、
+// ヒーロー・チャート・モデル別・プロジェクト別・履歴・KPI をブラウザ側で絞り込む(月予算カードのみ常に全ソース合算)。
 
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -233,6 +236,7 @@ interface TurnEmbed {
   pr: string; // プロンプト(最大 PROMPT_MAX 字 + マーク)
   tr: boolean; // 切り詰めたか
   sa: { usd: string; jpy: string; models: string; apiCalls: number } | null;
+  sc?: "codex"; // Codex 由来のみ。Claude はキー省略(容量節約・後方互換)
 }
 
 interface PeriodTotals {
@@ -262,7 +266,7 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
     };
   }
   const ms = Date.parse(rec.ts);
-  return {
+  const out: TurnEmbed = {
     t: Number.isFinite(ms) ? ms : 0,
     ts: fmtLocalDateTime(rec.ts),
     p: basename(rec.project) || rec.project || "(unknown)",
@@ -279,6 +283,9 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
     tr: truncated,
     sa,
   };
+  // Codex 由来のみ sc を付与(Claude はキー省略で容量節約・JSON では undefined キーは出力されない)。
+  if (rec.source === "codex") out.sc = "codex";
+  return out;
 }
 
 /** today / week / month / all のサマリ(SA 込み総額)。 */
@@ -436,6 +443,7 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 .turns .c-time,.turns .c-model{white-space:nowrap;}
 .turns .c-proj{max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .turns .c-prompt{color:var(--ink2);}
+.src-badge{display:inline-block; margin-left:6px; padding:1px 6px; border-radius:6px; font-size:11px; font-weight:600; line-height:1.4; background:var(--plane); color:var(--ink2); border:1px solid var(--border); vertical-align:middle;}
 .turn-row{cursor:pointer;}
 .turn-row:hover{background:color-mix(in srgb, var(--ink) 4%, transparent);}
 .turn-row:focus-visible{outline:2px solid var(--s1); outline-offset:-2px;}
@@ -526,17 +534,37 @@ const APP_JS = `<script>
   function ssGet(k){ try { return sessionStorage.getItem(k); } catch(e){ return null; } }
   function ssSet(k, v){ try { sessionStorage.setItem(k, v); } catch(e){} }
   var GRAN = ssGet('cccn-gran'); if(['day','week','month'].indexOf(GRAN) < 0) GRAN = 'day';
+  // ソース(Claude/Codex)フィルタ。チップが描画されている(=Codex レコードが存在する)ときのみ有効。
+  // 既定 'all'。sessionStorage に保存し自動リロード(meta refresh)を跨いで維持する(cccn-gran と同じ仕組み)。
+  var HAS_CODEX = document.querySelectorAll('[data-src]').length > 0;
+  var SRC = ssGet('cccn-src'); if(['all','claude','codex'].indexOf(SRC) < 0) SRC = 'all';
+  // 述語: claude → sc なし / codex → sc==='codex' / all → 全件。Codex 無し(チップ無し)なら常に全件。
+  function activeTurns(){
+    if(!HAS_CODEX || SRC === 'all') return turns;
+    if(SRC === 'codex') return turns.filter(function(tn){ return tn.sc === 'codex'; });
+    return turns.filter(function(tn){ return !tn.sc; });
+  }
   // 既定は「起動した日」を初期選択する(未保存時)。明示的な通算は '__all__'、その他は保存キー。
   var storedSel = ssGet('cccn-sel');
   var SEL = (storedSel === null) ? defaultSel(GRAN) : (storedSel === '__all__' ? null : storedSel);
   function setGran(g){ GRAN = g; ssSet('cccn-gran', g); }
   function setSel(v){ SEL = v; ssSet('cccn-sel', v === null ? '__all__' : v); }
+  // ソース切替。フィルタ後に選択中バケットが消えたら通算へ倒す(空表示の誤解防止・gran トグルと同じ流儀)。
+  function setSrc(s){
+    SRC = s; ssSet('cccn-src', s);
+    if(SEL !== null){
+      var present = false, bk = buildBuckets(GRAN);
+      for(var i=0;i<bk.length;i++){ if(bk[i].key === SEL){ present = true; break; } }
+      if(!present) setSel(null);
+    }
+  }
   var lastRenderedGran = null; // 直前に描画した粒度。変わったとき(=バケット数が変わるとき)だけ右端へ寄せる。
 
   function buildBuckets(gran){
+    var src = activeTurns();
     var map = {}; var keys = [];
-    for(var i=0;i<turns.length;i++){
-      var tn = turns[i];
+    for(var i=0;i<src.length;i++){
+      var tn = src[i];
       var k = bucketKey(tn.t, gran);
       if(k === null) continue;
       var b = map[k];
@@ -560,8 +588,9 @@ const APP_JS = `<script>
   }
 
   function turnsInSelection(){
-    if(SEL === null) return turns;
-    return turns.filter(function(tn){ return bucketKey(tn.t, GRAN) === SEL; });
+    var src = activeTurns();
+    if(SEL === null) return src;
+    return src.filter(function(tn){ return bucketKey(tn.t, GRAN) === SEL; });
   }
 
   // ---- SVG ヘルパー ----
@@ -834,6 +863,12 @@ const APP_JS = `<script>
     sub.textContent = ' ' + mk + (mk === curMonth ? '(今月)' : '');
     h.appendChild(sub);
     budgetEl.appendChild(h);
+    // 予算カードは常に全ソース合算(ソースフィルタ非連動)。Codex がある時だけその旨を明記する。
+    if(HAS_CODEX){
+      var srcNote = document.createElement('p'); srcNote.className = 'note';
+      srcNote.textContent = '全ソース合算 / all sources';
+      budgetEl.appendChild(srcNote);
+    }
 
     var bar = document.createElement('div'); bar.className = 'budget-bar';
     var fill = document.createElement('div'); fill.className = 'budget-fill lvl-' + level;
@@ -852,6 +887,55 @@ const APP_JS = `<script>
     pctEl.textContent = pct.toFixed(1) + '% used';
     foot.appendChild(left); foot.appendChild(pctEl);
     budgetEl.appendChild(foot);
+  }
+
+  // ---- KPI(今日/今週/今月/通算)+ ヒーロー(通算バナー)----
+  // ソースフィルタ連動。Codex 無しならサーバ描画のまま(既存挙動を1pxも変えないため何もしない)。
+  // カードは .kpi 内の .stat を順に today / week / month / all として更新する(サーバ描画順に一致)。
+  // ヒーローはフィルタ後の全期間合計に差し替え、SA 内訳行は SA 合計ゼロなら行ごと隠す
+  // (Codex レコードは SA を持たないため Codex フィルタ時は必然的に非表示)。行の文言はサーバ描画の
+  // 接頭辞($ の手前まで)を再利用して数値部分だけ組み直す(APP_JS に表示文言を重複させない)。
+  var kpiCards = document.querySelectorAll('.kpi .stat');
+  var heroValueEl = document.querySelector('.hero .hero-value');
+  var heroMetaEls = document.querySelectorAll('.hero .hero-meta');
+  var heroSaEl = heroMetaEls.length > 1 ? heroMetaEls[1] : null; // SA 行(SA ありのときだけサーバが描画)
+  var heroSaPrefix = heroSaEl ? ((heroSaEl.textContent || '').split('$')[0]) : '';
+  function setKpiCard(card, tot){
+    if(!card) return;
+    var v = card.querySelector('.stat-value');
+    var m = card.querySelector('.stat-meta');
+    if(v) v.textContent = formatUSD(tot.usd);
+    if(m) m.textContent = formatJPY(tot.jpy) + ' · ' + tot.turns + ' ターン';
+  }
+  function renderKpis(){
+    if(!HAS_CODEX) return;
+    var src = activeTurns();
+    var now = new Date();
+    var y = now.getFullYear(), mo = now.getMonth(), d = now.getDate();
+    var weekCutoff = Date.now() - 7*86400000;
+    var today = {usd:0,jpy:0,turns:0}, week = {usd:0,jpy:0,turns:0}, month = {usd:0,jpy:0,turns:0}, all = {usd:0,jpy:0,turns:0};
+    var saUsd = 0, saJpy = 0;
+    for(var i=0;i<src.length;i++){
+      var tn = src[i], bs = tn.bs || {}, fx = tn.fx || 0, u = 0;
+      for(var s in bs){ if(bs.hasOwnProperty(s)) u += bs[s]; }
+      var j = u * fx;
+      if(tn.sa){ var sau = u - (tn.um || 0); saUsd += sau; saJpy += sau * fx; } // SA 分 = 総額 − メイン
+      all.usd += u; all.jpy += j; all.turns++;
+      var dt = new Date(tn.t);
+      if(isNaN(dt.getTime())) continue;
+      if(dt.getFullYear()===y && dt.getMonth()===mo && dt.getDate()===d){ today.usd+=u; today.jpy+=j; today.turns++; }
+      if(tn.t >= weekCutoff){ week.usd+=u; week.jpy+=j; week.turns++; }
+      if(dt.getFullYear()===y && dt.getMonth()===mo){ month.usd+=u; month.jpy+=j; month.turns++; }
+    }
+    if(kpiCards.length >= 4){
+      setKpiCard(kpiCards[0], today); setKpiCard(kpiCards[1], week); setKpiCard(kpiCards[2], month); setKpiCard(kpiCards[3], all);
+    }
+    if(heroValueEl) heroValueEl.textContent = formatUSD(all.usd);
+    if(heroMetaEls.length > 0) heroMetaEls[0].textContent = formatJPY(all.jpy) + ' · ' + all.turns + ' ターン';
+    if(heroSaEl){
+      heroSaEl.hidden = !(saUsd > 0);
+      if(saUsd > 0) heroSaEl.textContent = heroSaPrefix + formatUSD(saUsd) + '(' + formatJPY(saJpy) + ')';
+    }
   }
 
   // ---- ターン履歴 ----
@@ -873,7 +957,14 @@ const APP_JS = `<script>
     function cell(text, cls){ var td = document.createElement('td'); if(cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; }
     cell(t.ts || '', 'c-time');
     cell(t.p || '', 'c-proj');
-    cell(t.md || '', 'c-model');
+    var mcell = cell(t.md || '', 'c-model');
+    // Codex 由来はモデル名の隣に小さな Codex バッジ。動的値は入れず静的テキストを textContent で挿入。
+    if(t.sc === 'codex'){
+      mcell.appendChild(document.createTextNode(' '));
+      var badge = document.createElement('span'); badge.className = 'src-badge';
+      badge.textContent = 'Codex';
+      mcell.appendChild(badge);
+    }
     cell(t.ti || '', 'c-num');
     cell(t.to || '', 'c-num');
     cell(formatUSD(t.um || 0), 'c-num');
@@ -940,6 +1031,8 @@ const APP_JS = `<script>
     for(var i=0;i<gbtns.length;i++){ gbtns[i].classList.toggle('active', gbtns[i].getAttribute('data-gran') === GRAN); }
     var allBtn = document.getElementById('cccn-all');
     if(allBtn) allBtn.classList.toggle('active', SEL === null);
+    var sbtns = document.querySelectorAll('[data-src]');
+    for(var k=0;k<sbtns.length;k++){ sbtns[k].classList.toggle('active', sbtns[k].getAttribute('data-src') === SRC); }
   }
 
   // ---- 全体レンダリング ----
@@ -947,6 +1040,7 @@ const APP_JS = `<script>
     var sub = turnsInSelection();
     renderChart();
     renderBudget();
+    renderKpis();
     renderByModel(sub);
     renderByProject(sub);
     renderHistory(sub);
@@ -961,6 +1055,10 @@ const APP_JS = `<script>
   }
   var allBtn = document.getElementById('cccn-all');
   if(allBtn) allBtn.addEventListener('click', function(){ setSel(null); render(); });
+  var srcBtns = document.querySelectorAll('[data-src]');
+  for(var sbi=0;sbi<srcBtns.length;sbi++){
+    (function(btn){ btn.addEventListener('click', function(){ setSrc(btn.getAttribute('data-src')); render(); }); })(srcBtns[sbi]);
+  }
   if(search){
     var saved = ssGet('cccn-search');
     if(saved !== null) search.value = saved;
@@ -1004,16 +1102,18 @@ function renderLegend(slots: SlotDef[]): string {
  * 月予算カード。budgetUSD が 0 以下(未設定)なら空文字。
  * 当月(暦月)の使用額 / 予算 / 使用率(%)を、しきい値で色分けしたプログレスバーで表示する。
  */
-function budgetCard(budgetUSD: number, month: PeriodTotals, fallbackRate: number): string {
+function budgetCard(budgetUSD: number, month: PeriodTotals, fallbackRate: number, hasCodex: boolean): string {
   if (!(budgetUSD > 0)) return "";
   const pct = (month.usd / budgetUSD) * 100;
   const width = Math.max(0, Math.min(100, pct));
   const level = pct >= 100 ? "over" : pct >= 70 ? "warn" : "ok";
   const budgetJpy = budgetUSD * fallbackRate;
   // サーバは初期表示(当月)を描画し、ブラウザ側が選択中の月に合わせて #cccn-budget を差し替える。
+  // 予算は常に全ソース合算(ソースフィルタ非連動)。Codex がある時だけ「全ソース合算」を明記する。
   return (
     `<section class="card" id="cccn-budget">` +
     `<h2>月予算 / Monthly budget<span class="stat-sub"> 今月(暦月)</span></h2>` +
+    (hasCodex ? `<p class="note">全ソース合算 / all sources</p>` : "") +
     `<div class="budget-bar"><div class="budget-fill lvl-${level}" style="width:${width.toFixed(1)}%"></div></div>` +
     `<div class="budget-foot">` +
     `<span>今月 <b>${esc(formatUSD(month.usd))}</b> / ${esc(formatUSD(budgetUSD))} ` +
@@ -1045,6 +1145,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   const turnsEmbed = turns.map((rec) => buildTurnEmbed(rec, map));
   const anyTruncated = turnsEmbed.some((t) => t.tr);
   const anySub = turns.some((r) => r.subagents);
+  const anyCodex = turns.some((r) => r.source === "codex");
   let subUsd = 0;
   let subJpy = 0;
   for (const r of turns) {
@@ -1149,9 +1250,17 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `</div>`;
 
   // ---- 月予算(設定時のみ)----
-  const budgetSection = budgetCard(budgetUSD, kpi.month, cfg.fx.fallbackRate);
+  const budgetSection = budgetCard(budgetUSD, kpi.month, cfg.fx.fallbackRate, anyCodex);
 
   // ---- 日別コスト(粒度切替・選択・通算) ----
+  // Codex レコードがある時だけソースチップを粒度トグルの隣に出す(無ければ既存 UI を一切変えない)。
+  const srcToggle = anyCodex
+    ? `<div class="seg-toggle" id="cccn-src-toggle">` +
+      `<button type="button" data-src="all">全体</button>` +
+      `<button type="button" data-src="claude">Claude</button>` +
+      `<button type="button" data-src="codex">Codex</button>` +
+      `</div>`
+    : "";
   const chartSection =
     `<section class="card">` +
     `<h2>コスト推移 / Cost over time</h2>` +
@@ -1163,6 +1272,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<button type="button" data-gran="month">月</button>` +
     `</div>` +
     `<button type="button" id="cccn-all" class="btn">通算</button>` +
+    srcToggle +
     `<span id="cccn-sel-label" class="sel-label"></span>` +
     `</div>` +
     renderLegend(map.slots) +
