@@ -53,6 +53,9 @@ beforeEach(() => {
   process.env.CCCN_HOME = homeDir;
   process.env.CCCN_CLI_PATH = cliPath;
   process.env.CCCN_DRY_RUN = "1";
+  // uninstall(removeCodexHook)が実 ~/.codex/hooks.json に触れないよう隔離(2026-07-10)。
+  // 存在しないパスに固定する(Codex 系テストは自前 beforeEach の一時 dir で上書きする)。
+  process.env.CCCN_CODEX_HOME = join(tmpDir, "no-codex");
 });
 
 afterEach(() => {
@@ -60,6 +63,7 @@ afterEach(() => {
   delete process.env.CCCN_HOME;
   delete process.env.CCCN_CLI_PATH;
   delete process.env.CCCN_DRY_RUN;
+  delete process.env.CCCN_CODEX_HOME;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -423,5 +427,151 @@ describe("runInit — 通知なしモード(--no-notify)", () => {
     const cfg = JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8"));
     expect(cfg.notify.os).toBe(true);
     expect(cfg.notify.slack).toBeNull();
+  });
+});
+
+// ============ 11. Codex 対応 ============
+// 上位 beforeEach が CCCN_CLAUDE_SETTINGS / CCCN_HOME / CCCN_CLI_PATH / CCCN_DRY_RUN を張る。
+// ここでは CCCN_CODEX_HOME を tmpDir 配下の一時ディレクトリへ固定し、実ホーム(~/.codex/hooks.json)へ
+// 触れないようにする(未設定だと codexHome() が実ホームを見てしまうため必ず張る)。
+
+/** console.log / console.error を捕捉し、戻り値と各出力(改行連結)を返す(setup.ts の完了メッセージ検証用)。 */
+async function captureIO(
+  fn: () => Promise<number>,
+): Promise<{ code: number; out: string; err: string }> {
+  const origLog = console.log;
+  const origErr = console.error;
+  const outLines: string[] = [];
+  const errLines: string[] = [];
+  console.log = (...args: unknown[]) => {
+    outLines.push(args.map((a) => String(a)).join(" "));
+  };
+  console.error = (...args: unknown[]) => {
+    errLines.push(args.map((a) => String(a)).join(" "));
+  };
+  try {
+    const code = await fn();
+    return { code, out: outLines.join("\n"), err: errLines.join("\n") };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
+}
+
+describe("runInit / runUninstall — Codex 対応", () => {
+  let codexHome: string;
+  let codexHooks: string;
+
+  // PermissionRequest を持つユーザー実ファイル(codex-setup.test.ts と同形・minify)。
+  const PERMISSION_RAW =
+    '{"hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"\'/home/user/.codex/hooks/notify-permission.sh\'"}]}]}}';
+
+  function readCodexHooks(): Record<string, any> {
+    return JSON.parse(readFileSync(codexHooks, "utf8"));
+  }
+  function codexBackups(): string[] {
+    return readdirSync(codexHome).filter((f) => f.startsWith("hooks.json.bak-"));
+  }
+
+  beforeEach(() => {
+    // tmpDir 配下に作るので上位 afterEach の rmSync(tmpDir) で一緒に消える。
+    codexHome = mkdtempSync(join(tmpDir, "codex-"));
+    codexHooks = join(codexHome, "hooks.json");
+    process.env.CCCN_CODEX_HOME = codexHome;
+  });
+
+  afterEach(() => {
+    delete process.env.CCCN_CODEX_HOME;
+  });
+
+  it("--codex --no-codex の併用は exit 1(config も settings も hooks.json も書かれない)", async () => {
+    const { code } = await captureIO(() => runInit(["--yes", "--codex", "--no-codex"]));
+    expect(code).toBe(1);
+    expect(existsSync(codexHooks)).toBe(false);
+    expect(existsSync(join(homeDir, "config.json"))).toBe(false);
+    expect(existsSync(settingsFile)).toBe(false);
+  });
+
+  it("--yes --codex で hooks.json を作成し、マーカー command(track --codex)と信頼案内を出す", async () => {
+    const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
+    expect(code).toBe(0);
+    expect(existsSync(codexHooks)).toBe(true);
+
+    const hook = readCodexHooks().hooks.Stop[0].hooks[0];
+    expect(hook.command).toContain("ccc-notifier");
+    expect(hook.command).toContain("track --codex");
+    // Codex エントリは timeout を持たない。
+    expect("timeout" in hook).toBe(false);
+
+    // 完了メッセージに登録の旨と信頼確認の案内が stdout に出る。
+    expect(out).toContain("Codex にも Stop hook を登録しました");
+    expect(out).toContain("Trust all and continue");
+  });
+
+  it("--yes のみ(--codex 未指定)は Codex に一切触れず hooks.json を作らない", async () => {
+    const { code } = await captureIO(() => runInit(["--yes", "--os-only"]));
+    expect(code).toBe(0);
+    expect(existsSync(codexHooks)).toBe(false);
+    expect(codexBackups()).toHaveLength(0);
+  });
+
+  it("--no-codex は Codex に触れない(hooks.json を作らない)", async () => {
+    const { code } = await captureIO(() => runInit(["--yes", "--no-codex"]));
+    expect(code).toBe(0);
+    expect(existsSync(codexHooks)).toBe(false);
+  });
+
+  it("--yes --codex を2回実行すると2回目は『登録済み』でバックアップは増えない", async () => {
+    await captureIO(() => runInit(["--yes", "--codex"]));
+    expect(existsSync(codexHooks)).toBe(true);
+    expect(codexBackups()).toHaveLength(0); // 新規作成はバックアップ無し
+
+    const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
+    expect(code).toBe(0);
+    expect(out).toContain("Codex の Stop hook は登録済みです");
+    // unchanged は書き込まないためバックアップは増えず、エントリも1件のまま。
+    expect(codexBackups()).toHaveLength(0);
+    expect(readCodexHooks().hooks.Stop).toHaveLength(1);
+  });
+
+  it("uninstall は Codex の Stop エントリを除去し、PermissionRequest を保持してメッセージを出す", async () => {
+    // ユーザーの既存 hooks.json(PermissionRequest 入り)に登録してから uninstall する。
+    writeFileSync(codexHooks, PERMISSION_RAW, "utf8");
+    const before = JSON.parse(PERMISSION_RAW);
+
+    await captureIO(() => runInit(["--yes", "--codex"]));
+    expect(readCodexHooks().hooks.Stop).toHaveLength(1);
+
+    const { code, out } = await captureIO(() => runUninstall([]));
+    expect(code).toBe(0);
+    expect(out).toContain("Codex の Stop hook を削除しました");
+
+    const after = readCodexHooks();
+    // Stop は空になりキーごと消え、PermissionRequest は1項目も変わらない。
+    expect("Stop" in after.hooks).toBe(false);
+    expect(after.hooks.PermissionRequest).toEqual(before.hooks.PermissionRequest);
+  });
+
+  it("Codex 未登録での uninstall は Codex 関連メッセージを一切出さない", async () => {
+    // hooks.json が無い(未登録)状態での uninstall。
+    const { code, out } = await captureIO(() => runUninstall([]));
+    expect(code).toBe(0);
+    expect(out).not.toContain("Codex の Stop hook を削除しました");
+    expect(existsSync(codexHooks)).toBe(false);
+  });
+
+  it("壊れた hooks.json + --yes --codex は manual 案内を出し、ファイル不変で init は成功(exit 0)", async () => {
+    const broken = "{ this is not valid json ";
+    writeFileSync(codexHooks, broken, "utf8");
+
+    const { code, err } = await captureIO(() => runInit(["--yes", "--codex"]));
+    // Codex hooks.json が壊れていても init 自体は成功する(Claude 側は正常に完了)。
+    expect(code).toBe(0);
+    // ファイルは1バイトも変わらず、バックアップも作らない。
+    expect(readFileSync(codexHooks, "utf8")).toBe(broken);
+    expect(codexBackups()).toHaveLength(0);
+    // 手動追記スニペット(track --codex を含む)が stderr に案内される。
+    expect(err).toContain("hooks.Stop");
+    expect(err).toContain("track --codex");
   });
 });

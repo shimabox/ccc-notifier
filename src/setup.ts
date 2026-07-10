@@ -24,6 +24,9 @@ import type { TurnRecord } from "./types";
 import { paths, readConfig } from "./store";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
+import { detectCodex } from "./codex/env";
+import { codexHooksFile, registerCodexHook, removeCodexHook } from "./codex/setup";
+import type { CodexHookResult } from "./codex/setup";
 
 // 本ツールの hook エントリの識別マーカー: command 文字列にこれを含む Stop エントリを「自分のもの」とみなす。
 const HOOK_MARKER = "ccc-notifier";
@@ -133,6 +136,8 @@ interface InitFlags {
   osOnly: boolean;
   slackOnly: boolean;
   noNotify: boolean;
+  codex: boolean; // --codex: Codex CLI にも Stop hook を導入する
+  noCodex: boolean; // --no-codex: Codex hook を導入しない(検出しても触らない)
   slackWebhook?: string;
   label?: string;
   rate?: string;
@@ -151,13 +156,22 @@ function takeValue(argv: string[], i: number, prefix: string): string | undefine
 }
 
 function parseInitFlags(argv: string[]): InitFlags {
-  const flags: InitFlags = { yes: false, osOnly: false, slackOnly: false, noNotify: false };
+  const flags: InitFlags = {
+    yes: false,
+    osOnly: false,
+    slackOnly: false,
+    noNotify: false,
+    codex: false,
+    noCodex: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") flags.yes = true;
     else if (a === "--os-only") flags.osOnly = true;
     else if (a === "--slack-only") flags.slackOnly = true;
     else if (a === "--no-notify") flags.noNotify = true;
+    else if (a === "--codex") flags.codex = true;
+    else if (a === "--no-codex") flags.noCodex = true;
     else if (a === "--slack-webhook" || a.startsWith("--slack-webhook=")) {
       flags.slackWebhook = takeValue(argv, i, "--slack-webhook");
       if (!a.includes("=")) i++;
@@ -253,6 +267,16 @@ function mergeSettings(sPath: string, command: string): SettingsWriteResult {
 export async function runInit(argv: string[]): Promise<number> {
   const flags = parseInitFlags(argv);
 
+  // --codex と --no-codex は排他(対話・非対話を問わず。既存の排他フラグと同じ文体で先に弾く)。
+  if (flags.codex && flags.noCodex) {
+    console.error("--codex と --no-codex は同時に指定できません");
+    return 1;
+  }
+  // Codex hook を登録するかどうか(下の分岐で確定する)。
+  //   非対話: --codex のときだけ true(どちらも未指定なら Codex に触らない)。
+  //   対話  : --codex/--no-codex 指定時はそれに従い、未指定かつ detectCodex() 真のときだけ確認する。
+  let installCodex = false;
+
   // 1. 設定値の決定 —— readConfig()(既存 + デフォルトのマージ済み)を起点に回答を適用する。
   const cfg = readConfig();
   // 対話モードの初期選択を既存設定から導出する。特に通知なしモードのユーザーが
@@ -331,6 +355,8 @@ export async function runInit(argv: string[]): Promise<number> {
       // 未指定なら既定($400。既存設定があればそれを維持)を適用する。
       cfg.monthlyBudgetUSD = budgetDefault;
     }
+    // 非対話は --codex を明示したときのみ Codex hook を導入する(未指定・--no-codex は触らない)。
+    installCodex = flags.codex;
   } else {
     // 対話モード。isCancel を必ず処理し、キャンセル時は何も書かずに exit 1。
     p.intro("ccc-notifier セットアップ");
@@ -420,6 +446,24 @@ export async function runInit(argv: string[]): Promise<number> {
     const parsedBudget = Number(budgetStr);
     if (Number.isFinite(parsedBudget) && parsedBudget >= 0) cfg.monthlyBudgetUSD = parsedBudget;
 
+    // Codex 連携。--codex/--no-codex がフラグで指定されていればそれに従い(質問しない)、
+    // 未指定のときだけ Codex CLI を検出したら確認する(既定 Yes)。未検出なら質問自体を出さない。
+    if (flags.codex) {
+      installCodex = true;
+    } else if (flags.noCodex) {
+      installCodex = false;
+    } else if (detectCodex()) {
+      const codexConfirm = await p.confirm({
+        message: "Codex CLI を検出しました。Codex にもコスト通知を入れますか?",
+        initialValue: true,
+      });
+      if (p.isCancel(codexConfirm)) {
+        p.cancel("キャンセルしました");
+        return 1;
+      }
+      installCodex = codexConfirm;
+    }
+
     p.outro("設定を適用します");
   }
 
@@ -434,6 +478,15 @@ export async function runInit(argv: string[]): Promise<number> {
   const sPath = settingsPath();
   const result = mergeSettings(sPath, command);
   if (!result.ok) return 1;
+
+  // 4.5. Codex hook 登録(--codex または対話の確認で選ばれたときのみ)。
+  //      nodePath/cliPath は Claude 側 hook と同一実体(process.execPath / resolveCliPath())を渡す。
+  //      win32 正規化は codexHookCommand が内部で行うため、ここでは生の解決結果を渡す。
+  //      hooks.json 破損時は manual に倒るが、Codex は副次的な連携なので init 自体は成功させる(exit 0)。
+  let codexResult: CodexHookResult | null = null;
+  if (installCodex) {
+    codexResult = registerCodexHook(process.execPath, resolveCliPath());
+  }
 
   // 5. テスト通知(CCCN_DRY_RUN 下では last-notify.json に書かれるだけ)。
   //    OS が有効なら OS 通知を、Slack を設定していれば Slack 通知も送り、その場で設定を確認できるようにする。
@@ -464,6 +517,31 @@ export async function runInit(argv: string[]): Promise<number> {
     );
   } else {
     console.log("Claude Code で何か実行すると通知が届きます。確認: npx ccc-notifier doctor");
+  }
+
+  // Codex 連携の結果表示(登録を試みたときのみ)。
+  if (codexResult) {
+    if (codexResult.status === "written") {
+      console.log(`Codex にも Stop hook を登録しました: ${codexHooksFile()}`);
+      if (codexResult.backupPath) {
+        console.log(`  バックアップ: ${codexResult.backupPath}`);
+      }
+      // Codex は hook を初回起動時に信頼確認する。承認するまで hook は発火しない。
+      console.log(
+        "次回 codex 起動時に『Hooks need review』が表示されます。『Trust all and continue』を選ぶと有効になります(承認までは動きません)",
+      );
+    } else if (codexResult.status === "unchanged") {
+      console.log("Codex の Stop hook は登録済みです");
+    } else {
+      // status === "manual": hooks.json が壊れている等で自動編集できなかった。
+      // settings.json 破損時の printManualSnippet と同じ文体で手動追記を案内する(init 自体は成功)。
+      console.error(`Codex の hooks.json を自動編集できませんでした: ${codexHooksFile()}`);
+      console.error("安全のため hooks.json の自動編集を中止しました。");
+      console.error("以下の JSON を hooks.json の hooks.Stop 配列に手動で追加してください:");
+      console.error("");
+      console.error(codexResult.manualSnippet ?? "");
+      console.error("");
+    }
   }
   return 0;
 }
@@ -511,6 +589,12 @@ export async function runUninstall(argv: string[]): Promise<number> {
         console.log(`  バックアップ: ${backupPath}`);
       }
     }
+  }
+
+  // 1.5. Codex hooks.json からも本ツールの Stop エントリを除去する(未登録・不在なら黙ってスキップ)。
+  const codexRemoval = removeCodexHook();
+  if (codexRemoval.status === "written") {
+    console.log("Codex の Stop hook を削除しました");
   }
 
   // 2. --purge: データディレクトリを削除する。
