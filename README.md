@@ -1,8 +1,6 @@
 # ccc-notifier
 
-**ccc = Claude Code Cost.** Claude Code で **プロンプトを実行するたび**、そのターンにかかったコストを **$(USD)と¥(JPY)の両方** で自動通知するツールです。**5分で導入できます。**
-
-Claude Code に加えて、**OpenAI Codex CLI** のコストも同じ仕組みで通知・記録できます(詳細は [Codex CLI 対応](docs/codex.md))。
+**ccc = Claude Code Cost**(現在は [Codex CLI](docs/codex.md) のコストも同じ仕組みで扱えます)。Claude Code や Codex CLI で **プロンプトを実行するたび**、そのターンにかかったコストを **$(USD)と¥(JPY)の両方** で自動通知するツールです。**5分で導入できます。**
 
 ```
 💰 API換算 $0.267(¥40)| Fable 5
@@ -20,19 +18,20 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 
 ## 特徴 / Features
 
-- **ターン毎に自動通知** — Claude Code の応答が完了するたび(Stop hook)に、そのターンのコストを自動でプッシュ通知します。自分から `/cost` を見に行く必要はありません
+- **ターン毎に自動通知** — Claude Code / Codex CLI の応答が完了するたび(Stop hook)に、そのターンのコストを自動でプッシュ通知します。自分から `/cost` を見に行く必要はありません
 - **$ と ¥ を併記** — USD と JPY の両方を毎回表示します(為替レートは自動取得 + キャッシュ + 固定フォールバックの三段構え)
 - **プロンプト全文をローカルに履歴保存** — `~/.ccc-notifier/history.jsonl` にそのターンのプロンプト全文を保存します(外部には送信されません)
-- **HTMLダッシュボード** — `dashboard` コマンドで、サマリー・コスト推移(**日 / 週 / 月**で切替、横スクロールで過去まで)・モデル別/プロジェクト別内訳・検索できるターン履歴を1枚の HTML(完全自己完結・ライト/ダーク対応)に書き出してブラウザで開きます。棒をクリックするとその期間が選択され、内訳・履歴が連動(「通算」で全期間)
-- **月予算(monthly budget)** — 月に使える金額(USD)を設定すると、ダッシュボードに**当月の使用額 / 予算・使用率(%)** をプログレスバーで表示します(`init` の対話、または `ccc-notifier budget <金額>` で設定)
-- **Codex CLI 対応** — `init` で `~/.codex` を検出して導入するか選べます。通知・履歴・ダッシュボード・`sweep` は Claude Code と共通の仕組みで扱います([詳細](docs/codex.md))
+- **HTMLダッシュボード** — `dashboard` コマンドで、サマリー・コスト推移(**日 / 週 / 月**で切替、横スクロールで過去まで)・モデル別/プロジェクト別内訳・検索できるターン履歴を1枚の HTML(完全自己完結・ライト/ダーク対応)に書き出してブラウザで開きます。棒をクリックするとその期間が選択され、内訳・履歴が連動(「通算」で全期間)。Codex CLI を併用していれば **Claude / Codex** のソースフィルタも使えます
+- **月予算(monthly budget)** — 月に使える金額(USD)を設定すると、ダッシュボードに**当月の使用額 / 予算・使用率(%)** をプログレスバーで表示します(`init` の対話、または `ccc-notifier budget <金額>` で設定。Claude Code と Codex CLI の合算です)
+- **Codex CLI もそのまま検出** — `init` を実行すると `~/.codex` の有無を見て、あれば Codex にも導入するか聞かれます。通知・履歴・ダッシュボード・`sweep` は Claude Code と全く同じ仕組みで扱います([詳細](docs/codex.md))
 - **OS 標準の通知機構のみ使用・追加依存ゼロ** — 通知は macOS では `osascript`、Windows では PowerShell 標準のトースト通知機能のみで送信します(node-notifier 等の外部通知ライブラリには一切依存しません)
-- **全処理ローカル・フェイルセーフ設計** — 通知や集計の処理が失敗しても、Claude Code 本体の応答は絶対にブロックしません
+- **全処理ローカル・フェイルセーフ設計** — 通知や集計の処理が失敗しても、Claude Code / Codex CLI 本体の応答は絶対にブロックしません
 
 ## 必要環境 / Requirements
 
 - Node.js 20 以上(未導入の場合は [Node.js の用意](docs/installing-node.md) を参照してください)
-- Claude Code(インストール・利用中であること)
+- Claude Code(インストール・利用中であること。`init` は Claude Code の Stop hook を必ず設定します)
+- (任意)[Codex CLI](docs/codex.md) を併用している場合は、`init` が自動検出してそのコストも同じ仕組みで通知できます
 
 Windows / WSL2 で使う場合は、環境ごとの手順を [Windows / WSL2 での導入](docs/windows-wsl2.md) にまとめています。
 
@@ -83,7 +82,7 @@ node dist/cli.js init
 
    完了すると Claude Code の `~/.claude/settings.json` に Stop hook が自動で追記されます。**既存の設定内容(他の hook や設定)は一切変更されず**、書き込み前に必ず `settings.json.bak-<タイムスタンプ>` としてバックアップが作成されます。settings.json が壊れている(JSONとして解析できない)場合は自動編集を諦め、手動で追記する内容を画面に表示するだけで、ファイルには一切書き込みません。
 
-3. **Claude Code で何か実行してみる**
+3. **Claude Code(や Codex CLI)で何か実行してみる**
 
    ひとこと実行して応答が完了すると、通知が届きます。
 
@@ -145,7 +144,7 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 npx ccc-notifier dashboard            # 生成してブラウザで開く
 ```
 
-グラフの棒をクリックするとその期間に内訳・履歴が連動し、「通算」で全期間に戻せます。Claude Code の応答完了ごとに自動再生成され、開きっぱなしのタブは約30秒ごとに最新化されます。Codex CLI のレコードがあれば **Claude / Codex** を絞り込むソースフィルタも表示されます(詳細は [Codex CLI 対応](docs/codex.md))。検索・行クリックでプロンプト全文を確認できます:
+グラフの棒をクリックするとその期間に内訳・履歴が連動し、「通算」で全期間に戻せます。Claude Code / Codex CLI の応答完了ごとに自動再生成され、開きっぱなしのタブは約30秒ごとに最新化されます。Codex CLI のレコードがあれば **Claude / Codex** を絞り込むソースフィルタも表示されます(詳細は [Codex CLI 対応](docs/codex.md))。検索・行クリックでプロンプト全文を確認できます:
 
 ![ターン履歴(検索と全文展開)](docs/images/history-expand.png)
 
