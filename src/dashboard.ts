@@ -1182,9 +1182,10 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   const reloadSec =
     Number.isFinite(opts.autoReloadSec) && opts.autoReloadSec > 0 ? Math.floor(opts.autoReloadSec) : 0;
   const refreshMeta = reloadSec > 0 ? `<meta http-equiv="refresh" content="${reloadSec}">` : "";
+  const updateTrigger = anyCodex ? "Claude Code / Codex の応答完了時" : "Claude Code の応答完了時";
   const autoUpdateFoot =
     reloadSec > 0
-      ? `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は Claude Code の応答完了時)</div>`
+      ? `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は ${updateTrigger})</div>`
       : "";
 
   const head =
