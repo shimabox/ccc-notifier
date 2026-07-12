@@ -14,12 +14,18 @@
 // ヒーロー・チャート・モデル別・プロジェクト別・履歴・KPI をブラウザ側で絞り込む(月予算カードのみ常に全ソース合算)。
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { isWSL } from "./env";
 import { formatJPY, formatTokens, formatUSD, modelDisplayName } from "./format";
 import { paths, readConfig, readTurns } from "./store";
+import {
+  makeFullDashboardState,
+  writeFullDashboardStateAtomic,
+} from "./dashboard-state";
+import { waitForDataLock } from "./data-lock";
 import type { TokenBuckets, TurnRecord } from "./types";
 
 const PROMPT_MAX = 10000;
@@ -32,6 +38,35 @@ interface DashboardOpts {
   open: boolean;
   out: string | null;
   autoReloadSec: number; // 生成 HTML の meta refresh 間隔秒。0 で無効。
+  variant?: DashboardVariant;
+  generatedAt?: string;
+  peerAvailable?: boolean;
+}
+
+export type DashboardVariant = "recent" | "full" | "custom";
+
+function writeAtomic(file: string, content: string): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, content, "utf8");
+    renameSync(tmp, file);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+function ensurePeerPlaceholder(variant: DashboardVariant): void {
+  if (variant === "custom") return;
+  const p = paths();
+  const peer = variant === "recent" ? p.fullDashboardFile : p.recentDashboardFile;
+  if (existsSync(peer)) return;
+  const peerIsFull = variant === "recent";
+  const back = peerIsFull ? "report.html" : "report-all.html";
+  const command = peerIsFull ? "ccc-notifier dashboard" : "ccc-notifier dashboard --days 30";
+  const label = peerIsFull ? "全履歴版" : "直近版";
+  const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="cccn-placeholder" content="true"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${label}は未生成です</title></head><body><main><h1>${label}はまだ生成されていません</h1><p><code>${command}</code> を実行すると生成できます。</p><p><a href="${back}">生成済みのダッシュボードへ戻る</a></p></main></body></html>`;
+  writeAtomic(peer, html);
 }
 
 /** --days の値をパースする。正の整数のみ採用。不正・未指定は null(=全履歴)。 */
@@ -1179,9 +1214,11 @@ function renderDashboard(
   fullHistory?: FullHistoryDashboardContext,
 ): string {
   const version = readVersion();
-  const generatedAt = fmtLocalDateTime(new Date().toISOString());
+  const generatedAtIso = opts.generatedAt ?? new Date().toISOString();
+  const generatedAt = fmtLocalDateTime(generatedAtIso);
   const period = opts.days === null ? "全期間" : `直近 ${opts.days} 日間`;
   const limited = opts.days !== null;
+  const variant = opts.variant ?? "custom";
   const totalLabel = limited ? "対象期間合計" : "通算";
   const totalLabelEn = limited ? "Embedded period total" : "Total";
   const totalSub = limited ? "埋め込み対象期間" : "全期間";
@@ -1229,6 +1266,7 @@ function renderDashboard(
     budgetMonth,
     budgetFixed: limited,
     allPeriodLabel: `${totalLabel} / ${totalLabelEn}`,
+    variant,
   };
   const dataJson = escapeJsonForScript(JSON.stringify(embed));
 
@@ -1238,8 +1276,26 @@ function renderDashboard(
   const updateTrigger = anyCodex ? "Claude Code / Codex の応答完了時" : "Claude Code の応答完了時";
   const autoUpdateFoot =
     reloadSec > 0
-      ? `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は ${updateTrigger})</div>`
+      ? variant === "full"
+        ? `<div class="foot">約 ${reloadSec} 秒ごとにファイルを再読込(全履歴版の生成はローカル日ごと、または手動)</div>`
+        : `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は ${updateTrigger})</div>`
       : "";
+
+  const variantNav =
+    variant === "recent"
+      ? `<div class="sub"><strong>直近 ${opts.days} 日版 / Recent</strong> · ${
+          opts.peerAvailable
+            ? `<a href="report-all.html">全履歴版へ / Full history</a>`
+            : `<span aria-disabled="true">全履歴版は未生成です（dashboard で生成） / Full history not generated</span>`
+        }</div>`
+      : variant === "full"
+        ? `<div class="sub"><strong>全履歴版 / Full history</strong> · ${
+            opts.peerAvailable
+              ? `<a href="report.html">直近版へ / Recent</a>`
+              : `<span aria-disabled="true">直近版は未生成です（dashboard --days N で生成） / Recent not generated</span>`
+          }</div>` +
+          `<div class="sub muted">最終生成 ${esc(generatedAt)}。ローカル日の最初の正常なターン時、または手動の dashboard コマンドで更新されます。</div>`
+        : "";
 
   const head =
     `<!doctype html><html lang="ja"><head>` +
@@ -1269,6 +1325,7 @@ function renderDashboard(
     const header =
       `<div class="head"><div>` +
       `<h1>ccc-notifier ダッシュボード</h1>` +
+      variantNav +
       `<div class="sub">${esc(period)} · 生成 ${esc(generatedAt)}</div>` +
       `</div></div>`;
     const empty =
@@ -1289,6 +1346,7 @@ function renderDashboard(
     `<div class="head">` +
     `<div>` +
     `<h1>ccc-notifier ダッシュボード</h1>` +
+    variantNav +
     `<div class="sub">${esc(period)}<span class="muted"> · ${esc(rangeText)}</span></div>` +
     `<div class="sub muted">生成 ${esc(generatedAt)} / generated</div>` +
     `</div>` +
@@ -1444,11 +1502,21 @@ export function writeDashboardHtml(opts: {
   days?: number | null;
   outPath: string;
   autoReloadSec: number;
+  allTurns?: TurnRecord[];
+  variant?: DashboardVariant;
+  generatedAt?: string;
 }): void {
   const days = opts.days ?? null;
+  const variant = opts.variant ??
+    (basename(opts.outPath) === "report.html"
+      ? "recent"
+      : basename(opts.outPath) === "report-all.html"
+        ? "full"
+        : "custom");
+  ensurePeerPlaceholder(variant);
   // history.jsonl は1回だけ全件 read/parse する。自動版の詳細ターンはこの
   // 配列から期間で絞り、当月予算は同じ全件配列から正確に集計する。
-  const allTurns = readTurns();
+  const allTurns = opts.allTurns ?? readTurns();
   const turns = days === null ? allTurns : filterTurnsByDays(allTurns, days);
   const fullHistory =
     days === null
@@ -1463,23 +1531,41 @@ export function writeDashboardHtml(opts: {
     open: false,
     out: opts.outPath,
     autoReloadSec: opts.autoReloadSec,
+    variant,
+    generatedAt: opts.generatedAt,
+    peerAvailable: variant !== "custom",
   }, fullHistory);
-  mkdirSync(dirname(opts.outPath), { recursive: true });
-  writeFileSync(opts.outPath, html, "utf8");
+  writeAtomic(opts.outPath, html);
 }
 
 export async function runDashboard(argv: string[]): Promise<number> {
   const opts = parseArgs(argv);
 
-  let outPath: string;
+  const canonical = opts.out === null;
+  const outPath = opts.out ?? (opts.days === null ? paths().fullDashboardFile : paths().recentDashboardFile);
+  let lock: Awaited<ReturnType<typeof waitForDataLock>> = null;
   try {
-    outPath = opts.out ?? join(paths().home, "report.html");
-    writeDashboardHtml({ days: opts.days, outPath, autoReloadSec: opts.autoReloadSec });
+    lock = await waitForDataLock();
+    if (lock === null) throw new Error("data lock is busy; retry later");
+    const generatedAt = new Date();
+    writeDashboardHtml({
+      days: opts.days,
+      outPath,
+      autoReloadSec: opts.autoReloadSec,
+      variant: canonical ? (opts.days === null ? "full" : "recent") : "custom",
+      generatedAt: generatedAt.toISOString(),
+    });
+    // 手動の canonical 全履歴生成も「本日生成済み」とする。custom --out は完全に無関係。
+    if (canonical && opts.days === null) {
+      writeFullDashboardStateAtomic(makeFullDashboardState(generatedAt));
+    }
   } catch (err) {
     console.error(
       `dashboard の生成に失敗しました / failed to generate dashboard: ${err instanceof Error ? err.message : String(err)}`,
     );
     return 1;
+  } finally {
+    lock?.release();
   }
 
   console.log(`ダッシュボードを生成しました / dashboard written: ${outPath}`);

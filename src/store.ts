@@ -26,6 +26,11 @@ export interface CccnPaths {
   errorLog: string;
   lastNotifyFile: string;
   muteFile: string;
+  recentDashboardFile: string;
+  fullDashboardFile: string;
+  dashboardFullStateFile: string;
+  dataLockDir: string;
+  dataReclaimDir: string;
 }
 
 const ERROR_LOG_MAX_BYTES = 1024 * 1024; // 1MB
@@ -49,6 +54,11 @@ export function paths(): CccnPaths {
     errorLog: join(home, "error.log"),
     lastNotifyFile: join(home, "last-notify.json"),
     muteFile: join(home, "muted.json"),
+    recentDashboardFile: join(home, "report.html"),
+    fullDashboardFile: join(home, "report-all.html"),
+    dashboardFullStateFile: join(cacheDir, "dashboard-full-state.json"),
+    dataLockDir: join(cacheDir, "data.lock"),
+    dataReclaimDir: join(cacheDir, "data.lock.reclaim"),
   };
 }
 

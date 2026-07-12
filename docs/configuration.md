@@ -16,9 +16,9 @@
 | `fx.cacheHours` | number | `12` | 為替レートのキャッシュ有効時間(時間単位) |
 | `includeDailyTotal` | boolean | `true` | 通知本文に「今日の累計コスト」を含めるか |
 | `monthlyBudgetUSD` | number | `0` | 月予算(USD)。`0` で無効。ダッシュボードに当月の使用率カードを表示(`budget` コマンド / `init` の `--budget` で設定。詳細は [月予算](monthly-budget.md)) |
-| `dashboard.autoRegenerate` | boolean | `true` | 応答完了(`track`)のたびに `report.html` を自動再生成するか |
+| `dashboard.autoRegenerate` | boolean | `true` | 応答完了(`track`)ごとの直近版と、日次の全履歴版を自動生成するか |
 | `dashboard.autoReloadSec` | number | `30` | 生成 HTML の自動リロード間隔(秒)。`0` で自動リロードを無効化 |
-| `dashboard.days` | number | `30` | 自動再生成時に埋め込む対象期間(正の整数・日数)。不正値は安全に `30` へフォールバック。手動 `dashboard` の既定値には影響しない |
+| `dashboard.days` | number | `30` | 自動生成する `report.html` の対象期間(正の整数・日数)。不正値は安全に `30` へフォールバック。`report-all.html` には影響しない |
 
 補足: データ保存先(既定 `~/.ccc-notifier`)は環境変数 `CCCN_HOME` で上書きできます。
 
@@ -45,7 +45,7 @@ npx ccc-notifier unmute     # すぐに再開
 - 非対話なら `init --yes --no-notify`
 - `config.json` を直接編集して `"notify": { "os": false, "slack": null }` にする(専用のキーはなく、この値そのものがこのモードの表現です)
 
-このモードでも Stop hook は登録され、応答完了のたびにコストの記録と `report.html` の自動再生成は行われます(通知の送信だけがスキップされます)。設定状態は `doctor` が「通知なし・ダッシュボードのみモード」として表示します。
+このモードでも Stop hook は登録され、コストの記録、毎ターンの `report.html`、日次の `report-all.html` の自動生成は行われます(通知の送信だけがスキップされます)。設定状態は `doctor` が「通知なし・ダッシュボードのみモード」として表示します。
 
 - **mute との違い**: `mute` は一時停止(`muted.json`、`unmute` で再開)、通知なしモードは `config.json` に保存される恒久的な設定です
 - **注意**: `init` を再実行してチャネルを選び直す(または素の `init --yes`)と通知は再有効化されます。対話の初期選択には現在の設定が反映されるため、通知なしのまま再 init する場合はそのまま Enter で維持できます

@@ -37,6 +37,9 @@ import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import type { CodexTurnDraft } from "./codex/transcript";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
 import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
+import { waitForDataLock, type DataLockHandle } from "./data-lock";
+
+type SweepLockProvider = () => Promise<DataLockHandle | null>;
 
 // aggregateNewTurn と同一の定数(挙動を1ミリも違えないため）。
 const NEWLINE = 0x0a; // '\n'
@@ -65,6 +68,7 @@ export interface SweepSummary {
   codexRecords: number; // Codex 由来の取り込みターン数(サマリの Codex 行用)。newRecords / totalUSD / byModel にも含める
   codexUSD: number; // Codex 由来の取り込み額(同上・Codex 行の別枠表示用)
   dryRun: boolean;
+  lockTimeouts: number;
 }
 
 // splitIntoTurnDrafts が返す「1ターン分」の下書き。TurnRecord 化は draftToRecord が行う。
@@ -395,7 +399,15 @@ async function processTranscript(
   daysCutoff: number | null,
   dryRun: boolean,
   summary: SweepSummary,
+  lockProvider: SweepLockProvider,
 ): Promise<void> {
+  const lock = dryRun ? null : await lockProvider();
+  if (!dryRun && lock === null) {
+    logError("sweep:data-lock", new Error(`data lock timeout: ${mainPath}`));
+    summary.lockTimeouts += 1;
+    return;
+  }
+  try {
   const cursor = sanitizeCursor(loadCursor(mainPath));
   const { drafts, newCursor } = await splitIntoTurnDrafts(mainPath, cursor);
 
@@ -486,6 +498,9 @@ async function processTranscript(
       for (const nc of sa!.newCursors) saveCursor(nc.path, nc.cursor);
     }
   }
+  } finally {
+    lock?.release();
+  }
 }
 
 // ============ Codex(rollout)の処理 ============
@@ -566,7 +581,15 @@ async function processCodexRollout(
   daysCutoff: number | null,
   dryRun: boolean,
   summary: SweepSummary,
+  lockProvider: SweepLockProvider,
 ): Promise<void> {
+  const lock = dryRun ? null : await lockProvider();
+  if (!dryRun && lock === null) {
+    logError("sweep:data-lock", new Error(`data lock timeout: ${rolloutPath}`));
+    summary.lockTimeouts += 1;
+    return;
+  }
+  try {
   const cursor = sanitizeCursor(loadCursor(rolloutPath));
   const drafts = await splitIntoCodexTurnDrafts(rolloutPath, cursor);
   // null = 読めない or 新規 usage なし。カーソルも進めない(進行中セッションを後で hook / 次回 sweep が拾う)。
@@ -603,6 +626,9 @@ async function processCodexRollout(
     // --days で捨てたターンぶんもここで消費され、次回以降に再取り込みされない。
     saveCursor(rolloutPath, drafts[drafts.length - 1].agg.newCursor);
   }
+  } finally {
+    lock?.release();
+  }
 }
 
 /**
@@ -631,6 +657,7 @@ async function sweepCodex(
   fx: FxResult,
   daysCutoff: number | null,
   flags: SweepFlags,
+  lockProvider: SweepLockProvider,
 ): Promise<void> {
   const sessionsRoot = await codexSessionsRoot();
   if (sessionsRoot === null) return;
@@ -643,7 +670,7 @@ async function sweepCodex(
       continue;
     }
     try {
-      await processCodexRollout(rolloutPath, table, fx, daysCutoff, flags.dryRun, summary);
+      await processCodexRollout(rolloutPath, table, fx, daysCutoff, flags.dryRun, summary, lockProvider);
     } catch (err) {
       // 1 ファイルの失敗で全体を止めない(Claude 走査と同じ)。
       logError("sweep:codex", err);
@@ -735,7 +762,13 @@ function printSweepSummary(summary: SweepSummary, fx: FxResult): void {
     );
   }
 
-  if (summary.newRecords === 0) {
+  if (summary.lockTimeouts > 0) {
+    console.log(
+      `未完了: ${summary.lockTimeouts} 件はdata lockを取得できず未処理です。カーソルは進めていないため再実行してください`,
+    );
+  }
+
+  if (summary.newRecords === 0 && summary.lockTimeouts === 0) {
     console.log("新規はありませんでした");
   } else {
     console.log(
@@ -768,11 +801,16 @@ function printSweepSummary(summary: SweepSummary, fx: FxResult): void {
     }
   }
 
-  console.log("既に計上済みの分はスキップされました(二重計上なし)");
+  if (summary.lockTimeouts === 0) {
+    console.log("既に計上済みの分はスキップされました(二重計上なし)");
+  }
   console.log(`円換算レート: 1USD = ${fx.rate}JPY(source=${fx.source})`);
 }
 
-export async function runSweep(argv: string[]): Promise<number> {
+export async function runSweep(
+  argv: string[],
+  deps: { lockProvider?: SweepLockProvider } = {},
+): Promise<number> {
   const flags = parseSweepFlags(argv);
   const root = projectsRoot(flags.projects);
 
@@ -806,9 +844,11 @@ export async function runSweep(argv: string[]): Promise<number> {
     codexRecords: 0,
     codexUSD: 0,
     dryRun: flags.dryRun,
+    lockTimeouts: 0,
   };
 
   const daysCutoff = flags.days !== null ? Date.now() - flags.days * DAY_MS : null;
+  const lockProvider = deps.lockProvider ?? (() => waitForDataLock());
 
   for (const projectDir of projectDirs ?? []) {
     const transcripts = await listTranscripts(projectDir);
@@ -820,7 +860,7 @@ export async function runSweep(argv: string[]): Promise<number> {
         continue;
       }
       try {
-        await processTranscript(mainPath, table, fx, daysCutoff, flags.dryRun, summary);
+        await processTranscript(mainPath, table, fx, daysCutoff, flags.dryRun, summary, lockProvider);
       } catch (err) {
         // 1 transcript の失敗で全体を止めない。
         logError("sweep:transcript", err);
@@ -829,9 +869,9 @@ export async function runSweep(argv: string[]): Promise<number> {
   }
 
   // Claude 走査の後に Codex 走査(未導入・sessions 不在なら黙ってスキップ)。
-  await sweepCodex(summary, table, fx, daysCutoff, flags);
+  await sweepCodex(summary, table, fx, daysCutoff, flags, lockProvider);
 
   summary.totalJPY = summary.totalUSD * fx.rate;
   printSweepSummary(summary, fx);
-  return 0;
+  return summary.lockTimeouts > 0 ? 1 : 0;
 }

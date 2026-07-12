@@ -24,11 +24,13 @@ const HOUR = 3_600_000;
 
 let tmpHome: string;
 let prevHome: string | undefined;
+let defaultOutput: string;
 
 beforeEach(() => {
   prevHome = process.env.CCCN_HOME;
   tmpHome = mkdtempSync(join(tmpdir(), "cccn-dashboard-test-"));
   process.env.CCCN_HOME = tmpHome;
+  defaultOutput = join(tmpHome, "report-all.html");
 });
 
 afterEach(() => {
@@ -42,6 +44,18 @@ afterEach(() => {
 async function run(argv: string[]): Promise<number> {
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  const daysIndex = argv.findIndex((arg) => arg === "--days" || arg.startsWith("--days="));
+  if (daysIndex >= 0) {
+    const raw = argv[daysIndex].startsWith("--days=")
+      ? argv[daysIndex].slice("--days=".length)
+      : argv[daysIndex + 1];
+    const parsed = Number.parseInt(raw ?? "", 10);
+    defaultOutput = Number.isFinite(parsed) && parsed > 0
+      ? join(tmpHome, "report.html")
+      : join(tmpHome, "report-all.html");
+  } else {
+    defaultOutput = join(tmpHome, "report-all.html");
+  }
   return await runDashboard(argv);
 }
 
@@ -91,7 +105,7 @@ function seedStandard(): number {
   return total;
 }
 
-function readHtml(path = join(tmpHome, "report.html")): string {
+function readHtml(path = defaultOutput): string {
   return readFileSync(path, "utf8");
 }
 
@@ -130,6 +144,7 @@ interface Embed {
   turns: EmbedTurn[];
   budgetMonth?: { usd: number; jpy: number; turns: number };
   budgetFixed?: boolean;
+  variant?: string;
 }
 
 function parseData(html: string): Embed {
@@ -145,14 +160,19 @@ function sumTotals(turns: EmbedTurn[]): number {
 }
 
 describe("runDashboard — 標準シナリオ", () => {
-  it("exit 0 で report.html を生成する", async () => {
+  it("exit 0 で report-all.html を生成する", async () => {
     seedStandard();
     const code = await run(["--no-open"]);
     expect(code).toBe(0);
-    expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(true);
     const html = readHtml();
     expect(html.startsWith("<!doctype html>")).toBe(true);
     expect(html).toContain("ccc-notifier");
+    expect(html).toContain("全履歴版 / Full history");
+    expect(html).toContain('href="report.html"');
+    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain("直近版はまだ生成されていません");
+    expect(parseData(html).variant).toBe("full");
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
   });
 
   it("既定で全履歴を埋め込み、slot 別コストの総和が seed 合計と一致する", async () => {
@@ -257,6 +277,34 @@ describe("runDashboard — 標準シナリオ", () => {
 });
 
 describe("runDashboard — フラグ", () => {
+  it("data lock timeoutを明示失敗しcustom出力を作らない", async () => {
+    const { acquireDataLock } = await import("../src/data-lock");
+    const lock = acquireDataLock();
+    expect(lock).not.toBeNull();
+    process.env.CCCN_LOCK_TIMEOUT_MS = "0";
+    const out = join(tmpHome, "blocked-custom.html");
+    try {
+      expect(await run(["--no-open", "--out", out])).toBe(1);
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      delete process.env.CCCN_LOCK_TIMEOUT_MS;
+      lock!.release();
+    }
+  });
+
+  it("生成順に関係なくplaceholderでcanonical相互anchorを切らさない", async () => {
+    seedStandard();
+    await run(["--no-open"]);
+    expect(readHtml()).toContain('href="report.html"');
+    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain('href="report-all.html"');
+
+    await run(["--no-open", "--days", "30"]);
+    expect(readHtml()).toContain('href="report-all.html"');
+
+    await run(["--no-open"]);
+    expect(readHtml()).toContain('href="report.html"');
+  });
+
   it("--out で指定パスに書き出す", async () => {
     seedStandard();
     const out = join(tmpHome, "custom", "dash.html");
@@ -264,6 +312,12 @@ describe("runDashboard — フラグ", () => {
     expect(code).toBe(0);
     expect(existsSync(out)).toBe(true);
     expect(readHtml(out)).toContain("ccc-notifier");
+    expect(readHtml(out)).not.toContain('href="report.html"');
+    expect(readHtml(out)).not.toContain('href="report-all.html"');
+    expect(parseData(readHtml(out)).variant).toBe("custom");
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
   });
 
   it("--days N で N 日より前を除外する(--days 1 は直近24時間の 4 件)", async () => {
@@ -276,6 +330,11 @@ describe("runDashboard — フラグ", () => {
     expect(data.turns.every((t) => t.t >= cutoff)).toBe(true);
     expect(readHtml()).toContain("対象期間合計 / Embedded period total");
     expect(readHtml()).toContain("埋め込み対象期間");
+    expect(readHtml()).toContain('href="report-all.html"');
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain("全履歴版はまだ生成されていません");
+    expect(parseData(readHtml()).variant).toBe("recent");
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
   });
 
   it("期間限定版でも slot 配色は埋め込み対象外を含む全履歴基準で決める", async () => {
@@ -511,7 +570,7 @@ describe("runDashboard — 月予算カード", () => {
 
     writeDashboardHtml({ days: 30, outPath: join(tmpHome, "report.html"), autoReloadSec: 30 });
 
-    const html = readHtml();
+    const html = readHtml(join(tmpHome, "report.html"));
     const data = parseData(html);
     expect(readSpy).toHaveBeenCalledTimes(1);
     expect(readSpy).toHaveBeenCalledWith();

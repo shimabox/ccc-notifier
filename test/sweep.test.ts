@@ -30,6 +30,8 @@ import type { TurnRecord } from "../src/types";
 // Codex sweep テスト用の追加 import(既存 import ブロックは不変。新規行のみ追加)。
 import { writeFileSync } from "node:fs";
 import { saveCursor } from "../src/store";
+import { runHistory } from "../src/history";
+import { acquireDataLock } from "../src/data-lock";
 
 const FIXTURE_MULTITURN = fileURLToPath(new URL("./fixtures/transcript-multiturn.jsonl", import.meta.url));
 const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
@@ -159,6 +161,42 @@ const NEW_SA_LINE = JSON.stringify({
 // ---- suite ----------------------------------------------------------------
 
 describe("runSweep", () => {
+  it("data lock timeout leaves history and cursors unchanged", async () => {
+    placeFixtures({ withSA: false });
+    const lock = acquireDataLock();
+    expect(lock).not.toBeNull();
+    process.env.CCCN_LOCK_TIMEOUT_MS = "0";
+    try {
+      const result = await sweep([]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("未完了");
+      expect(result.output).not.toContain("新規はありませんでした");
+      expect(existsSync(historyFile())).toBe(false);
+      expect(existsSync(cursorsFile())).toBe(false);
+    } finally {
+      delete process.env.CCCN_LOCK_TIMEOUT_MS;
+      lock!.release();
+    }
+  });
+
+  it("serializes clear then sweep so newly swept records and cursors are not lost", async () => {
+    placeFixtures({ withSA: false });
+    writeFileSync(historyFile(), `${JSON.stringify({ schemaVersion: 1, ts: new Date().toISOString(), prompt: "old-secret" })}\n`, "utf8");
+    const lock = acquireDataLock();
+    expect(lock).not.toBeNull();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const clearPromise = runHistory(["clear", "--yes"]);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const sweepPromise = runSweep(["--projects", projectsRoot]);
+    setTimeout(() => lock!.release(), 10);
+    const [clearCode, sweepCode] = await Promise.all([clearPromise, sweepPromise]);
+    expect(clearCode).toBe(0);
+    expect(sweepCode).toBe(0);
+    expect(readHistory()).toHaveLength(2);
+    expect(existsSync(cursorsFile())).toBe(true);
+  });
+
   // 1. fresh sweep: 2 レコード(GOLDEN 一致・両方 ingest:'sweep')、2件目に SA 0.033、totalUSD ≈ 0.020。
   it("1. fresh sweep records two turn records (GOLDEN) with SA attached to the last one", async () => {
     placeFixtures({ withSA: true });
@@ -405,6 +443,36 @@ function placeCodexRollout(fixtureBasename: string, fileName: string): string {
 }
 
 describe("runSweep (codex)", () => {
+  it("reports a Codex lock timeout as incomplete and leaves its cursor reusable", async () => {
+    const rollout = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const code = await runSweep(["--projects", projectsRoot], { lockProvider: async () => null });
+    const output = log.mock.calls.flat().join(" ");
+    expect(code).toBe(1);
+    expect(output).toContain("未完了");
+    expect(existsSync(historyFile())).toBe(false);
+    const cursors = existsSync(cursorsFile()) ? readFileSync(cursorsFile(), "utf8") : "";
+    expect(cursors).not.toContain(rollout);
+  });
+
+  it("commits normal Claude targets but returns 1 for a timed-out Codex target", async () => {
+    placeFixtures({ withSA: false });
+    const rollout = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
+    let calls = 0;
+    const provider = async () => {
+      calls += 1;
+      return calls === 1 ? acquireDataLock() : null;
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const code = await runSweep(["--projects", projectsRoot], { lockProvider: provider });
+    expect(code).toBe(1);
+    expect(log.mock.calls.flat().join(" ")).toContain("未完了");
+    expect(readHistory()).toHaveLength(2);
+    const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
+    expect(cursors[mainPath]).toBeDefined();
+    expect(cursors[rollout]).toBeUndefined();
+  });
+
   // 1. multiturn を取り込む → 3 レコード(source codex / ingest sweep / モデル gpt-5.5×2 + gpt-5-codex /
   //    buckets が fixtures README のドラフト正解値どおり)。サマリに「Codex: 3」。
   it("1. ingests a multiturn rollout as 3 codex records with a Codex summary line", async () => {
