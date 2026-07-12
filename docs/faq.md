@@ -15,6 +15,14 @@ npx ccc-notifier doctor
 - 通知なしモード(`notify.os: false` かつ `notify.slack: null`)になっている → `doctor` が「通知なし・ダッシュボードのみモード」と明示します。通知を使いたければ `init` を再実行してチャネルを選び直してください(詳細は [設定 / 通知なしモード](configuration.md#通知なしモード記録ダッシュボードのみ--dashboard-only-mode))
 - そのターンの金額が `minNotifyUSD` 未満 → 通知は来ませんが、履歴(`report`)には記録されています
 
+**Codex の通知が来ない**
+
+Codex CLI 側の**信頼承認**がまだの可能性があります。`ccc-notifier init --codex`(または対話で Yes)を実行しただけでは hook は動かず、次回 `codex` 起動時に表示される「Hooks need review」で「Trust all and continue」を選ぶまで**サイレントに何も起きません**。
+
+1. `codex` を起動し、「Hooks need review」が出たら「Trust all and continue」(または Review して個別に承認)を選ぶ
+2. `npx ccc-notifier doctor` を実行し、「Codex」のブロックを確認する(hook が未登録なら `init --codex` を再実行)
+3. それでも来ない場合は [Codex CLI 対応](codex.md) のトラブルシュートを参照してください
+
 **Node を更新・削除したら通知が来なくなった**
 
 hook には `init` を実行した時点の Node.js の絶対パスがそのまま記録されています。mise などで Node.js のバージョンを切り替えたり、そのバージョン自体をアンインストールしたりすると、記録されていたパスが無効になり通知が届かなくなることがあります。

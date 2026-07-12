@@ -153,9 +153,11 @@ export async function main(argv: string[]): Promise<number> {
     switch (cmd) {
       case "track": {
         const text = await readStdin();
+        // Codex の Stop hook からは `track --codex` で呼ばれる(内部コマンドのため help 文言は変えない)。
+        const codex = rest.includes("--codex");
         try {
           const trackMod = await import("./track");
-          await trackMod.runTrack(text);
+          await trackMod.runTrack(text, { codex });
         } catch {
           // track は Claude Code の応答完了経路(Stop hook)から呼ばれるため、
           // モジュール読み込み失敗・想定外の例外を含め、何が起きても必ず 0 を返す

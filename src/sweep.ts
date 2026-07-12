@@ -32,6 +32,9 @@ import {
 } from "./store";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
+import { codexHome, detectCodex } from "./codex/env";
+import { splitIntoCodexTurnDrafts } from "./codex/transcript";
+import type { CodexTurnDraft } from "./codex/transcript";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
 import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
@@ -58,7 +61,9 @@ export interface SweepSummary {
   totalJPY: number;
   subagentsUSD: number; // SA 回収額(別枠)。totalUSD / byModel はメイン基準のまま(SA を含めない)
   byModel: Record<string, number>;
-  skippedActive: number; // 進行中セッション保護でスキップした transcript 数(黙って落とさず必ず表示する)
+  skippedActive: number; // 進行中セッション保護でスキップした transcript 数(黙って落とさず必ず表示する)。Codex 分も合算する
+  codexRecords: number; // Codex 由来の取り込みターン数(サマリの Codex 行用)。newRecords / totalUSD / byModel にも含める
+  codexUSD: number; // Codex 由来の取り込み額(同上・Codex 行の別枠表示用)
   dryRun: boolean;
 }
 
@@ -483,6 +488,169 @@ async function processTranscript(
   }
 }
 
+// ============ Codex(rollout)の処理 ============
+//
+// Codex CLI(OpenAI)は ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl にセッションログを書く。
+// Claude と違い assistant 行ごとの usage は無く、event_msg/token_count が運ぶ累積カウンタの
+// 逐次ステップ差分で集計する(詳細は src/codex/transcript.ts)。ここでは splitIntoCodexTurnDrafts が
+// 返すターン下書きを TurnRecord 化するだけで、二重計上防止の流儀(active guard・カーソル去重・dry-run)は
+// Claude 走査とそろえる。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/sweep.ts。
+
+// Codex rollout の探索深さ上限。sessions/YYYY/MM/DD の3階層で足りるが、異常に深い木でも暴走しない
+// よう深さ4までに制限する(Claude 走査が1階層に限定しているのと同じ防御方針)。
+const CODEX_MAX_DEPTH = 4;
+
+/**
+ * sessions 配下を深さ CODEX_MAX_DEPTH まで再帰し、rollout-*.jsonl(通常ファイルのみ)を絶対パスで集める。
+ * symlink は withFileTypes の isFile()/isDirectory() がいずれも false になるため自然に辿らない
+ * (listTranscripts と同じ防御)。読めないディレクトリは黙ってスキップする。
+ */
+async function listCodexRollouts(sessionsRoot: string): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => null);
+    if (entries === null) return; // 読めないディレクトリはスキップ
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isFile()) {
+        if (e.name.startsWith("rollout-") && e.name.endsWith(".jsonl")) found.push(full);
+      } else if (e.isDirectory() && depth < CODEX_MAX_DEPTH) {
+        await walk(full, depth + 1);
+      }
+    }
+  };
+  await walk(sessionsRoot, 1);
+  return found;
+}
+
+/** Codex ターン下書きを TurnRecord 化する(source:'codex'・ingest:'sweep'・サブエージェント無し)。 */
+function codexDraftToRecord(
+  draft: CodexTurnDraft,
+  ts: string,
+  table: PriceTable,
+  fx: FxResult,
+): TurnRecord {
+  const main = draft.agg.main; // { [model]: TokenBuckets }(単一モデルキー)
+  const breakdown = computeCost(main, {}, table); // Codex に sidechain は無いので第2引数は空
+  const rec: TurnRecord = {
+    schemaVersion: 1,
+    ts,
+    sessionId: draft.agg.sessionId,
+    project: draft.agg.cwd ?? "",
+    gitBranch: null, // rollout に git 情報は無い
+    models: collectModels(main, {}),
+    tokens: sumBuckets(main),
+    sidechainTokens: null,
+    apiCalls: draft.agg.apiCalls,
+    costUSD: breakdown.usd,
+    costByModel: breakdown.byModel,
+    costJPY: breakdown.usd * fx.rate, // 円換算は sweep 実行時レート(Claude 側と同じ)
+    fxRate: fx.rate,
+    fxSource: fx.source,
+    prompt: draft.agg.prompt ?? "",
+    ingest: "sweep",
+    source: "codex",
+  };
+  if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  return rec;
+}
+
+/**
+ * 1 つの rollout ファイルを処理する。カーソルで未計上分をターン単位に復元し、--days で古いターンを
+ * 捨てつつ(カーソルは進める)TurnRecord 化する。二重計上は codexTotals の差分方式 + カーソルで防ぐ。
+ */
+async function processCodexRollout(
+  rolloutPath: string,
+  table: PriceTable,
+  fx: FxResult,
+  daysCutoff: number | null,
+  dryRun: boolean,
+  summary: SweepSummary,
+): Promise<void> {
+  const cursor = sanitizeCursor(loadCursor(rolloutPath));
+  const drafts = await splitIntoCodexTurnDrafts(rolloutPath, cursor);
+  // null = 読めない or 新規 usage なし。カーソルも進めない(進行中セッションを後で hook / 次回 sweep が拾う)。
+  if (drafts === null || drafts.length === 0) return;
+
+  // 各 draft → TurnRecord(--days より古いターンは捨てる。カーソルは最終ドラフトまで進めるので再走査しない)。
+  const records: TurnRecord[] = [];
+  for (const draft of drafts) {
+    const ts = draft.endTs ?? new Date().toISOString();
+    if (daysCutoff !== null) {
+      const tsMs = Date.parse(ts);
+      if (!Number.isFinite(tsMs) || tsMs < daysCutoff) continue; // 古い → 捨てる(カーソルは進める)
+    }
+    records.push(codexDraftToRecord(draft, ts, table, fx));
+  }
+
+  // サマリ集計。Codex 分は全体合計(newRecords / totalUSD / byModel)にも、Codex 別枠にも計上する。
+  for (const rec of records) {
+    summary.newRecords += 1;
+    summary.totalUSD += rec.costUSD;
+    summary.codexRecords += 1;
+    summary.codexUSD += rec.costUSD;
+    if (rec.costByModel) {
+      for (const [m, c] of Object.entries(rec.costByModel)) {
+        summary.byModel[m] = (summary.byModel[m] ?? 0) + c;
+      }
+    }
+  }
+
+  // 書き込み(dry-run では appendTurn / saveCursor を一切呼ばない)。
+  if (!dryRun) {
+    for (const rec of records) appendTurn(rec);
+    // ファイル単位で最終ドラフトの newCursor を保存する。契約上これはウィンドウ全体消費を表すため、
+    // --days で捨てたターンぶんもここで消費され、次回以降に再取り込みされない。
+    saveCursor(rolloutPath, drafts[drafts.length - 1].agg.newCursor);
+  }
+}
+
+/**
+ * Codex 走査の可否判定を兼ねた sessions ルートの解決。
+ * detectCodex() 偽 or codexHome()/sessions がディレクトリでなければ null(= 走査不能)。
+ * runSweep の「Claude ルート不在でも Codex が走査可能なら続行する」判定と sweepCodex が共有する。
+ */
+async function codexSessionsRoot(): Promise<string | null> {
+  if (!detectCodex()) return null;
+  const sessionsRoot = join(codexHome(), "sessions");
+  const isDir = await fsp
+    .stat(sessionsRoot)
+    .then((st) => st.isDirectory())
+    .catch(() => false);
+  return isDir ? sessionsRoot : null;
+}
+
+/**
+ * Codex 走査。detectCodex() 偽 or codexHome()/sessions 不在なら黙ってスキップ(サマリにも出さない
+ * = Codex 未使用ユーザーには無出力)。進行中セッション保護(active guard)は Claude と共通で、
+ * スキップ件数は既存の skippedActive に合算する。
+ */
+async function sweepCodex(
+  summary: SweepSummary,
+  table: PriceTable,
+  fx: FxResult,
+  daysCutoff: number | null,
+  flags: SweepFlags,
+): Promise<void> {
+  const sessionsRoot = await codexSessionsRoot();
+  if (sessionsRoot === null) return;
+
+  const rollouts = await listCodexRollouts(sessionsRoot);
+  for (const rolloutPath of rollouts) {
+    // 進行中セッション保護(Claude と同じ mtime ガード)。カーソルも進めず丸ごと後回しにする。
+    if (!flags.includeActive && (await isRecentlyModified(rolloutPath))) {
+      summary.skippedActive += 1;
+      continue;
+    }
+    try {
+      await processCodexRollout(rolloutPath, table, fx, daysCutoff, flags.dryRun, summary);
+    } catch (err) {
+      // 1 ファイルの失敗で全体を止めない(Claude 走査と同じ)。
+      logError("sweep:codex", err);
+    }
+  }
+}
+
 // ============ 走査 ============
 
 function projectsRoot(override: string | null): string {
@@ -580,6 +748,14 @@ function printSweepSummary(summary: SweepSummary, fx: FxResult): void {
         `  うちサブエージェント: ${formatUSD(summary.subagentsUSD)}(${formatJPY(summary.subagentsUSD * fx.rate)})`,
       );
     }
+    // Codex 分(別ソース)の内訳。totalUSD には含めた上で、Claude 分と切り分けて見えるようにする
+    // (うちサブエージェント行と同じ位置感・同じ $(¥)書式の別枠1行。¥ は fx.rate 換算。
+    //  取り込みが無い = codexRecords 0 のときは出さない)。
+    if (summary.codexRecords > 0) {
+      console.log(
+        `  Codex: ${summary.codexRecords} ターン ${formatUSD(summary.codexUSD)}(${formatJPY(summary.codexUSD * fx.rate)})`,
+      );
+    }
     const top = Object.entries(summary.byModel)
       .filter(([, c]) => c > 0)
       .sort((a, b) => b[1] - a[1])
@@ -600,10 +776,15 @@ export async function runSweep(argv: string[]): Promise<number> {
   const flags = parseSweepFlags(argv);
   const root = projectsRoot(flags.projects);
 
+  // Claude ルート不在でも、Codex 側が走査可能なら警告1行を出して Codex 走査だけ続行する
+  // (Codex 専用ユーザーの backfill を成立させるため)。両方走査不能なときだけ従来どおりエラー終了。
   const projectDirs = await listProjectDirs(root);
   if (projectDirs === null) {
-    console.log(`走査ルートが見つかりません: ${root}`);
-    return 1;
+    if ((await codexSessionsRoot()) === null) {
+      console.log(`走査ルートが見つかりません: ${root}`);
+      return 1;
+    }
+    console.log(`Claude の走査ルートが見つかりません: ${root}(Codex のみ走査します)`);
   }
 
   // 実行時に一度だけ: 設定 / 単価表(オンライン可・失敗時は内蔵へフォールバック) / 為替。
@@ -613,7 +794,7 @@ export async function runSweep(argv: string[]): Promise<number> {
   const fx = await getUsdJpy(cfg, cacheDir);
 
   const summary: SweepSummary = {
-    projects: projectDirs.length,
+    projects: projectDirs === null ? 0 : projectDirs.length,
     transcripts: 0,
     agentFiles: 0,
     newRecords: 0,
@@ -622,12 +803,14 @@ export async function runSweep(argv: string[]): Promise<number> {
     subagentsUSD: 0,
     byModel: {},
     skippedActive: 0,
+    codexRecords: 0,
+    codexUSD: 0,
     dryRun: flags.dryRun,
   };
 
   const daysCutoff = flags.days !== null ? Date.now() - flags.days * DAY_MS : null;
 
-  for (const projectDir of projectDirs) {
+  for (const projectDir of projectDirs ?? []) {
     const transcripts = await listTranscripts(projectDir);
     for (const mainPath of transcripts) {
       summary.transcripts += 1;
@@ -644,6 +827,9 @@ export async function runSweep(argv: string[]): Promise<number> {
       }
     }
   }
+
+  // Claude 走査の後に Codex 走査(未導入・sessions 不在なら黙ってスキップ)。
+  await sweepCodex(summary, table, fx, daysCutoff, flags);
 
   summary.totalJPY = summary.totalUSD * fx.rate;
   printSweepSummary(summary, fx);

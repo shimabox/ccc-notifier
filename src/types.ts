@@ -2,6 +2,7 @@
 // CCCN_HOME            : データディレクトリ上書き(既定 ~/.ccc-notifier)
 // CCCN_CLAUDE_SETTINGS : Claude settings.json パス上書き(既定 ~/.claude/settings.json)
 // CCCN_DRY_RUN=1       : 通知を実送信せず、送信ペイロードを CCCN_HOME/last-notify.json に書く
+// CCCN_CODEX_HOME      : Codex ホーム上書き(既定 ~/.codex)
 
 export interface TokenBuckets {
   input: number;        // usage.input_tokens
@@ -18,6 +19,7 @@ export interface Cursor {
   lastUuid: string | null;    // 整合性検証用
   lastTs: string | null;      // フルリスキャン時の下限(これ以前の行はスキップ)
   seenMessageKeys: string[];  // 直近の "messageId:requestId"(最大500・リングバッファ)
+  codexTotals?: { input: number; cached: number; output: number }; // Codex rollout の total_token_usage 累積スナップショット(逐次差分集計用)。Claude transcript では常に undefined。
 }
 
 export interface TurnAggregate {
@@ -65,6 +67,7 @@ export interface TurnRecord {
   fxSource: 'live' | 'cache' | 'fixed';
   prompt: string;            // 全文(ローカルのみ)。null 時は ""
   ingest?: 'sweep';          // sweep(過去分の一括回収)由来の記録の目印。hook 経由は付与しない(undefined)
+  source?: 'codex';          // 無し = Claude Code(後方互換)。ingest と同じ流儀
   unknownModels?: string[];
   subagents?: {              // サブエージェント枠(旧レコード後方互換のため optional)
     costUSD: number;                     // サブエージェント合計(丸めない)

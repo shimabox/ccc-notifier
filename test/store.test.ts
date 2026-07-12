@@ -281,6 +281,35 @@ describe("sanitizeCursor", () => {
     expect(sanitizeCursor({ offset: 1, lastUuid: 5, lastTs: null, seenMessageKeys: [] })).toBeNull();
     expect(sanitizeCursor({ offset: 1, lastUuid: null, lastTs: {}, seenMessageKeys: [] })).toBeNull();
   });
+
+  it("codexTotals が3キーとも有限な非負 number なら、そのまま採用する", () => {
+    const c: Cursor = {
+      offset: 10,
+      lastUuid: null,
+      lastTs: null,
+      seenMessageKeys: [],
+      codexTotals: { input: 1, cached: 2, output: 3 },
+    };
+    expect(sanitizeCursor(c)).toEqual(c);
+  });
+
+  it("codexTotals が不正(負数・欠損キー)ならフィールドごと undefined に落ちるが、他フィールドは生きる", () => {
+    const base = {
+      offset: 5,
+      lastUuid: "u",
+      lastTs: "2026-07-06T10:00:00.000Z",
+      seenMessageKeys: ["a:b"],
+    };
+
+    // 負数を含む
+    expect(
+      sanitizeCursor({ ...base, codexTotals: { input: -1, cached: 2, output: 3 } }),
+    ).toEqual(base);
+    // キー欠損
+    expect(sanitizeCursor({ ...base, codexTotals: { input: 1, cached: 2 } })).toEqual(base);
+    // オブジェクトでない
+    expect(sanitizeCursor({ ...base, codexTotals: "not-an-object" })).toEqual(base);
+  });
 });
 
 describe("turns (appendTurn / readTurns / todayTotalUSD)", () => {

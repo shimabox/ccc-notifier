@@ -62,6 +62,14 @@ const NUMERIC_ONLY = /^\d+$/;
  * - 解釈できない場合は入力をそのまま返す
  */
 export function modelDisplayName(id: string): string {
+  // OpenAI Codex CLI 対応: "gpt-" プレフィックスは "GPT-" に、末尾の "-codex" サフィックスは
+  // " Codex" に変換する(バージョン部はそのまま)。例: gpt-5.5 → "GPT-5.5" / gpt-5-codex → "GPT-5 Codex"。
+  // o3 系はここに該当せず、以降の claude 系ロジックにも一致しないため末尾のフォールバック(id をそのまま
+  // 返す)で "o3" が維持される。既存の claude 系ロジックは無変更。
+  if (id.startsWith("gpt-")) {
+    return `GPT-${id.slice(4)}`.replace(/-codex$/, " Codex");
+  }
+
   let s = id;
   s = s.replace(/^claude-/, "");
   s = s.replace(/-20\d{6}/, "");

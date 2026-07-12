@@ -373,6 +373,10 @@ describe("runDoctor", () => {
     badSettingsPath = join(tmpHome, "settings-bad.json");
     writeFileSync(badSettingsPath, rawFixture, "utf8");
 
+    // doctor の Codex ブロックが実 ~/.codex を読まないよう隔離(2026-07-10)。
+    // 存在しないパスで「未検出(info 1行)」に固定し、実マシン/CI どちらでも出力を決定的にする。
+    process.env.CCCN_CODEX_HOME = join(tmpHome, "no-codex");
+
     process.env.CCCN_DRY_RUN = "1";
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in test")));
   });
@@ -380,6 +384,7 @@ describe("runDoctor", () => {
   afterEach(() => {
     delete process.env.CCCN_CLAUDE_PROJECTS;
     delete process.env.CCCN_CLAUDE_SETTINGS;
+    delete process.env.CCCN_CODEX_HOME;
     delete process.env.CCCN_DRY_RUN;
     delete process.env.CCCN_HOME;
     vi.unstubAllGlobals();
@@ -464,6 +469,9 @@ describe("main sweep", () => {
     projectsRoot = mkdtempSync(join(tmpdir(), "cccn-cli-test-sweep-proj-"));
     process.env.CCCN_HOME = tmpHome;
     process.env.CCCN_CLAUDE_PROJECTS = projectsRoot;
+    // sweep が実 ~/.codex を読まないよう隔離(2026-07-10)。存在しないパスで detectCodex() を偽にし、
+    // 実マシンの rollout(数百件)が history に混入して件数アサーションが壊れるのを防ぐ。
+    process.env.CCCN_CODEX_HOME = join(tmpHome, "no-codex");
     // 実ネットワークに出ない保険(単価 builtin / fx fixed 150 に決定的にフォールバック)。
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 
@@ -481,6 +489,7 @@ describe("main sweep", () => {
   afterEach(() => {
     delete process.env.CCCN_HOME;
     delete process.env.CCCN_CLAUDE_PROJECTS;
+    delete process.env.CCCN_CODEX_HOME;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     rmSync(tmpHome, { recursive: true, force: true });
@@ -508,5 +517,120 @@ describe("main sweep", () => {
       .map((l) => JSON.parse(l) as TurnRecord);
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.ingest === "sweep")).toBe(true);
+  });
+});
+
+// ============ runDoctor — Codex ブロック ============
+// Codex 検出は CCCN_CODEX_HOME に依存するため各ケースで一時ディレクトリに固定する
+// (未設定だと実ホーム ~/.codex を見て非決定になるため、この describe では必ず張る)。
+// Claude 側は健全な状態(マーカー付き Stop hook・読める projects)にして exit 0 を担保し、
+// Codex ブロックが ❌ を出さない(exit code 意味論を変えない)ことを検証する。
+
+describe("runDoctor — Codex ブロック", () => {
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-cli-test-codex-"));
+    process.env.CCCN_HOME = tmpHome;
+
+    // Claude projects: 空でも「読める」なら ✅(transcript 無しは ⚠️ 止まり)。
+    const projectsDir = join(tmpHome, "claude-projects");
+    mkdirSync(projectsDir, { recursive: true });
+    process.env.CCCN_CLAUDE_PROJECTS = projectsDir;
+
+    // マーカー付き Stop hook を持つ健全な settings.json(script/node を実在パスにして ✅)。
+    const scriptDir = join(tmpHome, "ccc-notifier-dist");
+    mkdirSync(scriptDir, { recursive: true });
+    const scriptPath = join(scriptDir, "cli.js");
+    writeFileSync(scriptPath, "", "utf8");
+    const settingsPath = join(tmpHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify(
+        {
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  { type: "command", command: `"${process.execPath}" "${scriptPath}" track`, timeout: 15 },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    process.env.CCCN_CLAUDE_SETTINGS = settingsPath;
+
+    // 各 it が CCCN_CODEX_HOME を明示設定するが、設定し忘れた将来のテストが
+    // 実 ~/.codex を読まないよう既定でも存在しないパスへ隔離しておく(2026-07-10)。
+    process.env.CCCN_CODEX_HOME = join(tmpHome, "no-codex-default");
+
+    process.env.CCCN_DRY_RUN = "1";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in test")));
+  });
+
+  afterEach(() => {
+    delete process.env.CCCN_HOME;
+    delete process.env.CCCN_CLAUDE_PROJECTS;
+    delete process.env.CCCN_CLAUDE_SETTINGS;
+    delete process.env.CCCN_CODEX_HOME;
+    delete process.env.CCCN_DRY_RUN;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("Codex 未検出なら info 1行を出し、❌ 無しで 0 を返す", async () => {
+    process.env.CCCN_CODEX_HOME = join(tmpHome, "no-such-codex"); // 実在しない → 未検出
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(0);
+    expect(output).toContain("Codex CLI は未検出です");
+    expect((output.match(/❌/g) ?? []).length).toBe(0);
+  });
+
+  it("Codex 検出+hook 登録済みなら ok 行(コマンド全文)と承認注意を出し、❌ 無しで 0 を返す", async () => {
+    const codexHome = join(tmpHome, "codex-home");
+    mkdirSync(codexHome, { recursive: true });
+    // マーカー(ccc-notifier)を含む Stop エントリを持つ hooks.json。
+    writeFileSync(
+      join(codexHome, "hooks.json"),
+      JSON.stringify(
+        {
+          hooks: {
+            Stop: [{ hooks: [{ type: "command", command: '"node" "/x/ccc-notifier/cli.js" track --codex' }] }],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    process.env.CCCN_CODEX_HOME = codexHome;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(0);
+    expect(output).toContain("Codex の Stop hook が登録されています");
+    expect(output).toContain("track --codex"); // コマンド全文を表示
+    expect(output).toContain("承認"); // 承認済みか確認する注意書き
+    expect((output.match(/❌/g) ?? []).length).toBe(0);
+  });
+
+  it("Codex 検出+hook 未登録なら warn 行を出すが ❌ にはせず 0 を返す", async () => {
+    const codexHome = join(tmpHome, "codex-home");
+    mkdirSync(codexHome, { recursive: true }); // hooks.json は作らない(= 未登録)
+    process.env.CCCN_CODEX_HOME = codexHome;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+
+    expect(code).toBe(0);
+    expect(output).toContain("Codex を検出しましたが hook が未登録です");
+    expect((output.match(/❌/g) ?? []).length).toBe(0);
   });
 });

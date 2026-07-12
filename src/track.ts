@@ -10,6 +10,7 @@
 //     track 側で無限待ちの await を追加しない。
 
 import { join } from "node:path";
+import { aggregateCodexTurn } from "./codex/transcript";
 import { writeDashboardHtml } from "./dashboard";
 import { getUsdJpy } from "./fx";
 import { notifyOS } from "./notify/os";
@@ -29,7 +30,7 @@ import {
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
-import type { StopHookInput, TokenBuckets, TurnRecord, UsageByModel } from "./types";
+import type { StopHookInput, TokenBuckets, TurnAggregate, TurnRecord, UsageByModel } from "./types";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -64,7 +65,20 @@ function collectModels(main: UsageByModel, sidechain: UsageByModel): string[] {
   return models;
 }
 
-export async function runTrack(stdinText: string): Promise<void> {
+/**
+ * Codex 経路のモデル決定(contracts.md 準拠)。hook payload の model(非空 string)を優先し、
+ * agg.main のキー(rollout 由来。判別不能なら "unknown")を payload.model に組み替える。
+ * バケットはそのまま。payload.model が無ければ agg のキーを保持する
+ * (aggregateCodexTurn の main はキーがちょうど1つ)。
+ */
+function withCodexModel(agg: TurnAggregate, payloadModel: unknown): TurnAggregate {
+  const model = typeof payloadModel === "string" && payloadModel.length > 0 ? payloadModel : null;
+  if (model === null) return agg; // payload.model 無し → agg のキー("unknown" 含む)をそのまま使う
+  const buckets = Object.values(agg.main)[0] ?? emptyBuckets();
+  return { ...agg, main: { [model]: buckets } };
+}
+
+export async function runTrack(stdinText: string, opts?: { codex?: boolean }): Promise<void> {
   try {
     // 1. stdin(StopHookInput)を厳格にパースする。
     //    パース失敗 / オブジェクトでない / transcript_path が文字列でない → 静かに return。
@@ -83,19 +97,30 @@ export async function runTrack(stdinText: string): Promise<void> {
     const cfg = readConfig();
     const cursor = sanitizeCursor(loadCursor(transcriptPath));
 
-    // 3. 新規ターンの集計。新規 assistant usage が無ければ何もせず終了する
+    // 3. 新規ターンの集計。新規 usage が無ければ何もせず終了する
     //    (カーソルも保存しない: 次回まとめて処理される設計)。
-    const agg = await aggregateNewTurn(transcriptPath, cursor);
+    //    Codex 経路(opts.codex)は rollout(累積カウンタの逐次差分)を集計する。
+    const isCodex = opts?.codex === true;
+    let agg = isCodex
+      ? await aggregateCodexTurn(transcriptPath, cursor)
+      : await aggregateNewTurn(transcriptPath, cursor);
     if (agg === null) return;
 
-    // 3b. サブエージェント usage の増分集計(旧形式環境や失敗時は SA なしで続行)。
+    // 3a. Codex はモデルを hook payload 優先で決める(rollout 由来のキーを payload.model に組み替える)。
+    if (isCodex) {
+      agg = withCodexModel(agg, input.model);
+    }
+
+    // 3b. サブエージェント usage の増分集計(Claude 経路のみ。Codex に SA 概念は無いので収集しない)。
     //     collectSubagentUsage 自体は defensive だが、二重に try/catch で境界を作る。
     let sa: SubagentUsage | null = null;
-    try {
-      sa = await collectSubagentUsage(transcriptPath);
-    } catch (err) {
-      logError("track:subagents", err);
-      sa = null;
+    if (!isCodex) {
+      try {
+        sa = await collectSubagentUsage(transcriptPath);
+      } catch (err) {
+        logError("track:subagents", err);
+        sa = null;
+      }
     }
 
     // 4. 単価(track 経路はネットに出ないため offline)+ コスト算出。
@@ -129,6 +154,10 @@ export async function runTrack(stdinText: string): Promise<void> {
       fxSource: fx.source,
       prompt: agg.prompt ?? "",
     };
+    // Codex 由来の記録には source を付ける(ダッシュボード/レポートのソース識別用。Claude は付けない)。
+    if (isCodex) {
+      record.source = "codex";
+    }
     if (breakdown.unknownModels.length > 0) {
       record.unknownModels = breakdown.unknownModels;
     }

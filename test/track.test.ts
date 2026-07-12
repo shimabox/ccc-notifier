@@ -23,6 +23,9 @@ import type { TurnRecord } from "../src/types";
 const FIXTURE_TRANSCRIPT = fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url));
 const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
 const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
+// Codex(rollout jsonl + Stop hook stdin)。実行のたびに一時 dir へコピーして使う。
+const FIXTURE_CODEX_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
+const FIXTURE_CODEX_PAYLOAD = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
 
 let tmpHome: string;
 let transcriptPath: string;
@@ -92,6 +95,21 @@ function placeSubagent(name = "agent-x.jsonl"): string {
   const p = join(dir, name);
   copyFileSync(FIXTURE_SUBAGENT, p);
   return p;
+}
+
+/** rollout フィクスチャを一時 dir にコピーし、その絶対パス(cursors.json のキーにもなる)を返す。 */
+function placeCodexRollout(name = "rollout-basic.jsonl"): string {
+  const p = join(tmpHome, name);
+  copyFileSync(FIXTURE_CODEX_ROLLOUT, p);
+  return p;
+}
+
+/** stop-payload.json を読み、transcript_path を実パスに差し替えた(必要なら model も上書きした)stdin を返す。 */
+function codexStdinFor(rolloutPath: string, overrides?: { model?: string }): string {
+  const payload = JSON.parse(readFileSync(FIXTURE_CODEX_PAYLOAD, "utf8")) as Record<string, unknown>;
+  payload.transcript_path = rolloutPath;
+  if (overrides?.model !== undefined) payload.model = overrides.model;
+  return JSON.stringify(payload);
 }
 
 // ---- suite ----------------------------------------------------------------
@@ -518,5 +536,105 @@ describe("runTrack — subagents", () => {
     expect(rows[0].subagents!.costUSD).toBeCloseTo(0.033, 10);
     // が、通知はメイン(0.267 < 0.28)基準でスキップされる(総額 0.300 > 0.28 でも出ない)。
     expect(existsSync(lastNotifyFile())).toBe(false);
+  });
+});
+
+// ============ Codex 経路(track --codex)============
+// rollout jsonl を aggregateCodexTurn で集計し、source: 'codex' で記録する。SA は収集しない。
+// 価格・fx・通知・再生成は Claude 経路と同じ共通コードを通す。GOLDEN は fixtures/codex/README.md。
+
+describe("runTrack — codex", () => {
+  // 1. 正常系: GOLDEN 値どおりに1行記録する(source/model/コスト/プロンプト、SA なし)。
+  it("1. records one golden codex turn (source, model, cost, prompt) with no subagents", async () => {
+    const rollout = placeCodexRollout();
+
+    await runTrack(codexStdinFor(rollout), { codex: true });
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    const rec = rows[0];
+
+    expect(rec.source).toBe("codex");
+    expect(rec.models).toEqual(["gpt-5.5"]);
+    // builtin gpt-5.5(input $5/M, output $30/M, cacheRead $0.5/M)・fx はフォールバック(fixed 150)。
+    expect(rec.costUSD).toBeCloseTo(0.064106, 6);
+    expect(rec.prompt).toBe("1+1は？");
+    expect(rec.subagents).toBeUndefined();
+    expect(rec.gitBranch).toBeNull();
+    expect(rec.project).toBe("/home/user/proj-a");
+    expect(rec.apiCalls).toBe(1);
+    expect(rec.fxSource).toBe("fixed");
+    expect(rec.fxRate).toBe(150);
+    expect(rec.tokens).toEqual({
+      input: 12280,
+      output: 7,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 4992,
+    });
+  });
+
+  // 2. カーソル: rollout パスに codexTotals(最後に観測した total_token_usage)が保存される。
+  it("2. saves the rollout cursor with codexTotals", async () => {
+    const rollout = placeCodexRollout();
+
+    await runTrack(codexStdinFor(rollout), { codex: true });
+
+    const cursors = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8"));
+    expect(cursors[rollout]).toBeDefined();
+    expect(cursors[rollout].codexTotals).toEqual({ input: 17272, cached: 4992, output: 7 });
+  });
+
+  // 3. 冪等性: 同一入力の2回目は新規 usage が無く、history も通知も増えない。
+  it("3. is idempotent: a second run with no new usage adds no row and no notification", async () => {
+    const rollout = placeCodexRollout();
+    const stdin = codexStdinFor(rollout);
+
+    await runTrack(stdin, { codex: true });
+    expect(readHistory()).toHaveLength(1);
+    const notifyAfterFirst = readFileSync(lastNotifyFile(), "utf8");
+
+    await runTrack(stdin, { codex: true });
+
+    expect(readHistory()).toHaveLength(1);
+    // 2回目は新規ターンが無く通知が発火しないため、last-notify.json は byte 単位で不変。
+    expect(readFileSync(lastNotifyFile(), "utf8")).toBe(notifyAfterFirst);
+  });
+
+  // 4. モデル優先: payload.model が rollout の turn_context.model と異なるとき payload を採用する。
+  it("4. prefers the hook payload model over the rollout turn_context model", async () => {
+    const rollout = placeCodexRollout();
+
+    await runTrack(codexStdinFor(rollout, { model: "gpt-5.5-codex" }), { codex: true });
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    // rollout 由来は "gpt-5.5" だが、payload の "gpt-5.5-codex" が優先される。
+    expect(rows[0].models).toEqual(["gpt-5.5-codex"]);
+    expect(rows[0].source).toBe("codex");
+  });
+
+  // 5. 通知経路: CCCN_DRY_RUN で last-notify.json に通知ペイロードが書かれる(共通の通知経路が動く)。
+  it("5. writes a notification payload to last-notify.json (CCCN_DRY_RUN)", async () => {
+    const rollout = placeCodexRollout();
+
+    await runTrack(codexStdinFor(rollout), { codex: true });
+
+    expect(existsSync(lastNotifyFile())).toBe(true);
+    const notify = JSON.parse(readFileSync(lastNotifyFile(), "utf8"));
+    expect(notify.os).toBeDefined();
+    expect(typeof notify.os.title).toBe("string");
+    expect(notify.os.title).toContain("$");
+  });
+
+  // 6. 互換性: opts を省略した既存 Claude 経路は無変更(source なし・GOLDEN どおり)。
+  it("6. leaves the existing Claude path unchanged when opts is omitted", async () => {
+    await runTrack(stdinFor(transcriptPath));
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source).toBeUndefined();
+    expect(rows[0].costUSD).toBeCloseTo(0.267, 10);
+    expect(rows[0].models).toEqual(["claude-fable-5", "claude-haiku-4-5"]);
   });
 });

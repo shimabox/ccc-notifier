@@ -490,3 +490,120 @@ describe("browserOpenPlan", () => {
     expect(browserOpenPlan("linux", true, P, null)).toEqual({ cmd: "xdg-open", args: [P] });
   });
 });
+
+// ============ Codex ソースフィルタ(T7) ============
+// Codex 由来レコード(source:'codex')の埋め込み・ソースチップ UI・月予算注記・クライアント JS の
+// フィルタ/バッジ描画・XSS 不変条件を、サーバ生成 HTML の構造検査で担保する。挙動(クリック等)は
+// 既存流儀どおりブラウザ結合で別途確認。
+
+/** codex 由来ターンを1件作る(source:'codex' 以外は makeTurn 既定 + overrides)。 */
+function makeCodexTurn(overrides: Partial<TurnRecord> = {}): TurnRecord {
+  return makeTurn({ source: "codex", models: ["gpt-5.1-codex"], ...overrides });
+}
+
+describe("runDashboard — Codex ソースフィルタ", () => {
+  it("codex レコードは embed に sc:'codex' を持ち、Claude レコードには sc キーが無い", async () => {
+    appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.1, costJPY: 15, prompt: "claude turn" }));
+    appendTurn(makeCodexTurn({ costUSD: 0.2, costJPY: 30, prompt: "codex turn" }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    // 生の埋め込み JSON に sc:"codex" が含まれる。
+    expect(extractDataRaw(html)).toContain('"sc":"codex"');
+    const turns = parseData(html).turns as unknown as Array<{ pr: string; sc?: string }>;
+    const codex = turns.find((t) => t.pr === "codex turn");
+    const claude = turns.find((t) => t.pr === "claude turn");
+    expect(codex).toBeDefined();
+    expect(claude).toBeDefined();
+    expect(codex!.sc).toBe("codex");
+    expect(claude!.sc).toBeUndefined(); // Claude 行に sc キーは無い(容量節約)
+  });
+
+  it("codex ありのとき ソースチップ(全体/Claude/Codex)を粒度トグルの隣に出す", async () => {
+    appendTurn(makeCodexTurn({ costUSD: 0.2, costJPY: 30 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain('id="cccn-src-toggle"');
+    expect(html).toContain('data-src="all"');
+    expect(html).toContain('data-src="claude"');
+    expect(html).toContain('data-src="codex"');
+    // チップのラベルはサーバ markup 内(ボタン直下テキスト)。
+    expect(html).toContain('data-src="all">全体<');
+    expect(html).toContain('data-src="claude">Claude<');
+    expect(html).toContain('data-src="codex">Codex<');
+  });
+
+  it("codex ゼロのとき ソースチップは一切出ない(既存 UI を変えない)", async () => {
+    appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.1, costJPY: 15 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    // markup 側の属性/コンテナのみで判定(APP_JS の querySelector('[data-src]') は data-src=" を含まない)。
+    expect(html).not.toContain('data-src="');
+    expect(html).not.toContain('id="cccn-src-toggle"');
+  });
+
+  it("APP_JS に cccn-src の永続化・ソースフィルタ述語・Codex バッジ描画が含まれる", async () => {
+    appendTurn(makeCodexTurn({ costUSD: 0.2, costJPY: 30 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("cccn-src"); // sessionStorage キー(永続化)
+    expect(html).toContain("sc === 'codex'"); // フィルタ述語 / バッジ判定
+    expect(html).toContain("src-badge"); // Codex バッジ要素の class
+    expect(html).toContain("createTextNode"); // 動的値は textContent/createTextNode 経由
+  });
+
+  it("APP_JS にヒーロー(通算バナー)のフィルタ連動ロジック(SA 行の非表示切替含む)が含まれる", async () => {
+    appendTurn(makeCodexTurn({ costUSD: 0.2, costJPY: 30 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    // ヒーローの $・¥・ターン数をフィルタ後の全期間合計で差し替える。
+    expect(html).toContain("'.hero .hero-value'");
+    expect(html).toContain("'.hero .hero-meta'");
+    // SA 行はサーバ描画の接頭辞を再利用して数値だけ組み直し、SA 合計ゼロなら行ごと隠す。
+    expect(html).toContain("heroSaPrefix");
+    expect(html).toContain("heroSaEl.hidden = !(saUsd > 0)");
+  });
+
+  it("Codex 由来の危険プロンプトも \\u003c にエスケープされ、実行可能な形で埋め込まれない(XSS 回帰)", async () => {
+    appendTurn(makeCodexTurn({ prompt: DANGEROUS_PROMPT, costUSD: 0.2, costJPY: 30 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).not.toContain("<script>alert");
+    const raw = extractDataRaw(html);
+    expect(raw).not.toContain("</script");
+    expect(raw).toContain("\\u003cscript>alert(1)\\u003c/script>");
+    // JSON.parse 後は原文に復元される(埋め込み内は安全)。
+    const turns = parseData(html).turns as unknown as Array<{ pr: string; sc?: string }>;
+    const t = turns.find((x) => x.sc === "codex");
+    expect(t).toBeDefined();
+    expect(t!.pr).toContain("<script>alert(1)</script>");
+  });
+});
+
+describe("runDashboard — Codex と月予算カード", () => {
+  function setBudget(usd: number): void {
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ monthlyBudgetUSD: usd }), "utf8");
+  }
+
+  it("Codex ありのとき 月予算カードに『全ソース合算』注記(サーバ markup)が出る", async () => {
+    setBudget(400);
+    appendTurn(makeTurn({ costUSD: 100, costJPY: 15000 })); // Claude・今月
+    appendTurn(makeCodexTurn({ costUSD: 50, costJPY: 7500 })); // Codex・今月
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain('id="cccn-budget"');
+    // サーバ描画の注記(APP_JS 内の文字列リテラルと区別するため <p class="note"> 形で判定)。
+    expect(html).toContain('<p class="note">全ソース合算 / all sources</p>');
+    // 予算バーは全ソース合算($150 / $400 = 37.5%)。フィルタの影響を受けない。
+    expect(html).toContain("<b>$150.00</b> / $400.00");
+    expect(html).toContain("37.5% used");
+  });
+
+  it("Codex 無しなら 月予算カードに『全ソース合算』注記マークアップは出ない", async () => {
+    setBudget(400);
+    appendTurn(makeTurn({ costUSD: 100, costJPY: 15000 }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain('id="cccn-budget"');
+    expect(html).not.toContain('<p class="note">全ソース合算');
+  });
+});

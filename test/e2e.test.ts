@@ -46,6 +46,13 @@ const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", i
 const FIXTURE_SETTINGS = fileURLToPath(new URL("./fixtures/settings-existing.json", import.meta.url));
 const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
 
+// Codex CLI 対応(2026-07-10)のフィクスチャ。正解値は test/fixtures/codex/README.md 参照。
+const FIXTURE_CODEX_ROLLOUT_BASIC = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
+const FIXTURE_CODEX_ROLLOUT_MULTITURN = fileURLToPath(
+  new URL("./fixtures/codex/rollout-multiturn.jsonl", import.meta.url),
+);
+const FIXTURE_CODEX_STOP_PAYLOAD = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
+
 const FIXED_FX_RATE = 150;
 
 // 子プロセスが応答不能になった場合に無限に待ち続けないための安全弁(テスト全体の
@@ -118,6 +125,8 @@ interface Sandbox {
   transcriptPath: string; // track の stdin (transcript_path) に使う fixture のコピー
   settingsPath: string; // CCCN_CLAUDE_SETTINGS に使う fixture のコピー
   projectsDir: string; // CCCN_CLAUDE_PROJECTS。proj/session.jsonl に fixture のコピーを配置
+  codexHome: string; // CCCN_CODEX_HOME。既定は不在ディレクトリ(detectCodex()=false に隔離)。Codex
+  // シナリオのテストはここへ sessions/ や hooks.json を自分で用意してから使う。
   env: NodeJS.ProcessEnv;
 }
 
@@ -180,16 +189,23 @@ function createSandbox(): Sandbox {
   const aged = new Date(Date.now() - 10 * 60_000);
   utimesSync(sweepTarget, aged, aged);
 
+  // sweep/doctor が実 ~/.codex を読まないよう隔離(2026-07-10)。既定はディレクトリを作らない
+  // (= 不在パス)ことで detectCodex() を false に倒し、既存シナリオ(Codex ブロック非表示・sweep の
+  // Codex 走査スキップ)の挙動を一切変えない。Codex シナリオのテストは、このパス配下に
+  // sessions/ や hooks.json を自分で用意してから使う。
+  const codexHome = join(tmp, "codex-home");
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     CCCN_HOME: cccnHome,
     CCCN_DRY_RUN: "1",
     CCCN_CLAUDE_SETTINGS: settingsPath,
     CCCN_CLAUDE_PROJECTS: projectsDir,
+    CCCN_CODEX_HOME: codexHome,
     CCCN_CLI_PATH: CLI_PATH,
   };
 
-  return { tmp, cccnHome, transcriptPath, settingsPath, projectsDir, env };
+  return { tmp, cccnHome, transcriptPath, settingsPath, projectsDir, codexHome, env };
 }
 
 function cleanupSandbox(sb: Sandbox): void {
@@ -204,6 +220,17 @@ function stdinFor(transcriptPath: string): string {
   // JSON 文字列リテラルごと置換する(Windows パスの \ を JSON.stringify で正しくエスケープ。
   // 生文字列の埋め込みは不正な JSON になり、track のフェイルセーフに黙殺される)。
   return raw.replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(transcriptPath));
+}
+
+/**
+ * Codex の stop-payload.json(実機捕獲を無害化した固定値)の transcript_path を実パスへ差し替えた
+ * stdin 文字列を返す(track --codex 用)。プレースホルダではなく実パスが直接入っているため、
+ * stdinFor と違って JSON.parse → 上書き → JSON.stringify で安全に差し替える。
+ */
+function codexStdinFor(rolloutPath: string): string {
+  const payload = JSON.parse(readFileSync(FIXTURE_CODEX_STOP_PAYLOAD, "utf8")) as Record<string, unknown>;
+  payload.transcript_path = rolloutPath;
+  return JSON.stringify(payload);
 }
 
 function readHistory(cccnHome: string): TurnRecord[] {
@@ -621,5 +648,123 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(rows.every((r) => r.ingest === "sweep")).toBe(true);
     // transcript-basic を1ターンに復元(GOLDEN 0.267)。
     expect(rows[0].costUSD).toBeCloseTo(0.267, 10);
+  });
+
+  // ================================================================================
+  // Codex CLI 対応(2026-07-10)。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」。
+  // 正解値・逐次ステップ差分方式の検算は test/fixtures/codex/README.md 参照。
+  // sb.codexHome は既定で不在(隔離済み)なので、各テストが sessions/ や hooks.json を
+  // 自分で用意してから使う。
+  // ================================================================================
+
+  // ---- 12. Codex: init --codex は hooks.json に track --codex を登録し、次回 codex 起動時の
+  //          信頼承認(Trust all and continue)を案内する。doctor はそれを検出して報告する ----
+  it("12. init --yes --codex: hooks.json に track --codex を登録して Trust all and continue を案内し、doctor が検出+登録済みを報告する", async () => {
+    // Codex ホームはディレクトリだけ用意する(hooks.json はまだ無い = 新規作成パスを通す)。
+    mkdirSync(sb.codexHome, { recursive: true });
+
+    const init = await runCli(["init", "--yes", "--codex"], { env: sb.env });
+    expect(init.code).toBe(0);
+    expect(init.stdout).toContain("Codex にも Stop hook を登録しました");
+    expect(init.stdout).toContain("Trust all and continue");
+
+    const hooksPath = join(sb.codexHome, "hooks.json");
+    expect(existsSync(hooksPath)).toBe(true);
+    const hooksJson = readJson(hooksPath);
+    const codexCommand: string = hooksJson.hooks.Stop[0].hooks[0].command;
+    // buildHookCommand と同様、win32 は "\" を "/" に正規化するため比較側も正規化する。
+    expect(codexCommand).toContain(CLI_PATH.replace(/\\/g, "/"));
+    expect(codexCommand).toContain("track --codex");
+
+    // --- doctor: Codex ブロックが検出+登録済み+承認注意を報告する ---
+    const doctor = await runCli(["doctor"], { env: sb.env });
+    expect(doctor.code).toBe(0);
+    expect(doctor.stdout).not.toContain("❌");
+    expect(doctor.stdout).toContain("Codex の Stop hook が登録されています");
+    expect(doctor.stdout).toContain("承認済みか確認してください");
+  });
+
+  // ---- 13. Codex: track --codex は rollout の累積カウンタを逐次ステップ差分で集計し、
+  //          source:"codex" のレコードを記録する ----
+  it('13. track --codex: rollout-basic.jsonl を集計し、GOLDEN 値どおり source:"codex" のレコードを1件記録する', async () => {
+    // 実 Codex と同じディレクトリ構造(sessions/YYYY/MM/DD/rollout-*.jsonl)を sandbox 内に再現する。
+    const rolloutDir = join(sb.codexHome, "sessions", "2026", "07", "10");
+    mkdirSync(rolloutDir, { recursive: true });
+    const rolloutPath = join(
+      rolloutDir,
+      "rollout-2026-07-10T12-09-25-01234567-aaaa-7000-8000-000000000001.jsonl",
+    );
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_BASIC, rolloutPath);
+
+    const result = await runCli(["track", "--codex"], {
+      env: sb.env,
+      stdin: codexStdinFor(rolloutPath),
+    });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("");
+
+    const rows = readHistory(sb.cccnHome);
+    expect(rows).toHaveLength(1);
+    const rec = rows[0];
+    expect(rec.source).toBe("codex");
+    expect(rec.sessionId).toBe("01234567-aaaa-7000-8000-000000000001");
+    expect(rec.models).toEqual(["gpt-5.5"]);
+    expect(rec.costUSD).toBeCloseTo(0.064106, 10);
+    expect(rec.tokens).toEqual({
+      input: 12280,
+      output: 7,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 4992,
+    });
+    expect(rec.sidechainTokens).toBeNull();
+    expect(rec.apiCalls).toBe(1);
+    expect(rec.prompt).toBe("1+1は？"); // fixture は全角「？」(U+FF1F)
+    expect(rec.project).toBe("/home/user/proj-a");
+    expect(rec.gitBranch).toBeNull();
+
+    // 通知はメインと同じ共通経路(record.costUSD がしきい値以上なら送る)。モデル表示名が
+    // GPT-5.5(modelDisplayName)に変換されていることも合わせて確認する。
+    const notify = readJson(join(sb.cccnHome, "last-notify.json"));
+    expect(notify.os.title).toContain("GPT-5.5");
+  });
+
+  // ---- 14. Codex: sweep は rollout を task_complete 境界でターン分割して取り込む ----
+  it("14. sweep (codex): --dry-run はサマリのみで書き込みなし、本実行で3ターン取り込み、再実行では増えない", async () => {
+    const rolloutDir = join(sb.codexHome, "sessions", "2026", "07", "10");
+    mkdirSync(rolloutDir, { recursive: true });
+    const rolloutPath = join(
+      rolloutDir,
+      "rollout-2026-07-10T13-00-00-01234567-aaaa-7000-8000-000000000002.jsonl",
+    );
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_MULTITURN, rolloutPath);
+    // 進行中セッション保護(mtime 5分)を避けるため、Claude 側の sweepTarget と同じく完了済みを模して古くする。
+    const agedRollout = new Date(Date.now() - 10 * 60_000);
+    utimesSync(rolloutPath, agedRollout, agedRollout);
+
+    const dry = await runCli(["sweep", "--dry-run"], { env: sb.env });
+    expect(dry.code).toBe(0);
+    expect(dry.stdout).toContain("dry-run: 書き込みは行っていません");
+    expect(dry.stdout).toContain("Codex: 3 ターン");
+    // dry-run では history を書かない。
+    expect(readHistory(sb.cccnHome)).toHaveLength(0);
+
+    const real = await runCli(["sweep"], { env: sb.env });
+    expect(real.code).toBe(0);
+    expect(real.stdout).toContain("Codex: 3 ターン");
+
+    const rows = readHistory(sb.cccnHome);
+    const codexRows = rows.filter((r) => r.source === "codex");
+    expect(codexRows).toHaveLength(3);
+    expect(codexRows.every((r) => r.ingest === "sweep")).toBe(true);
+    expect(codexRows.map((r) => r.prompt).sort()).toEqual(["ターン1です", "ターン2です", "ターン3です"]);
+    // GOLDEN(test/fixtures/codex/README.md): t1=0.0047 + t2=0.0123 + t3=0.0010125。
+    const codexTotal = codexRows.reduce((sum, r) => sum + r.costUSD, 0);
+    expect(codexTotal).toBeCloseTo(0.0180125, 8);
+
+    // 再実行してもカーソル(codexTotals の差分方式)で去重され、Codex 分は増えない。
+    const rerun = await runCli(["sweep"], { env: sb.env });
+    expect(rerun.code).toBe(0);
+    expect(readHistory(sb.cccnHome).filter((r) => r.source === "codex")).toHaveLength(3);
   });
 });

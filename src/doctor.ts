@@ -17,6 +17,8 @@ import { notifyOS, selectNotifyBackend } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
+import { codexHome, detectCodex } from "./codex/env";
+import { codexHooksFile } from "./codex/setup";
 import { isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TurnRecord } from "./types";
@@ -165,6 +167,64 @@ async function checkHookRegistration(): Promise<boolean> {
         `hook の Node 実行パスが見つかりません(mise 等での更新が原因の可能性)。init を再実行してください: ${first}`,
       );
     }
+  }
+
+  return true;
+}
+
+// ---- 1b. Codex CLI の hook 登録確認(検出時のみ) ----
+// hook 登録セクションの直後・通知チェック(通知なしモードの早期 return を含む)より前に置く。
+// Codex 未検出・未登録は「未使用なら問題ない」ため ❌ にはせず、exit code の意味論を変えない。
+async function checkCodex(): Promise<boolean> {
+  // Codex 未検出: 未使用なら問題ないので info 1行に留める。
+  if (!detectCodex()) {
+    log("ok", "Codex CLI は未検出です(未使用なら問題ありません)");
+    return true;
+  }
+
+  // hooks.json にマーカー一致の Stop エントリがあるか(あればコマンド全文を表示する)。
+  // 破損 JSON は「未登録」相当に倒す(doctor は読み取り専用。修復は init/uninstall 側に委ねる)。
+  const hooksFile = codexHooksFile();
+  const matchedCommands: string[] = [];
+  if (existsSync(hooksFile)) {
+    try {
+      const raw = await readFile(hooksFile, "utf8");
+      const parsed: unknown = JSON.parse(raw);
+      if (isRecord(parsed)) {
+        const hooks = parsed.hooks;
+        const stopEntries = isRecord(hooks) ? hooks.Stop : undefined;
+        if (Array.isArray(stopEntries)) {
+          for (const entry of stopEntries) {
+            if (!isRecord(entry)) continue;
+            const innerHooks = entry.hooks;
+            if (!Array.isArray(innerHooks)) continue;
+            for (const h of innerHooks) {
+              if (isRecord(h) && typeof h.command === "string" && matchesMarker(h.command)) {
+                matchedCommands.push(h.command);
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // 壊れた hooks.json は未登録扱い(setup.ts が manual 案内で手動追記を促す)。
+    }
+  }
+
+  if (matchedCommands.length > 0) {
+    log("ok", `Codex の Stop hook が登録されています: ${matchedCommands.join(" / ")}`);
+    // 登録済みでも codex 側で信頼承認していないと発火しないため、確認を促す(info)。
+    log("ok", "codex 側で hook を承認済みか確認してください(未承認だと通知されません)");
+  } else {
+    log("warn", "Codex を検出しましたが hook が未登録です。init --codex で登録できます");
+  }
+
+  // sessions/ の存在。無くても「まだセッションが無いだけ」の可能性があるため ❌ にはしない。
+  const sessionsDir = join(codexHome(), "sessions");
+  if (existsSync(sessionsDir)) {
+    log("ok", `Codex のセッションディレクトリを確認しました: ${sessionsDir}`);
+  } else {
+    log("ok", `Codex のセッションディレクトリはまだありません: ${sessionsDir}(セッション未作成の可能性があります)`);
   }
 
   return true;
@@ -405,6 +465,8 @@ export async function runDoctor(): Promise<number> {
   const results: boolean[] = [];
 
   results.push(await safeRun("settings.json", () => checkHookRegistration()));
+  // hook 登録セクションの直後・通知チェックより前に Codex ブロックを置く。
+  results.push(await safeRun("codex", () => checkCodex()));
 
   let latestTranscript: string | null = null;
   results.push(

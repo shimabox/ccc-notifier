@@ -238,7 +238,7 @@ export function loadCursor(transcriptPath: string): Cursor | null {
  */
 export function sanitizeCursor(raw: unknown): Cursor | null {
   if (!isPlainObject(raw)) return null;
-  const { offset, lastUuid, lastTs, seenMessageKeys } = raw;
+  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals } = raw;
   if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
   if (lastUuid !== null && typeof lastUuid !== "string") return null;
   if (lastTs !== null && typeof lastTs !== "string") return null;
@@ -248,7 +248,24 @@ export function sanitizeCursor(raw: unknown): Cursor | null {
     if (typeof key !== "string") return null;
     keys.push(key);
   }
-  return { offset, lastUuid, lastTs, seenMessageKeys: keys };
+
+  const cursor: Cursor = { offset, lastUuid, lastTs, seenMessageKeys: keys };
+
+  // codexTotals は input/cached/output の3キーすべてが有限な非負 number のときのみ採用する。
+  // 不正(欠損・型不一致・負数・非有限)ならフィールドごと undefined に落とす — cursor 全体は
+  // 無効にしない(Claude 側カーソルには常にこのキーが存在しないため)。
+  if (isPlainObject(codexTotals)) {
+    const { input, cached, output } = codexTotals;
+    if (
+      typeof input === "number" && Number.isFinite(input) && input >= 0 &&
+      typeof cached === "number" && Number.isFinite(cached) && cached >= 0 &&
+      typeof output === "number" && Number.isFinite(output) && output >= 0
+    ) {
+      cursor.codexTotals = { input, cached, output };
+    }
+  }
+
+  return cursor;
 }
 
 /**
