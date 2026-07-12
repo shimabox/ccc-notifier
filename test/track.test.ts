@@ -84,6 +84,25 @@ function readHistory(): TurnRecord[] {
     .map((line) => JSON.parse(line) as TurnRecord);
 }
 
+function makeHistoryTurn(ts: string, prompt: string): TurnRecord {
+  return {
+    schemaVersion: 1,
+    ts,
+    sessionId: "seed-session",
+    project: "/tmp/seed-project",
+    gitBranch: "main",
+    models: ["claude-fable-5"],
+    tokens: { input: 10, output: 20, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+    sidechainTokens: null,
+    apiCalls: 1,
+    costUSD: 0.01,
+    costJPY: 1.5,
+    fxRate: 150,
+    fxSource: "fixed",
+    prompt,
+  };
+}
+
 /** transcriptPath の兄弟 subagents ディレクトリに SA フィクスチャを配置し、その絶対パスを返す。 */
 function subagentsDir(): string {
   // transcriptPath = <tmpHome>/transcript.jsonl → SA dir = <tmpHome>/transcript/subagents
@@ -292,6 +311,41 @@ describe("runTrack", () => {
     // 既定 autoReloadSec=30 の meta refresh が入っている(開きっぱなしのタブが最新化される)。
     expect(html).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
   });
+
+  it("8b. limits automatic report regeneration to the default 30 days", async () => {
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 40 * 86_400_000).toISOString(), "auto-old-turn"));
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 20 * 86_400_000).toISOString(), "auto-recent-turn"));
+
+    await runTrack(stdinFor(transcriptPath));
+
+    const html = readFileSync(join(tmpHome, "report.html"), "utf8");
+    expect(html).not.toContain("auto-old-turn");
+    expect(html).toContain("auto-recent-turn");
+  });
+
+  it("8c. uses dashboard.days for automatic report regeneration", async () => {
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ dashboard: { days: 2 } }), "utf8");
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 3 * 86_400_000).toISOString(), "configured-old-turn"));
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 1 * 86_400_000).toISOString(), "configured-recent-turn"));
+
+    await runTrack(stdinFor(transcriptPath));
+
+    const html = readFileSync(join(tmpHome, "report.html"), "utf8");
+    expect(html).not.toContain("configured-old-turn");
+    expect(html).toContain("configured-recent-turn");
+  });
+
+  it.each([0, -1, 1.5, "7", null])(
+    "8d. falls back to 30 days when dashboard.days is invalid (%j)",
+    async (days) => {
+      writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ dashboard: { days } }), "utf8");
+      const spy = vi.spyOn(dashboard, "writeDashboardHtml").mockImplementation(() => {});
+
+      await runTrack(stdinFor(transcriptPath));
+
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ days: 30 }));
+    },
+  );
 
   // 9. autoRegenerate=false なら report.html は生成されない(history は記録される)。
   it("9. does not regenerate report.html when dashboard.autoRegenerate is false", async () => {

@@ -106,7 +106,12 @@ function mergeConfig(partial: unknown): Config {
       result.dashboard.autoReloadSec = partial.dashboard.autoReloadSec as number;
     }
     if ("days" in partial.dashboard) {
-      result.dashboard.days = partial.dashboard.days as number;
+      // 自動生成の履歴読み込みに使うため、正の有限整数だけを採用する。
+      // 異常値は DEFAULT_CONFIG の 30 日に倒し、全履歴の意図しない読み込みを防ぐ。
+      const days = partial.dashboard.days;
+      if (typeof days === "number" && Number.isFinite(days) && Number.isInteger(days) && days > 0) {
+        result.dashboard.days = days;
+      }
     }
   }
   return result;

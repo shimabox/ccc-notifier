@@ -13,9 +13,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { browserOpenPlan, runDashboard } from "../src/dashboard";
+import { browserOpenPlan, runDashboard, writeDashboardHtml } from "../src/dashboard";
 import { formatUSD } from "../src/format";
 import { appendTurn } from "../src/store";
+import * as store from "../src/store";
 import type { TurnRecord } from "../src/types";
 
 const DAY = 86_400_000;
@@ -31,6 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
   if (prevHome === undefined) delete process.env.CCCN_HOME;
@@ -126,6 +128,8 @@ interface Embed {
   generatedAt: string;
   slots: { slot: string; name: string }[];
   turns: EmbedTurn[];
+  budgetMonth?: { usd: number; jpy: number; turns: number };
+  budgetFixed?: boolean;
 }
 
 function parseData(html: string): Embed {
@@ -159,6 +163,16 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(Array.isArray(data.turns)).toBe(true);
     expect(data.turns.length).toBe(10); // 既定=全履歴(旧 --days 30 の制限は撤廃)
     expect(sumTotals(data.turns)).toBeCloseTo(seededTotal, 6);
+  });
+
+  it("手動 dashboard の既定は30日より古い履歴も含む", async () => {
+    appendTurn(makeTurn({ ts: new Date(Date.now() - 90 * DAY).toISOString(), prompt: "manual-old-turn" }));
+    appendTurn(makeTurn({ ts: new Date(Date.now() - HOUR).toISOString(), prompt: "manual-recent-turn" }));
+
+    await run(["--no-open"]);
+
+    const prompts = parseData(readHtml()).turns.map((turn) => turn.pr);
+    expect(prompts).toEqual(expect.arrayContaining(["manual-old-turn", "manual-recent-turn"]));
   });
 
   it("外部参照ゼロ(http(s) の src/href や @import が無い)", async () => {
@@ -260,6 +274,34 @@ describe("runDashboard — フラグ", () => {
     // 埋め込まれた全ターンが直近24時間以内。
     const cutoff = Date.now() - DAY;
     expect(data.turns.every((t) => t.t >= cutoff)).toBe(true);
+    expect(readHtml()).toContain("対象期間合計 / Embedded period total");
+    expect(readHtml()).toContain("埋め込み対象期間");
+  });
+
+  it("期間限定版でも slot 配色は埋め込み対象外を含む全履歴基準で決める", async () => {
+    appendTurn(
+      makeTurn({
+        ts: new Date(Date.now() - 40 * DAY).toISOString(),
+        models: ["claude-fable-5"],
+        costUSD: 10,
+        prompt: "outside-window-dominant-model",
+      }),
+    );
+    appendTurn(
+      makeTurn({
+        ts: new Date(Date.now() - HOUR).toISOString(),
+        models: ["claude-haiku-4-5"],
+        costUSD: 0.1,
+        prompt: "inside-window-model",
+      }),
+    );
+
+    await run(["--no-open", "--days", "30"]);
+
+    const data = parseData(readHtml());
+    expect(data.turns.map((turn) => turn.pr)).toEqual(["inside-window-model"]);
+    expect(data.slots.map((slot) => slot.name)).toEqual(["Fable 5", "Haiku 4.5"]);
+    expect(data.turns[0].bs).toEqual({ "2": 0.1 });
   });
 
   it("--days に不正値を渡すと全履歴になる(制限しない)", async () => {
@@ -304,6 +346,18 @@ describe("runDashboard — 空状態", () => {
     expect(html).toContain("まだ履歴がありません");
     expect(parseData(html).turns).toEqual([]);
     expect(html).not.toMatch(/src\s*=\s*["']?\s*https?:/i);
+  });
+
+  it("全履歴はあるが対象期間が0件なら対象期間用の空状態を表示する", async () => {
+    appendTurn(makeTurn({ ts: new Date(Date.now() - 40 * DAY).toISOString() }));
+
+    const code = await run(["--no-open", "--days", "30"]);
+
+    expect(code).toBe(0);
+    const html = readHtml();
+    expect(html).toContain("対象期間に履歴がありません");
+    expect(html).not.toContain("まだ履歴がありません");
+    expect(parseData(html).turns).toEqual([]);
   });
 });
 
@@ -435,6 +489,43 @@ describe("runDashboard — 月予算カード", () => {
     expect(html).toContain("<b>$124.00</b> / $400.00");
     expect(html).toContain("31.0% used");
     expect(html).toContain('budget-fill lvl-ok" style="width:31.0%');
+    expect(parseData(html).budgetFixed).toBe(false);
+  });
+
+  it("期間限定版は履歴を1回だけ読み、埋め込み対象外の当月分も予算に含める", () => {
+    vi.useFakeTimers();
+    const now = new Date(2026, 6, 31, 12, 0, 0, 0);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    expect(now.getTime() - monthStart.getTime()).toBeGreaterThan(30 * DAY);
+    vi.setSystemTime(now);
+    setBudget(1);
+    appendTurn(
+      makeTurn({
+        ts: monthStart.toISOString(),
+        prompt: "month-start-outside-window",
+        costUSD: 0.2,
+        costJPY: 30,
+      }),
+    );
+    const readSpy = vi.spyOn(store, "readTurns");
+
+    writeDashboardHtml({ days: 30, outPath: join(tmpHome, "report.html"), autoReloadSec: 30 });
+
+    const html = readHtml();
+    const data = parseData(html);
+    expect(readSpy).toHaveBeenCalledTimes(1);
+    expect(readSpy).toHaveBeenCalledWith();
+    expect(data.turns).toEqual([]);
+    expect(data.budgetFixed).toBe(true);
+    expect(data.budgetMonth).toEqual({ usd: 0.2, jpy: 30, turns: 1 });
+    expect(html).toContain("今月・全履歴から正確に集計");
+  });
+
+  it("保存済みの選択期間が埋め込み対象に無ければ対象期間合計へ戻す", async () => {
+    appendTurn(makeTurn());
+    await run(["--no-open", "--days", "30"]);
+
+    expect(readHtml()).toContain("if(!initialSelPresent) setSel(null);");
   });
 
   it("70%以上100%未満は warn(黄)", async () => {

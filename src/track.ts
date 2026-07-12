@@ -203,7 +203,10 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //      ミュート中(ccc-notifier mute)でないときのみ。両チャネル無効(通知なしモード)では
     //      todayTotalUSD の履歴走査ごとスキップする。ミュートは通知だけを抑止し、記録・再生成には
     //      影響しない。todayUSD は append 後に集計するため当該ターンを含む。どちらも throw しない契約。
-    //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。履歴が更新された以上、
+    //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。埋め込み対象は
+    //      cfg.dashboard.days(既定30日)に制限し、HTML 構築・書き込み・ブラウザ描画の負荷を抑える。
+    //      履歴の read/parse は当月予算の正確性を保つため全履歴が対象(O(全履歴))。
+    //      履歴が更新された以上、
     //      通知の有無(しきい値)とは独立に実行する。失敗は logError に留め、通知を止めない。
     const tasks: Promise<unknown>[] = [];
 
@@ -220,7 +223,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         (async () => {
           try {
             writeDashboardHtml({
-              days: null, // 全履歴を埋め込む(粒度切替・過去・通算をブラウザ側で扱うため)
+              days: cfg.dashboard.days,
               outPath: join(paths().home, "report.html"),
               autoReloadSec: cfg.dashboard.autoReloadSec,
             });

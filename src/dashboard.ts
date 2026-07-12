@@ -1,9 +1,10 @@
 // src/dashboard.ts — `ccc-notifier dashboard` の実体。
 //
-// 全履歴を集計し、外部リクエスト 0 の完全自己完結な HTML ダッシュボードを 1 ファイル生成して
+// 履歴を集計し、外部リクエスト 0 の完全自己完結な HTML ダッシュボードを 1 ファイル生成して
 // (既定で)ブラウザで開く。日別コストは 日 / 週 / 月 の粒度をブラウザ側で切り替えられ、横スクロールで
 // 過去まで遡れる。棒をクリックするとその期間が選択され、モデル別内訳・プロジェクト別・ターン履歴が
-// 連動する(「通算」で全期間)。集計・描画はブラウザ側(埋め込み JSON + バニラ JS)で行い、生成物は
+// 連動する(全履歴版は「通算」、期間限定版は「対象期間合計」で埋め込み全期間へ戻る)。集計・描画は
+// ブラウザ側(埋め込み JSON + バニラ JS)で行い、生成物は
 // CSS/JS/SVG をすべてインライン化した完全オフライン・外部通信ゼロのファイルにする。
 //
 // デザインは dataviz スキルの原則に準拠(固定スロット順の配色・2px サーフェスギャップ・常設凡例・
@@ -164,6 +165,15 @@ function turnTotalJPY(rec: TurnRecord): number {
 function truncatePrompt(raw: string): { text: string; truncated: boolean } {
   if (raw.length <= PROMPT_MAX) return { text: raw, truncated: false };
   return { text: raw.slice(0, PROMPT_MAX) + PROMPT_TRUNC_MARK, truncated: true };
+}
+
+/** 既に読み込んだ履歴配列を直近 N×24時間に絞る。履歴ファイルは再読み込みしない。 */
+function filterTurnsByDays(turns: TurnRecord[], days: number): TurnRecord[] {
+  const cutoff = Date.now() - days * 86_400_000;
+  return turns.filter((rec) => {
+    const ts = Date.parse(rec.ts);
+    return Number.isFinite(ts) && ts >= cutoff;
+  });
 }
 
 // ============ モデル→スロット割当(全履歴基準・配色の安定化) ============
@@ -524,7 +534,7 @@ const APP_JS = `<script>
     return p[1] + '/' + p[2] + (gran === 'week' ? '週' : '');
   }
   function periodText(key, gran){
-    if(key === null) return '通算 / All time';
+    if(key === null) return data.allPeriodLabel || '通算 / All time';
     if(gran === 'month') return key + ' (月)';
     if(gran === 'week') return key + ' の週';
     return key;
@@ -549,6 +559,12 @@ const APP_JS = `<script>
   var SEL = (storedSel === null) ? defaultSel(GRAN) : (storedSel === '__all__' ? null : storedSel);
   function setGran(g){ GRAN = g; ssSet('cccn-gran', g); }
   function setSel(v){ SEL = v; ssSet('cccn-sel', v === null ? '__all__' : v); }
+  // 自動再生成で埋め込み範囲が縮んだ後も、古い選択キーで空表示にしない。
+  if(SEL !== null){
+    var initialBuckets = buildBuckets(GRAN), initialSelPresent = false;
+    for(var ib=0;ib<initialBuckets.length;ib++){ if(initialBuckets[ib].key === SEL){ initialSelPresent = true; break; } }
+    if(!initialSelPresent) setSel(null);
+  }
   // ソース切替。フィルタ後に選択中バケットが消えたら通算へ倒す(空表示の誤解防止・gran トグルと同じ流儀)。
   function setSrc(s){
     SRC = s; ssSet('cccn-src', s);
@@ -828,10 +844,12 @@ const APP_JS = `<script>
     projEl.appendChild(table);
   }
 
-  // ---- 月予算(選択中の月に連動)----
+  // ---- 月予算(全履歴版は選択月に連動、期間限定版は当月に固定)----
   var budgetEl = document.getElementById('cccn-budget');
   var BUDGET = +data.budget || 0;
   var BUDGET_RATE = +data.budgetRate || 0;
+  var BUDGET_FIXED = data.budgetFixed === true;
+  var BUDGET_MONTH = data.budgetMonth || null;
   function monthKeyOf(t){ var d = new Date(t); if(isNaN(d.getTime())) return null; return d.getFullYear() + '-' + pad(d.getMonth()+1); }
   // 予算は「月」単位。選択中バケットが属する暦月を対象にする(通算のときは今月)。
   function targetMonthKey(){
@@ -841,13 +859,16 @@ const APP_JS = `<script>
   }
   function renderBudget(){
     if(!budgetEl || !(BUDGET > 0)) return;
-    var mk = targetMonthKey();
-    var usd = 0, jpy = 0;
-    for(var i=0;i<turns.length;i++){
-      var tn = turns[i];
-      if(monthKeyOf(tn.t) !== mk) continue;
-      var bs = tn.bs || {}, fx = tn.fx || 0;
-      for(var s in bs){ if(bs.hasOwnProperty(s)){ usd += bs[s]; jpy += bs[s]*fx; } }
+    var mk = BUDGET_FIXED ? monthKeyOf(Date.now()) : targetMonthKey();
+    var usd = BUDGET_FIXED && BUDGET_MONTH ? (+BUDGET_MONTH.usd || 0) : 0;
+    var jpy = BUDGET_FIXED && BUDGET_MONTH ? (+BUDGET_MONTH.jpy || 0) : 0;
+    if(!BUDGET_FIXED){
+      for(var i=0;i<turns.length;i++){
+        var tn = turns[i];
+        if(monthKeyOf(tn.t) !== mk) continue;
+        var bs = tn.bs || {}, fx = tn.fx || 0;
+        for(var s in bs){ if(bs.hasOwnProperty(s)){ usd += bs[s]; jpy += bs[s]*fx; } }
+      }
     }
     var pct = BUDGET > 0 ? (usd / BUDGET) * 100 : 0;
     var width = Math.max(0, Math.min(100, pct));
@@ -863,10 +884,13 @@ const APP_JS = `<script>
     sub.textContent = ' ' + mk + (mk === curMonth ? '(今月)' : '');
     h.appendChild(sub);
     budgetEl.appendChild(h);
-    // 予算カードは常に全ソース合算(ソースフィルタ非連動)。Codex がある時だけその旨を明記する。
-    if(HAS_CODEX){
+    // 期間限定版は埋め込まない全履歴から当月を集計した固定値。
+    // 全履歴版のみ従来どおり選択月へ連動する。いずれもソースフィルタ非連動。
+    if(BUDGET_FIXED || HAS_CODEX){
       var srcNote = document.createElement('p'); srcNote.className = 'note';
-      srcNote.textContent = '全ソース合算 / all sources';
+      srcNote.textContent = BUDGET_FIXED
+        ? '今月・全履歴から正確に集計(全ソース合算) / exact current month from full history'
+        : '全ソース合算 / all sources';
       budgetEl.appendChild(srcNote);
     }
 
@@ -1102,18 +1126,28 @@ function renderLegend(slots: SlotDef[]): string {
  * 月予算カード。budgetUSD が 0 以下(未設定)なら空文字。
  * 当月(暦月)の使用額 / 予算 / 使用率(%)を、しきい値で色分けしたプログレスバーで表示する。
  */
-function budgetCard(budgetUSD: number, month: PeriodTotals, fallbackRate: number, hasCodex: boolean): string {
+function budgetCard(
+  budgetUSD: number,
+  month: PeriodTotals,
+  fallbackRate: number,
+  hasCodex: boolean,
+  fixedCurrentMonth: boolean,
+): string {
   if (!(budgetUSD > 0)) return "";
   const pct = (month.usd / budgetUSD) * 100;
   const width = Math.max(0, Math.min(100, pct));
   const level = pct >= 100 ? "over" : pct >= 70 ? "warn" : "ok";
   const budgetJpy = budgetUSD * fallbackRate;
-  // サーバは初期表示(当月)を描画し、ブラウザ側が選択中の月に合わせて #cccn-budget を差し替える。
-  // 予算は常に全ソース合算(ソースフィルタ非連動)。Codex がある時だけ「全ソース合算」を明記する。
+  // 全履歴版ではブラウザ側が選択中の月に合わせて差し替える。
+  // 期間限定版は全履歴から正確に集計した当月の固定値を保つ。
   return (
     `<section class="card" id="cccn-budget">` +
     `<h2>月予算 / Monthly budget<span class="stat-sub"> 今月(暦月)</span></h2>` +
-    (hasCodex ? `<p class="note">全ソース合算 / all sources</p>` : "") +
+    (fixedCurrentMonth
+      ? `<p class="note">今月・全履歴から正確に集計(全ソース合算) / exact current month from full history</p>`
+      : hasCodex
+        ? `<p class="note">全ソース合算 / all sources</p>`
+        : "") +
     `<div class="budget-bar"><div class="budget-fill lvl-${level}" style="width:${width.toFixed(1)}%"></div></div>` +
     `<div class="budget-foot">` +
     `<span>今月 <b>${esc(formatUSD(month.usd))}</b> / ${esc(formatUSD(budgetUSD))} ` +
@@ -1133,15 +1167,31 @@ function escapeJsonForScript(json: string): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
+interface FullHistoryDashboardContext {
+  currentMonth: PeriodTotals;
+  slotMap: SlotMap;
+  hasTurns: boolean;
+}
+
+function renderDashboard(
+  turns: TurnRecord[],
+  opts: DashboardOpts,
+  fullHistory?: FullHistoryDashboardContext,
+): string {
   const version = readVersion();
   const generatedAt = fmtLocalDateTime(new Date().toISOString());
   const period = opts.days === null ? "全期間" : `直近 ${opts.days} 日間`;
+  const limited = opts.days !== null;
+  const totalLabel = limited ? "対象期間合計" : "通算";
+  const totalLabelEn = limited ? "Embedded period total" : "Total";
+  const totalSub = limited ? "埋め込み対象期間" : "全期間";
 
-  const map = computeSlotMap(turns);
+  // 期間限定版でもモデルの色を全履歴版と一致させる。埋め込むターン自体は増やさない。
+  const map = fullHistory?.slotMap ?? computeSlotMap(turns);
   const kpi = computeKpis(turns);
   const cfg = readConfig();
   const budgetUSD = cfg.monthlyBudgetUSD;
+  const budgetMonth = limited ? (fullHistory?.currentMonth ?? kpi.month) : kpi.month;
   const turnsEmbed = turns.map((rec) => buildTurnEmbed(rec, map));
   const anyTruncated = turnsEmbed.some((t) => t.tr);
   const anySub = turns.some((r) => r.subagents);
@@ -1176,6 +1226,9 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     turns: turnsEmbed,
     budget: budgetUSD,
     budgetRate: cfg.fx.fallbackRate,
+    budgetMonth,
+    budgetFixed: limited,
+    allPeriodLabel: `${totalLabel} / ${totalLabelEn}`,
   };
   const dataJson = escapeJsonForScript(JSON.stringify(embed));
 
@@ -1207,8 +1260,12 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     APP_JS +
     `</body></html>`;
 
+  // ---- 月予算(設定時のみ)----
+  const budgetSection = budgetCard(budgetUSD, budgetMonth, cfg.fx.fallbackRate, anyCodex, limited);
+
   // ---- 0件: 空状態 ----
   if (turns.length === 0) {
+    const outsideEmbeddedPeriod = limited && (fullHistory?.hasTurns ?? false);
     const header =
       `<div class="head"><div>` +
       `<h1>ccc-notifier ダッシュボード</h1>` +
@@ -1216,11 +1273,15 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
       `</div></div>`;
     const empty =
       `<div class="empty">` +
-      `<h2>まだ履歴がありません</h2>` +
-      `<p>Claude Code でプロンプトを実行すると、ここにコスト履歴が表示されます。</p>` +
-      `<p class="empty-hint">No history yet — run a prompt in Claude Code and it will appear here.</p>` +
+      (outsideEmbeddedPeriod
+        ? `<h2>対象期間に履歴がありません</h2>` +
+          `<p>履歴はありますが、直近 ${opts.days} 日間には記録がありません。</p>` +
+          `<p class="empty-hint">No history in the embedded period.</p>`
+        : `<h2>まだ履歴がありません</h2>` +
+          `<p>Claude Code でプロンプトを実行すると、ここにコスト履歴が表示されます。</p>` +
+          `<p class="empty-hint">No history yet — run a prompt in Claude Code and it will appear here.</p>`) +
       `</div>`;
-    return head + header + empty + foot;
+    return head + header + budgetSection + empty + foot;
   }
 
   // ---- ヘッダー ----
@@ -1232,7 +1293,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<div class="sub muted">生成 ${esc(generatedAt)} / generated</div>` +
     `</div>` +
     `<div class="hero">` +
-    `<div class="hero-label">通算 / Total</div>` +
+    `<div class="hero-label">${esc(totalLabel)} / ${esc(totalLabelEn)}</div>` +
     `<div class="hero-value">${esc(formatUSD(kpi.all.usd))}</div>` +
     `<div class="hero-meta">${esc(formatJPY(kpi.all.jpy))} · ${kpi.all.turns} ターン</div>` +
     (anySub
@@ -1247,11 +1308,8 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     statCard("今日", "Today", kpi.today) +
     statCard("今週", "直近7日", kpi.week) +
     statCard("今月", "暦月", kpi.month) +
-    statCard("通算", "全期間", kpi.all) +
+    statCard(totalLabel, totalSub, kpi.all) +
     `</div>`;
-
-  // ---- 月予算(設定時のみ)----
-  const budgetSection = budgetCard(budgetUSD, kpi.month, cfg.fx.fallbackRate, anyCodex);
 
   // ---- 日別コスト(粒度切替・選択・通算) ----
   // Codex レコードがある時だけソースチップを粒度トグルの隣に出す(無ければ既存 UI を一切変えない)。
@@ -1265,14 +1323,14 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
   const chartSection =
     `<section class="card">` +
     `<h2>コスト推移 / Cost over time</h2>` +
-    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「通算」で全期間に戻ります。モデル別に色分け。</p>` +
+    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「${esc(totalLabel)}」で${esc(totalSub)}に戻ります。モデル別に色分け。</p>` +
     `<div class="toolbar-row">` +
     `<div class="seg-toggle">` +
     `<button type="button" data-gran="day">日</button>` +
     `<button type="button" data-gran="week">週</button>` +
     `<button type="button" data-gran="month">月</button>` +
     `</div>` +
-    `<button type="button" id="cccn-all" class="btn">通算</button>` +
+    `<button type="button" id="cccn-all" class="btn">${esc(totalLabel)}</button>` +
     srcToggle +
     `<span id="cccn-sel-label" class="sel-label"></span>` +
     `</div>` +
@@ -1285,7 +1343,7 @@ function renderDashboard(turns: TurnRecord[], opts: DashboardOpts): string {
     `<div class="grid2">` +
     `<section class="card">` +
     `<h2>モデル別内訳 / By model</h2>` +
-    `<p class="note">選択中の期間(既定は通算)のコスト降順。複数モデルのターンは各モデルに1ずつ計上。</p>` +
+    `<p class="note">選択中の期間(既定は${esc(totalLabel)})のコスト降順。複数モデルのターンは各モデルに1ずつ計上。</p>` +
     `<div class="table-wrap" id="cccn-bymodel"></div>` +
     `</section>` +
     `<section class="card">` +
@@ -1388,13 +1446,24 @@ export function writeDashboardHtml(opts: {
   autoReloadSec: number;
 }): void {
   const days = opts.days ?? null;
-  const turns = readTurns(days ?? undefined);
+  // history.jsonl は1回だけ全件 read/parse する。自動版の詳細ターンはこの
+  // 配列から期間で絞り、当月予算は同じ全件配列から正確に集計する。
+  const allTurns = readTurns();
+  const turns = days === null ? allTurns : filterTurnsByDays(allTurns, days);
+  const fullHistory =
+    days === null
+      ? undefined
+      : {
+          currentMonth: computeKpis(allTurns).month,
+          slotMap: computeSlotMap(allTurns),
+          hasTurns: allTurns.length > 0,
+        };
   const html = renderDashboard(turns, {
     days,
     open: false,
     out: opts.outPath,
     autoReloadSec: opts.autoReloadSec,
-  });
+  }, fullHistory);
   mkdirSync(dirname(opts.outPath), { recursive: true });
   writeFileSync(opts.outPath, html, "utf8");
 }
