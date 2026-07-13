@@ -130,6 +130,7 @@ describe("main", () => {
 
     expect(code).toBe(0);
     expect(output).toContain("Usage");
+    expect(output).toContain("dashboard [--all|--days N]");
   });
 });
 

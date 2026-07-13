@@ -112,7 +112,7 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 | `init` | Stop hook を対話形式でセットアップ(前述のフラグで非対話実行も可) |
 | `doctor` | hook登録・設定・単価表・為替・通知・直近セッション合計を診断 |
 | `report [--days N] [--json]` | 蓄積した履歴を集計してターミナルに表示(`--days` の既定は30、不正な値も30扱い)。`--json` で機械可読な出力 |
-| `dashboard [--days N] [--no-open] [--out <path>] [--refresh <sec>\|--no-refresh]` | 履歴を可視化した HTML ダッシュボードを生成してブラウザで開く(既定で全履歴を埋め込み、日/週/月・通算をブラウザ側で切替。詳細は [ダッシュボード](docs/dashboard.md)) |
+| `dashboard [--all\|--days N] [--no-open] [--out <path>] [--refresh <sec>\|--no-refresh]` | 履歴を可視化した HTML ダッシュボードを生成してブラウザで開く(引数なしは設定期間の直近版 `report.html`、`--all` は全履歴版 `report-all.html`。詳細は [ダッシュボード](docs/dashboard.md)) |
 | `sweep [--dry-run] [--days N] [--include-active]` | 過去の未計上分(hook 導入前や後から完了したサブエージェント分)を一括で履歴に取り込む。ローカル走査のみで **Claude API を呼ばず料金ゼロ**・二重計上なし(詳細は [過去分の取り込み](docs/sweep.md)) |
 | `history <clear\|redact> [--days N] [--yes]` | 履歴(`history.jsonl`)を削除。`clear` はレコードごと、`redact` はプロンプト全文だけ消去。`--days N` で「N 日より前」だけ対象(詳細は [履歴の削除](docs/dashboard.md#履歴の削除--deleting-history)) |
 | `budget [<USD>]` | 月予算(USD)の表示/設定。金額省略で現在の予算と当月の使用率を表示、`budget 400` で設定、`budget 0` で解除(詳細は [月予算](docs/monthly-budget.md)) |
@@ -138,13 +138,15 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 
 ## ダッシュボード / Dashboard
 
-`dashboard` コマンドで、サマリー(今日 / 今週 / 今月 / 通算)、コスト推移(日/週/月で切替・横スクロールで過去まで)、モデル別/プロジェクト別内訳、検索・行展開できるターン履歴を1枚の HTML に書き出してブラウザで開きます。生成物は **CSS/JS/SVG をすべてインライン化した完全自己完結・オフライン動作・外部通信ゼロ**のファイルで、ライト/ダーク両対応です。
+`dashboard` コマンドで、サマリー(今日 / 今週 / 今月 / 通算)、コスト推移(日/週/月で切替・横スクロールで過去まで)、モデル別/プロジェクト別内訳、検索・行展開できるターン履歴を HTML に書き出してブラウザで開きます。自動生成物は、毎ターン更新する直近版 `~/.ccc-notifier/report.html`(既定30日)と、ローカル日の最初の正常なターンだけ更新する全履歴版 `~/.ccc-notifier/report-all.html` に分かれます。片方が未生成でも生成方法を示すplaceholderを置くため、ページ内リンクは切れません。履歴・カーソル・生成snapshotは `cache/data.lock/` で直列化されます。履歴の読み込みと解析は正確な当月予算を保つため全履歴が対象です。生成物は **CSS/JS/SVG をすべてインライン化した完全自己完結・オフライン動作・外部通信ゼロ**のファイルで、ライト/ダーク両対応です。
 
 ```bash
-npx ccc-notifier dashboard            # 生成してブラウザで開く
+npx ccc-notifier dashboard            # 設定期間(既定30日)の直近版 report.html を生成して開く
+npx ccc-notifier dashboard --all      # 全履歴版 report-all.html を生成して開く
+npx ccc-notifier dashboard --days 7   # 直近7日の report.html を生成して開く
 ```
 
-グラフの棒をクリックするとその期間に内訳・履歴が連動し、「通算」で全期間に戻せます。Claude Code / Codex CLI の応答完了ごとに自動再生成され、開きっぱなしのタブは約30秒ごとに最新化されます。Codex CLI のレコードがあれば **Claude / Codex** を絞り込むソースフィルタも表示されます(詳細は [Codex CLI 対応](docs/codex.md))。検索・行クリックでプロンプト全文を確認できます:
+グラフの棒をクリックするとその期間に内訳・履歴が連動し、全履歴版では「通算」、期間限定版では「対象期間合計」で埋め込まれた全期間に戻せます。直近版は応答完了ごと、全履歴版は1日1回(または手動 `dashboard --all`)更新されます。Codex CLI のレコードがあれば **Claude / Codex** を絞り込むソースフィルタも表示されます(詳細は [Codex CLI 対応](docs/codex.md))。検索・行クリックでプロンプト全文を確認できます:
 
 ![ターン履歴(検索と全文展開)](docs/images/history-expand.png)
 

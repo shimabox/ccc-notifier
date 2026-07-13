@@ -60,8 +60,8 @@ node dist/cli.js doctor        # グローバルインストール済みなら c
 
 **ダッシュボードを開きっぱなしにしても自動で新しくならない / 自動更新を止めたい**
 
-- `report.html` は Claude Code の応答完了(Stop hook)ごとに再生成され、既定では約30秒ごとに自動リロードされます。タブを**閉じずに開いたまま**にしておいてください(再生成した瞬間ではなく、次の自動リロードのタイミングで最新化されます)。リロードを跨いでも検索語・スクロール位置は保持されます
-- 自動リロードだけを止めたい場合は `config.json` の `dashboard.autoReloadSec` を `0` に、応答完了ごとの再生成自体を止めたい場合は `dashboard.autoRegenerate` を `false` にしてください(その場合は必要なときに手動で `dashboard` コマンドを実行します)
+- 直近版 `report.html` は Claude Code / Codex の正常な新規ターンごと、全履歴版 `report-all.html` はローカル日の最初の正常な新規ターンに再生成されます。既定では約30秒ごとにファイルを再読込します。タブを**閉じずに開いたまま**にしておいてください。未生成側には案内placeholderが置かれるためヘッダーのリンクは常に有効で、リロードを跨いでも検索語・スクロール位置は保持されます
+- 自動リロードだけを止めたい場合は `config.json` の `dashboard.autoReloadSec` を `0` に、応答完了ごとの再生成自体を止めたい場合は `dashboard.autoRegenerate` を `false` にしてください(その場合は直近版を手動 `dashboard`、全履歴版を手動 `dashboard --all` で更新します)
 
 **Windows で通知が届かない**
 

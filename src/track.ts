@@ -9,9 +9,14 @@
 //   - ネット待ちは各モジュール内のタイムアウト(fx 1.5s×2 / Slack 3s)で構造的に有界。
 //     track 側で無限待ちの await を追加しない。
 
-import { join } from "node:path";
 import { aggregateCodexTurn } from "./codex/transcript";
 import { writeDashboardHtml } from "./dashboard";
+import {
+  isFullDashboardDue,
+  makeFullDashboardState,
+  writeFullDashboardStateAtomic,
+} from "./dashboard-state";
+import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
@@ -23,6 +28,7 @@ import {
   logError,
   paths,
   readConfig,
+  readTurns,
   sanitizeCursor,
   saveCursor,
   todayTotalUSD,
@@ -93,14 +99,26 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     const transcriptPath = input.transcript_path;
     if (typeof transcriptPath !== "string") return;
 
-    // 2. 設定 + カーソル(形全体をサニタイズ)。
+    // 2. 設定・単価・為替はdata lock外で準備する。
     const cfg = readConfig();
-    const cursor = sanitizeCursor(loadCursor(transcriptPath));
+    const cacheDir = paths().cacheDir;
+    const table = await loadPriceTable(cacheDir, { offline: true });
+    const fx = await getUsdJpy(cfg, cacheDir);
+    const isCodex = opts?.codex === true;
+    let record!: TurnRecord;
+
+    // cursor snapshotからhistory/cursor commitまでを1つのdata lockで直列化する。
+    const commitLock = await waitForDataLock(1000);
+    if (commitLock === null) {
+      logError("track:data-lock", new Error("data lock timeout; turn was not consumed"));
+      return;
+    }
+    try {
+      const cursor = sanitizeCursor(loadCursor(transcriptPath));
 
     // 3. 新規ターンの集計。新規 usage が無ければ何もせず終了する
     //    (カーソルも保存しない: 次回まとめて処理される設計)。
     //    Codex 経路(opts.codex)は rollout(累積カウンタの逐次差分)を集計する。
-    const isCodex = opts?.codex === true;
     let agg = isCodex
       ? await aggregateCodexTurn(transcriptPath, cursor)
       : await aggregateNewTurn(transcriptPath, cursor);
@@ -123,13 +141,8 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       }
     }
 
-    // 4. 単価(track 経路はネットに出ないため offline)+ コスト算出。
-    const cacheDir = paths().cacheDir;
-    const table = await loadPriceTable(cacheDir, { offline: true });
+    // 4. lock外で準備済みの単価でコスト算出。
     const breakdown = computeCost(agg.main, agg.sidechain, table);
-
-    // 5. 為替(モジュール内タイムアウトで有界。失敗時は fixed フォールバック)。
-    const fx = await getUsdJpy(cfg, cacheDir);
 
     // 6. TurnRecord を構築する。
     const sessionId =
@@ -137,7 +150,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     const project = agg.cwd ?? (typeof input.cwd === "string" ? input.cwd : undefined) ?? "";
     const sidechainHasModels = Object.keys(agg.sidechain).length > 0;
 
-    const record: TurnRecord = {
+    record = {
       schemaVersion: 1,
       ts: agg.lastTs ?? new Date().toISOString(),
       sessionId,
@@ -196,6 +209,9 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         saveCursor(nc.path, nc.cursor);
       }
     }
+    } finally {
+      commitLock.release();
+    }
 
     // 8. 後処理を「互いに独立なタスク」として集め、allSettled でまとめて待つ。どれか1つが
     //    失敗しても他は止まらない(通知 ↔ 再生成 も相互に独立)。
@@ -203,7 +219,10 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //      ミュート中(ccc-notifier mute)でないときのみ。両チャネル無効(通知なしモード)では
     //      todayTotalUSD の履歴走査ごとスキップする。ミュートは通知だけを抑止し、記録・再生成には
     //      影響しない。todayUSD は append 後に集計するため当該ターンを含む。どちらも throw しない契約。
-    //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。履歴が更新された以上、
+    //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。埋め込み対象は
+    //      cfg.dashboard.days(既定30日)に制限し、HTML 構築・書き込み・ブラウザ描画の負荷を抑える。
+    //      履歴の read/parse は当月予算の正確性を保つため全履歴が対象(O(全履歴))。
+    //      履歴が更新された以上、
     //      通知の有無(しきい値)とは独立に実行する。失敗は logError に留め、通知を止めない。
     const tasks: Promise<unknown>[] = [];
 
@@ -214,18 +233,55 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     }
 
     if (cfg.dashboard.autoRegenerate) {
-      // writeDashboardHtml は同期関数。失敗を通知タスクから隔離するため、try/catch で包んで
-      // 「必ず解決する Promise」に変換してから allSettled に載せる。
       tasks.push(
         (async () => {
+          const now = new Date();
+          const dashboardLock = await waitForDataLock(1000);
+          if (dashboardLock === null) {
+            logError("track:dashboard-lock", new Error("data lock timeout; dashboard skipped"));
+            return;
+          }
           try {
-            writeDashboardHtml({
-              days: null, // 全履歴を埋め込む(粒度切替・過去・通算をブラウザ側で扱うため)
-              outPath: join(paths().home, "report.html"),
-              autoReloadSec: cfg.dashboard.autoReloadSec,
-            });
-          } catch (err) {
-            logError("track:dashboard", err);
+            // privacy: 履歴snapshotの取得から両canonical書込まで同じ所有権lock内に置く。
+            let allTurns: TurnRecord[];
+            try {
+              allTurns = readTurns();
+            } catch (err) {
+              logError("track:dashboard-read", err);
+              return;
+            }
+
+            try {
+              writeDashboardHtml({
+                days: cfg.dashboard.days,
+                outPath: paths().recentDashboardFile,
+                autoReloadSec: cfg.dashboard.autoReloadSec,
+                allTurns,
+                variant: "recent",
+              });
+            } catch (err) {
+              logError("track:dashboard-recent", err);
+            }
+
+            if (isFullDashboardDue(now)) {
+              try {
+                writeDashboardHtml({
+                  days: null,
+                  outPath: paths().fullDashboardFile,
+                  autoReloadSec: cfg.dashboard.autoReloadSec,
+                  allTurns,
+                  variant: "full",
+                  generatedAt: now.toISOString(),
+                });
+                // HTML の atomic rename が成功した後だけ state を進める。
+                writeFullDashboardStateAtomic(makeFullDashboardState(now));
+              } catch (err) {
+                logError("track:dashboard-full", err);
+              }
+            }
+
+          } finally {
+            dashboardLock.release();
           }
         })(),
       );

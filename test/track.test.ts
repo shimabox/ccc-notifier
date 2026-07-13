@@ -14,6 +14,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runTrack } from "../src/track";
+import { runDashboard } from "../src/dashboard";
+import { runHistory } from "../src/history";
+import { acquireDataLock } from "../src/data-lock";
 import * as store from "../src/store";
 import * as dashboard from "../src/dashboard";
 import * as subagents from "../src/subagents";
@@ -82,6 +85,65 @@ function readHistory(): TurnRecord[] {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as TurnRecord);
+}
+
+function dashboardTurnCount(file: string): number {
+  return dashboardData(file).turns.length;
+}
+
+function dashboardData(file: string): { turns: unknown[]; generatedAt: string } {
+  const html = readFileSync(file, "utf8");
+  const marker = '<script id="cccn-data" type="application/json">';
+  const start = html.indexOf(marker) + marker.length;
+  const end = html.indexOf("</script>", start);
+  return JSON.parse(html.slice(start, end)) as { turns: unknown[]; generatedAt: string };
+}
+
+function makeHistoryTurn(ts: string, prompt: string): TurnRecord {
+  return {
+    schemaVersion: 1,
+    ts,
+    sessionId: "seed-session",
+    project: "/tmp/seed-project",
+    gitBranch: "main",
+    models: ["claude-fable-5"],
+    tokens: { input: 10, output: 20, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+    sidechainTokens: null,
+    apiCalls: 1,
+    costUSD: 0.01,
+    costJPY: 1.5,
+    fxRate: 150,
+    fxSource: "fixed",
+    prompt,
+  };
+}
+
+function appendTranscriptTurn(prompt: string, suffix: string): void {
+  const line = {
+    parentUuid: `p-${suffix}`,
+    isSidechain: false,
+    cwd: "/tmp/proj",
+    sessionId: "sess-1",
+    gitBranch: "main",
+    type: "assistant",
+    requestId: `req-${suffix}`,
+    message: {
+      id: `msg-${suffix}`,
+      type: "message",
+      role: "assistant",
+      model: "claude-fable-5",
+      content: [{ type: "text", text: prompt }],
+      usage: {
+        input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 10,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+      },
+    },
+    uuid: `uuid-${suffix}`,
+    timestamp: new Date().toISOString(),
+  };
+  appendFileSync(transcriptPath, `\n${JSON.stringify(line)}\n`, "utf8");
 }
 
 /** transcriptPath の兄弟 subagents ディレクトリに SA フィクスチャを配置し、その絶対パスを返す。 */
@@ -291,7 +353,164 @@ describe("runTrack", () => {
     expect(html).toContain("ccc-notifier");
     // 既定 autoReloadSec=30 の meta refresh が入っている(開きっぱなしのタブが最新化される)。
     expect(html).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="30"/);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
+    expect(html).toContain('href="report-all.html"');
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain('href="report.html"');
   });
+
+  it("8a2. regenerates recent every new turn but full only once on the same local day", async () => {
+    const stdin = stdinFor(transcriptPath);
+    await runTrack(stdin);
+    const fullBefore = readFileSync(join(tmpHome, "report-all.html"), "utf8");
+    appendTranscriptTurn("same-day-new", "same-day");
+    await runTrack(stdin);
+    expect(dashboardTurnCount(join(tmpHome, "report.html"))).toBe(2);
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toBe(fullBefore);
+  });
+
+  it("8a3. regenerates full after local-day rollover", async () => {
+    const stdin = stdinFor(transcriptPath);
+    await runTrack(stdin);
+    const stateFile = join(tmpHome, "cache", "dashboard-full-state.json");
+    const state = JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+    state.localDate = "2000-01-01";
+    writeFileSync(stateFile, JSON.stringify(state), "utf8");
+    appendTranscriptTurn("next-day-new", "next-day");
+    await runTrack(stdin);
+    expect(dashboardTurnCount(join(tmpHome, "report-all.html"))).toBe(2);
+  });
+
+  it("8a4. regenerates full when timezone changes", async () => {
+    const stdin = stdinFor(transcriptPath);
+    await runTrack(stdin);
+    const stateFile = join(tmpHome, "cache", "dashboard-full-state.json");
+    const state = JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+    state.timeZone = "Invalid/Old-Time-Zone";
+    writeFileSync(stateFile, JSON.stringify(state), "utf8");
+    appendTranscriptTurn("timezone-new", "timezone");
+    await runTrack(stdin);
+    expect(dashboardTurnCount(join(tmpHome, "report-all.html"))).toBe(2);
+    const updated = JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+    expect(updated.timeZone).not.toBe("Invalid/Old-Time-Zone");
+  });
+
+  it("8a5. retries full on the next new turn after full generation failure", async () => {
+    const real = dashboard.writeDashboardHtml;
+    let failFull = true;
+    vi.spyOn(dashboard, "writeDashboardHtml").mockImplementation((opts) => {
+      if (opts.outPath.endsWith("report-all.html") && failFull) throw new Error("full failed");
+      return real(opts);
+    });
+    const stdin = stdinFor(transcriptPath);
+    await runTrack(stdin);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
+    const recent = readFileSync(join(tmpHome, "report.html"), "utf8");
+    expect(recent).toContain('href="report-all.html"');
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain("全履歴版はまだ生成されていません");
+    failFull = false;
+    appendTranscriptTurn("retry-full", "retry");
+    await runTrack(stdin);
+    expect(dashboardTurnCount(join(tmpHome, "report-all.html"))).toBe(2);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
+  });
+
+  it("8a6. still generates full when recent generation fails", async () => {
+    const real = dashboard.writeDashboardHtml;
+    vi.spyOn(dashboard, "writeDashboardHtml").mockImplementation((opts) => {
+      if (opts.outPath.endsWith("report.html")) throw new Error("recent failed");
+      return real(opts);
+    });
+    await runTrack(stdinFor(transcriptPath));
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
+    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain("直近版はまだ生成されていません");
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
+  });
+
+  it("8a7. shares one history read between initial recent/full generation", async () => {
+    const spy = vi.spyOn(store, "readTurns");
+    await runTrack(stdinFor(transcriptPath));
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("8a8. an active first-turn lock prevents duplicate full generation", async () => {
+    const lock = acquireDataLock();
+    expect(lock).not.toBeNull();
+    await runTrack(stdinFor(transcriptPath));
+    expect(readHistory()).toEqual([]);
+    expect(existsSync(join(tmpHome, "cursors.json"))).toBe(false);
+    expect(readFileSync(join(tmpHome, "error.log"), "utf8")).toContain("[track:data-lock]");
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "data.lock"))).toBe(true);
+    lock!.release();
+  });
+
+  it("8a9. concurrent history clear and track never revive a deleted prompt in canonical HTML", async () => {
+    store.appendTurn(makeHistoryTurn(new Date().toISOString(), "privacy-secret-to-delete"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await Promise.all([runTrack(stdinFor(transcriptPath)), runHistory(["clear", "--yes"])]);
+    for (const file of [join(tmpHome, "report.html"), join(tmpHome, "report-all.html")]) {
+      if (existsSync(file)) expect(readFileSync(file, "utf8")).not.toContain("privacy-secret-to-delete");
+    }
+    expect(existsSync(join(tmpHome, "cache", "data.lock"))).toBe(false);
+  });
+
+  it("8a10. concurrent manual full and track leave an internally valid full snapshot/state", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await Promise.all([runTrack(stdinFor(transcriptPath)), runDashboard(["--no-open", "--all"])]);
+    const full = join(tmpHome, "report-all.html");
+    const stateFile = join(tmpHome, "cache", "dashboard-full-state.json");
+    expect(existsSync(full)).toBe(true);
+    expect(existsSync(stateFile)).toBe(true);
+    const state = JSON.parse(readFileSync(stateFile, "utf8")) as { localDate: string; generatedAt: string };
+    expect(Number.isFinite(Date.parse(state.generatedAt))).toBe(true);
+    expect(state.localDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(dashboardData(full).generatedAt.startsWith(state.localDate)).toBe(true);
+    expect(dashboardTurnCount(full)).toBeLessThanOrEqual(readHistory().length);
+    expect(existsSync(join(tmpHome, "cache", "data.lock"))).toBe(false);
+  });
+
+  it("8b. limits automatic report regeneration to the default 30 days", async () => {
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 40 * 86_400_000).toISOString(), "auto-old-turn"));
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 20 * 86_400_000).toISOString(), "auto-recent-turn"));
+
+    await runTrack(stdinFor(transcriptPath));
+
+    const html = readFileSync(join(tmpHome, "report.html"), "utf8");
+    expect(html).not.toContain("auto-old-turn");
+    expect(html).toContain("auto-recent-turn");
+  });
+
+  it("8c. uses dashboard.days for automatic report regeneration", async () => {
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ dashboard: { days: 2 } }), "utf8");
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 3 * 86_400_000).toISOString(), "configured-old-turn"));
+    store.appendTurn(makeHistoryTurn(new Date(Date.now() - 1 * 86_400_000).toISOString(), "configured-recent-turn"));
+
+    await runTrack(stdinFor(transcriptPath));
+
+    const html = readFileSync(join(tmpHome, "report.html"), "utf8");
+    expect(html).not.toContain("configured-old-turn");
+    expect(html).toContain("configured-recent-turn");
+  });
+
+  it.each([0, -1, 1.5, "7", null])(
+    "8d. falls back to 30 days when dashboard.days is invalid (%j)",
+    async (days) => {
+      writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ dashboard: { days } }), "utf8");
+      const spy = vi.spyOn(dashboard, "writeDashboardHtml").mockImplementation(() => {});
+
+      await runTrack(stdinFor(transcriptPath));
+
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ days: 30 }));
+    },
+  );
 
   // 9. autoRegenerate=false なら report.html は生成されない(history は記録される)。
   it("9. does not regenerate report.html when dashboard.autoRegenerate is false", async () => {
@@ -305,6 +524,26 @@ describe("runTrack", () => {
 
     expect(readHistory()).toHaveLength(1);
     expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "data.lock"))).toBe(false);
+  });
+
+  it("9b. leaves existing dashboard HTML/state/lock untouched when autoRegenerate is false", async () => {
+    writeFileSync(
+      join(tmpHome, "config.json"),
+      JSON.stringify({ notify: { os: false, slack: null }, dashboard: { autoRegenerate: false } }),
+      "utf8",
+    );
+    mkdirSync(join(tmpHome, "cache"), { recursive: true });
+    const files = [
+      join(tmpHome, "report.html"),
+      join(tmpHome, "report-all.html"),
+      join(tmpHome, "cache", "dashboard-full-state.json"),
+    ];
+    files.forEach((file, i) => writeFileSync(file, `sentinel-${i}`, "utf8"));
+    await runTrack(stdinFor(transcriptPath));
+    files.forEach((file, i) => expect(readFileSync(file, "utf8")).toBe(`sentinel-${i}`));
   });
 
   // 10. 通知しきい値未満で通知がスキップされても、再生成は独立に実行される。
@@ -328,7 +567,7 @@ describe("runTrack", () => {
 
     await expect(runTrack(stdinFor(transcriptPath))).resolves.toBeUndefined();
 
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(2);
     // 再生成が失敗しても履歴は記録される。
     expect(readHistory()).toHaveLength(1);
     // mock が throw したため report.html は書かれない。
@@ -336,7 +575,8 @@ describe("runTrack", () => {
     // フェイルセーフ: error.log に track:dashboard が残る。
     const errLog = join(tmpHome, "error.log");
     expect(existsSync(errLog)).toBe(true);
-    expect(readFileSync(errLog, "utf8")).toContain("[track:dashboard]");
+    expect(readFileSync(errLog, "utf8")).toContain("[track:dashboard-recent]");
+    expect(readFileSync(errLog, "utf8")).toContain("[track:dashboard-full]");
   });
 
   // 12. 通知なしモード(notify.os=false, slack=null): 記録・再生成は行うが通知は一切出ない。
