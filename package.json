@@ -1,6 +1,6 @@
 {
   "name": "ccc-notifier",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Claude Code Cost notifier (now also covers Codex CLI): per-prompt cost notifications (USD/JPY) with local history and HTML dashboard",
   "keywords": [
     "claude",
