@@ -101,7 +101,7 @@ sweep は rollout を `task_complete` イベントの境界でターンに分割
 ## 制限 / Limitations
 
 - **サブエージェント/collab スレッドの usage・料金は未集計です**(将来対応予定)。公式hookで利用の有無と開始・終了は検出しますが、子のtokenや料金は推測しません。そのため履歴の総額・月予算・通知は従来どおりメインスレッド分だけです
-- SubagentStart / SubagentStop hookは検出台帳だけを更新し、履歴追記・料金計算・通知・ダッシュボード再生成は行いません。親応答の記録後に開始・終了イベントが届いた場合も、次の通常ターンによるダッシュボード再生成、または手動で`report` / `dashboard`を実行すると、元のターンへ利用表示が反映されます。料金・総額・月予算・通知は変わりません。匿名join keyを持たない導入前の旧履歴には遡及反映されない場合があります
+- SubagentStart / SubagentStop hookは利用記録だけを更新し、履歴追記・料金計算・通知・ダッシュボード再生成は行いません。親応答の記録後に開始・終了イベントが届いた場合も、次の通常ターンによるダッシュボード再生成、または手動で`report` / `dashboard`を実行すると、元のターンへ利用表示が反映されます。料金・総額・月予算・通知は変わりません。匿名join keyを持たない導入前の旧履歴には遡及反映されない場合があります
 - **reasoning トークンは output トークンに含まれて課金されます**。これは ccc-notifier 側の仕様ではなく OpenAI の課金仕様そのもので、Codex の `token_count` イベントが運ぶ `output_tokens` にはもともと `reasoning_output_tokens` が含まれています
 
 ## トラブルシュート / Troubleshooting
@@ -111,10 +111,10 @@ sweep は rollout を `task_complete` イベントの境界でターンに分割
 1. `codex` 側で hook を承認したか(上記「hook の信頼承認」参照。**承認するまで通知は一切動きません**)
 2. `npx ccc-notifier doctor` を実行し、「Codex」のブロックを確認する。hook が未登録なら `init --codex` を再実行、登録済みでも承認していない可能性がある旨の注意が出ます
 
-`error.log` に `key integrity mismatch; manual recovery required` がある場合は、検出台帳の匿名identityを守るため自動修復されません。正しい元のkeyを復元して既存identityを維持するか、検出台帳・keyを一組として退避して新規identityで初期化するかを明示的に選んでください。通常hook処理はkeyや台帳を勝手に上書きしません。
+`error.log` に `key integrity mismatch; manual recovery required` がある場合は、利用記録内の匿名識別子を守るため自動修復されません。正しい元のkeyを復元して既存の匿名識別子を維持するか、利用記録とkeyを一組として退避して新しい匿名識別子で初期化するかを明示的に選んでください。通常hook処理はkeyや利用記録を勝手に上書きしません。
 
 `error.log` に `activity lock timeout` が繰り返し記録される場合、同じ端末内でPIDが再利用され、古いlockのPIDが無関係な稼働中processを指している可能性があります。誤って稼働中のwriterを壊さないため、この状態は時間が経っても自動回収しません。まず該当PIDがccc-notifier/Codexの処理でないことを確認し、そのうえで `~/.ccc-notifier/codex-subagent-activity.lock` または `codex-subagent-key.lock` を退避してから再実行してください。確認できない場合は削除せず、そのprocessの終了後に再試行してください。
 
-同じ保存先を複数hostから共有している場合、key/ledgerの一時ファイルはhostnameそのものではなく匿名host tagで所有元を区別します。60秒以上残った一時ファイルでも、自host tagとdead PIDの両方を確認できるものだけを自動回収します。旧形式のhost tag無しファイルや別hostのファイルは安全のため残ることがありますが、通常の記録には使われません。
+同じ保存先を複数hostから共有している場合、keyと利用記録の一時ファイルはhostnameそのものではなく匿名host tagで所有元を区別します。60秒以上残った一時ファイルでも、自host tagとdead PIDの両方を確認できるものだけを自動回収します。旧形式のhost tag無しファイルや別hostのファイルは安全のため残ることがありますが、通常の記録には使われません。
 
 **データの保存先を変えたい**場合は環境変数 `CCCN_CODEX_HOME` で `~/.codex` の代わりに使うディレクトリを指定できます(`init` / `doctor` / `sweep` / `track --codex` のすべてがこの値を参照します)。
