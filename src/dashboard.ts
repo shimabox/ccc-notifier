@@ -34,6 +34,7 @@ const PROMPT_TRUNC_MARK = "…(以下略)";
 // ============ 引数パース ============
 
 interface DashboardOpts {
+  scope: "recent" | "all";
   days: number | null; // null = 全履歴
   open: boolean;
   out: string | null;
@@ -63,58 +64,77 @@ function ensurePeerPlaceholder(variant: DashboardVariant): void {
   if (existsSync(peer)) return;
   const peerIsFull = variant === "recent";
   const back = peerIsFull ? "report.html" : "report-all.html";
-  const command = peerIsFull ? "ccc-notifier dashboard" : "ccc-notifier dashboard --days 30";
+  const command = peerIsFull ? "ccc-notifier dashboard --all" : "ccc-notifier dashboard";
   const label = peerIsFull ? "全履歴版" : "直近版";
   const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="cccn-placeholder" content="true"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${label}は未生成です</title></head><body><main><h1>${label}はまだ生成されていません</h1><p><code>${command}</code> を実行すると生成できます。</p><p><a href="${back}">生成済みのダッシュボードへ戻る</a></p></main></body></html>`;
   writeAtomic(peer, html);
 }
 
-/** --days の値をパースする。正の整数のみ採用。不正・未指定は null(=全履歴)。 */
-function parseDays(value: string | undefined): number | null {
-  if (value === undefined) return null;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+/** --days の値をパースする。正の整数以外は曖昧にfallbackせず明示エラー。 */
+function parseDays(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/.test(value)) throw new Error("--days には正の整数が必要です");
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error("--days には正の整数が必要です");
+  return parsed;
 }
 
-/** --refresh の値をパースする。0 以上の整数のみ採用し、不正値は fallback(config 値)に倒す。 */
-function parseRefresh(value: string | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+/** --refresh の値をパースする。0 以上の整数以外は曖昧にfallbackせず明示エラー。 */
+function parseRefresh(value: string | undefined): number {
+  if (value === undefined || value.startsWith("--") || !/^\d+$/.test(value)) {
+    throw new Error("--refresh には0以上の整数が必要です");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("--refresh には0以上の整数が必要です");
+  return parsed;
 }
 
 function parseArgs(argv: string[]): DashboardOpts {
-  let days: number | null = null; // 既定は全履歴
+  let daysValue: number | null = null;
+  let daysSpecified = false;
+  let all = false;
   let open = true;
   let out: string | null = null;
-  const cfgReloadSec = readConfig().dashboard.autoReloadSec;
+  const cfg = readConfig().dashboard;
+  const cfgReloadSec = cfg.autoReloadSec;
   let autoReloadSec = cfgReloadSec;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--no-open") {
       open = false;
+    } else if (arg === "--all") {
+      all = true;
     } else if (arg === "--days") {
-      days = parseDays(argv[i + 1]);
+      daysSpecified = true;
+      daysValue = parseDays(argv[i + 1]);
       i++;
     } else if (arg.startsWith("--days=")) {
-      days = parseDays(arg.slice("--days=".length));
+      daysSpecified = true;
+      daysValue = parseDays(arg.slice("--days=".length));
     } else if (arg === "--out") {
       out = argv[i + 1] ?? null;
+      if (out === null || out.startsWith("--")) throw new Error("--out には出力パスが必要です");
       i++;
     } else if (arg.startsWith("--out=")) {
       out = arg.slice("--out=".length) || null;
+      if (out === null) throw new Error("--out には出力パスが必要です");
     } else if (arg === "--no-refresh") {
       autoReloadSec = 0;
     } else if (arg === "--refresh") {
-      autoReloadSec = parseRefresh(argv[i + 1], cfgReloadSec);
+      autoReloadSec = parseRefresh(argv[i + 1]);
       i++;
     } else if (arg.startsWith("--refresh=")) {
-      autoReloadSec = parseRefresh(arg.slice("--refresh=".length), cfgReloadSec);
+      autoReloadSec = parseRefresh(arg.slice("--refresh=".length));
+    } else {
+      throw new Error(`不明な引数です / unknown argument: ${arg}`);
     }
   }
 
-  return { days, open, out, autoReloadSec };
+  if (all && daysSpecified) throw new Error("--all と --days は同時に指定できません");
+  // canonical既定はrecent。--out単独だけは旧CLI互換でfull customを維持する。
+  const scope: "recent" | "all" = all || (out !== null && !daysSpecified) ? "all" : "recent";
+  const days = scope === "all" ? null : (daysValue ?? cfg.days);
+  return { scope, days, open, out, autoReloadSec };
 }
 
 // ============ 小さなユーティリティ ============
@@ -1277,7 +1297,7 @@ function renderDashboard(
   const autoUpdateFoot =
     reloadSec > 0
       ? variant === "full"
-        ? `<div class="foot">約 ${reloadSec} 秒ごとにファイルを再読込(全履歴版の生成はローカル日ごと、または手動)</div>`
+        ? `<div class="foot">約 ${reloadSec} 秒ごとにファイルを再読込(全履歴版の生成はローカル日ごと、または手動 dashboard --all)</div>`
         : `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は ${updateTrigger})</div>`
       : "";
 
@@ -1286,15 +1306,15 @@ function renderDashboard(
       ? `<div class="sub"><strong>直近 ${opts.days} 日版 / Recent</strong> · ${
           opts.peerAvailable
             ? `<a href="report-all.html">全履歴版へ / Full history</a>`
-            : `<span aria-disabled="true">全履歴版は未生成です（dashboard で生成） / Full history not generated</span>`
+            : `<span aria-disabled="true">全履歴版は未生成です（dashboard --all で生成） / Full history not generated</span>`
         }</div>`
       : variant === "full"
         ? `<div class="sub"><strong>全履歴版 / Full history</strong> · ${
             opts.peerAvailable
               ? `<a href="report.html">直近版へ / Recent</a>`
-              : `<span aria-disabled="true">直近版は未生成です（dashboard --days N で生成） / Recent not generated</span>`
+              : `<span aria-disabled="true">直近版は未生成です（dashboard で生成） / Recent not generated</span>`
           }</div>` +
-          `<div class="sub muted">最終生成 ${esc(generatedAt)}。ローカル日の最初の正常なターン時、または手動の dashboard コマンドで更新されます。</div>`
+          `<div class="sub muted">最終生成 ${esc(generatedAt)}。ローカル日の最初の正常なターン時、または手動の dashboard --all で更新されます。</div>`
         : "";
 
   const head =
@@ -1527,6 +1547,7 @@ export function writeDashboardHtml(opts: {
           hasTurns: allTurns.length > 0,
         };
   const html = renderDashboard(turns, {
+    scope: days === null ? "all" : "recent",
     days,
     open: false,
     out: opts.outPath,
@@ -1539,10 +1560,16 @@ export function writeDashboardHtml(opts: {
 }
 
 export async function runDashboard(argv: string[]): Promise<number> {
-  const opts = parseArgs(argv);
+  let opts: DashboardOpts;
+  try {
+    opts = parseArgs(argv);
+  } catch (err) {
+    console.error(`dashboard の引数が不正です / invalid dashboard arguments: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
 
   const canonical = opts.out === null;
-  const outPath = opts.out ?? (opts.days === null ? paths().fullDashboardFile : paths().recentDashboardFile);
+  const outPath = opts.out ?? (opts.scope === "all" ? paths().fullDashboardFile : paths().recentDashboardFile);
   let lock: Awaited<ReturnType<typeof waitForDataLock>> = null;
   try {
     lock = await waitForDataLock();
@@ -1552,11 +1579,11 @@ export async function runDashboard(argv: string[]): Promise<number> {
       days: opts.days,
       outPath,
       autoReloadSec: opts.autoReloadSec,
-      variant: canonical ? (opts.days === null ? "full" : "recent") : "custom",
+      variant: canonical ? (opts.scope === "all" ? "full" : "recent") : "custom",
       generatedAt: generatedAt.toISOString(),
     });
     // 手動の canonical 全履歴生成も「本日生成済み」とする。custom --out は完全に無関係。
-    if (canonical && opts.days === null) {
+    if (canonical && opts.scope === "all") {
       writeFullDashboardStateAtomic(makeFullDashboardState(generatedAt));
     }
   } catch (err) {

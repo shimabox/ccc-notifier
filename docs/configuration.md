@@ -18,7 +18,7 @@
 | `monthlyBudgetUSD` | number | `0` | 月予算(USD)。`0` で無効。ダッシュボードに当月の使用率カードを表示(`budget` コマンド / `init` の `--budget` で設定。詳細は [月予算](monthly-budget.md)) |
 | `dashboard.autoRegenerate` | boolean | `true` | 応答完了(`track`)ごとの直近版と、日次の全履歴版を自動生成するか |
 | `dashboard.autoReloadSec` | number | `30` | 生成 HTML の自動リロード間隔(秒)。`0` で自動リロードを無効化 |
-| `dashboard.days` | number | `30` | 自動生成する `report.html` の対象期間(正の整数・日数)。不正値は安全に `30` へフォールバック。`report-all.html` には影響しない |
+| `dashboard.days` | number | `30` | 自動生成と引数なしの手動 `dashboard` で作る `report.html` の対象期間(正の整数・日数)。不正値は安全に `30` へフォールバック。`report-all.html` には影響しない |
 
 補足: データ保存先(既定 `~/.ccc-notifier`)は環境変数 `CCCN_HOME` で上書きできます。
 

@@ -9,7 +9,7 @@
 // を検証する(クリック等の実挙動はブラウザ結合で別途確認)。ブラウザは常に --no-open。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,7 +30,7 @@ beforeEach(() => {
   prevHome = process.env.CCCN_HOME;
   tmpHome = mkdtempSync(join(tmpdir(), "cccn-dashboard-test-"));
   process.env.CCCN_HOME = tmpHome;
-  defaultOutput = join(tmpHome, "report-all.html");
+  defaultOutput = join(tmpHome, "report.html");
 });
 
 afterEach(() => {
@@ -44,18 +44,7 @@ afterEach(() => {
 async function run(argv: string[]): Promise<number> {
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
-  const daysIndex = argv.findIndex((arg) => arg === "--days" || arg.startsWith("--days="));
-  if (daysIndex >= 0) {
-    const raw = argv[daysIndex].startsWith("--days=")
-      ? argv[daysIndex].slice("--days=".length)
-      : argv[daysIndex + 1];
-    const parsed = Number.parseInt(raw ?? "", 10);
-    defaultOutput = Number.isFinite(parsed) && parsed > 0
-      ? join(tmpHome, "report.html")
-      : join(tmpHome, "report-all.html");
-  } else {
-    defaultOutput = join(tmpHome, "report-all.html");
-  }
+  defaultOutput = argv.includes("--all") ? join(tmpHome, "report-all.html") : join(tmpHome, "report.html");
   return await runDashboard(argv);
 }
 
@@ -109,6 +98,19 @@ function readHtml(path = defaultOutput): string {
   return readFileSync(path, "utf8");
 }
 
+function writeDashboardSentinels(): void {
+  writeFileSync(join(tmpHome, "report.html"), "recent-sentinel", "utf8");
+  writeFileSync(join(tmpHome, "report-all.html"), "full-sentinel", "utf8");
+  mkdirSync(join(tmpHome, "cache"), { recursive: true });
+  writeFileSync(join(tmpHome, "cache", "dashboard-full-state.json"), "state-sentinel", "utf8");
+}
+
+function expectDashboardSentinelsUnchanged(): void {
+  expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toBe("recent-sentinel");
+  expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toBe("full-sentinel");
+  expect(readFileSync(join(tmpHome, "cache", "dashboard-full-state.json"), "utf8")).toBe("state-sentinel");
+}
+
 const CCCN_DATA_OPEN = '<script id="cccn-data" type="application/json">';
 
 function extractDataRaw(html: string): string {
@@ -160,39 +162,56 @@ function sumTotals(turns: EmbedTurn[]): number {
 }
 
 describe("runDashboard — 標準シナリオ", () => {
-  it("exit 0 で report-all.html を生成する", async () => {
+  it("exit 0 で既定の直近版 report.html を生成する", async () => {
     seedStandard();
     const code = await run(["--no-open"]);
     expect(code).toBe(0);
-    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(true);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(true);
     const html = readHtml();
     expect(html.startsWith("<!doctype html>")).toBe(true);
     expect(html).toContain("ccc-notifier");
-    expect(html).toContain("全履歴版 / Full history");
-    expect(html).toContain('href="report.html"');
-    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain("直近版はまだ生成されていません");
-    expect(parseData(html).variant).toBe("full");
-    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
+    expect(html).toContain("直近 30 日版 / Recent");
+    expect(html).toContain('href="report-all.html"');
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain("全履歴版はまだ生成されていません");
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain("ccc-notifier dashboard --all");
+    expect(parseData(html).variant).toBe("recent");
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
   });
 
-  it("既定で全履歴を埋め込み、slot 別コストの総和が seed 合計と一致する", async () => {
+  it("--all は全履歴を report-all.html に埋め込み、日次stateを成功後に更新する", async () => {
     const seededTotal = seedStandard();
-    await run(["--no-open"]);
+    await run(["--no-open", "--all"]);
     const data = parseData(readHtml());
 
     expect(Array.isArray(data.turns)).toBe(true);
-    expect(data.turns.length).toBe(10); // 既定=全履歴(旧 --days 30 の制限は撤廃)
+    expect(data.turns.length).toBe(10);
     expect(sumTotals(data.turns)).toBeCloseTo(seededTotal, 6);
+    expect(data.variant).toBe("full");
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
+    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain("ccc-notifier dashboard");
+    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).not.toContain("dashboard --all");
   });
 
-  it("手動 dashboard の既定は30日より古い履歴も含む", async () => {
+  it("手動 dashboard の既定はconfig既定30日より古い履歴を除外する", async () => {
     appendTurn(makeTurn({ ts: new Date(Date.now() - 90 * DAY).toISOString(), prompt: "manual-old-turn" }));
     appendTurn(makeTurn({ ts: new Date(Date.now() - HOUR).toISOString(), prompt: "manual-recent-turn" }));
 
     await run(["--no-open"]);
 
     const prompts = parseData(readHtml()).turns.map((turn) => turn.pr);
-    expect(prompts).toEqual(expect.arrayContaining(["manual-old-turn", "manual-recent-turn"]));
+    expect(prompts).toEqual(["manual-recent-turn"]);
+  });
+
+  it("引数なしは config.dashboard.days を対象期間に使う", async () => {
+    writeFileSync(join(tmpHome, "config.json"), JSON.stringify({ dashboard: { days: 7 } }), "utf8");
+    appendTurn(makeTurn({ ts: new Date(Date.now() - 8 * DAY).toISOString(), prompt: "outside-config-window" }));
+    appendTurn(makeTurn({ ts: new Date(Date.now() - HOUR).toISOString(), prompt: "inside-config-window" }));
+
+    expect(await run(["--no-open"])).toBe(0);
+
+    expect(parseData(readHtml()).turns.map((turn) => turn.pr)).toEqual(["inside-config-window"]);
+    expect(readHtml()).toContain("直近 7 日版 / Recent");
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
   });
 
   it("外部参照ゼロ(http(s) の src/href や @import が無い)", async () => {
@@ -295,18 +314,19 @@ describe("runDashboard — フラグ", () => {
   it("生成順に関係なくplaceholderでcanonical相互anchorを切らさない", async () => {
     seedStandard();
     await run(["--no-open"]);
-    expect(readHtml()).toContain('href="report.html"');
-    expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain('href="report-all.html"');
+    expect(readHtml()).toContain('href="report-all.html"');
+    expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain('href="report.html"');
 
     await run(["--no-open", "--days", "30"]);
     expect(readHtml()).toContain('href="report-all.html"');
 
-    await run(["--no-open"]);
+    await run(["--no-open", "--all"]);
     expect(readHtml()).toContain('href="report.html"');
   });
 
   it("--out で指定パスに書き出す", async () => {
     seedStandard();
+    appendTurn(makeTurn({ ts: new Date(Date.now() - 90 * DAY).toISOString(), prompt: "legacy-custom-all" }));
     const out = join(tmpHome, "custom", "dash.html");
     const code = await run(["--no-open", "--out", out]);
     expect(code).toBe(0);
@@ -315,6 +335,27 @@ describe("runDashboard — フラグ", () => {
     expect(readHtml(out)).not.toContain('href="report.html"');
     expect(readHtml(out)).not.toContain('href="report-all.html"');
     expect(parseData(readHtml(out)).variant).toBe("custom");
+    expect(parseData(readHtml(out)).turns.map((turn) => turn.pr)).toContain("legacy-custom-all");
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
+  });
+
+  it("custom出力は --all なら全履歴、--days N なら直近だけにし、canonical/stateへ触れない", async () => {
+    appendTurn(makeTurn({ ts: new Date(Date.now() - 90 * DAY).toISOString(), prompt: "custom-old" }));
+    appendTurn(makeTurn({ ts: new Date(Date.now() - HOUR).toISOString(), prompt: "custom-recent" }));
+    const allOut = join(tmpHome, "custom-all.html");
+    const recentOut = join(tmpHome, "custom-recent.html");
+
+    expect(await run(["--no-open", "--all", "--out", allOut])).toBe(0);
+    expect(parseData(readHtml(allOut)).turns.map((turn) => turn.pr)).toEqual(["custom-old", "custom-recent"]);
+    expect(await run(["--no-open", "--days", "7", "--out", recentOut])).toBe(0);
+    expect(parseData(readHtml(recentOut)).turns.map((turn) => turn.pr)).toEqual(["custom-recent"]);
+    for (const html of [readHtml(allOut), readHtml(recentOut)]) {
+      expect(html).not.toContain('href="report.html"');
+      expect(html).not.toContain('href="report-all.html"');
+      expect(parseData(html).variant).toBe("custom");
+    }
     expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
     expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
     expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
@@ -363,10 +404,50 @@ describe("runDashboard — フラグ", () => {
     expect(data.turns[0].bs).toEqual({ "2": 0.1 });
   });
 
-  it("--days に不正値を渡すと全履歴になる(制限しない)", async () => {
+  it("--all と --days は指定順に関係なくexit 1で何も生成しない", async () => {
     seedStandard();
-    await run(["--no-open", "--days", "not-a-number"]);
-    expect(parseData(readHtml()).turns.length).toBe(10);
+    expect(await run(["--no-open", "--all", "--days", "7"])).toBe(1);
+    expect(await run(["--no-open", "--days", "7", "--all"])).toBe(1);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
+  });
+
+  it("--days の欠落・0・負数・小数・非数値はexit 1で何も生成しない", async () => {
+    seedStandard();
+    const invalidArgv = [
+      ["--no-open", "--days"],
+      ["--no-open", "--days", "0"],
+      ["--no-open", "--days", "-1"],
+      ["--no-open", "--days", "1.5"],
+      ["--no-open", "--days", "not-a-number"],
+      ["--no-open", "--days="],
+    ];
+    for (const argv of invalidArgv) expect(await run(argv)).toBe(1);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
+  });
+
+  it("--out の値が欠けている場合はexit 1で何も生成しない", async () => {
+    seedStandard();
+    expect(await run(["--no-open", "--out"])).toBe(1);
+    expect(await run(["--no-open", "--out="])).toBe(1);
+    expect(existsSync(join(tmpHome, "report.html"))).toBe(false);
+    expect(existsSync(join(tmpHome, "report-all.html"))).toBe(false);
+  });
+
+  it("不明なoptionと余剰の位置引数はexit 1で既存HTML/stateを変更しない", async () => {
+    seedStandard();
+    writeDashboardSentinels();
+    const invalidArgv = [
+      ["--al"],
+      ["--full"],
+      ["stray"],
+      ["--days", "7", "stray"],
+    ];
+    for (const argv of invalidArgv) expect(await run(argv)).toBe(1);
+    expectDashboardSentinelsUnchanged();
   });
 });
 
@@ -387,6 +468,42 @@ describe("runDashboard — 自動リロード / meta refresh", () => {
     seedStandard();
     await run(["--no-open", "--refresh", "15"]);
     expect(readHtml()).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="15"/);
+  });
+
+  it("--refresh 0 は有効で meta refresh を出力しない", async () => {
+    seedStandard();
+    expect(await run(["--no-open", "--refresh", "0"])).toBe(0);
+    expect(readHtml()).not.toMatch(/http-equiv="refresh"/);
+  });
+
+  it("--refresh は scope option の前後どちらでも有効", async () => {
+    seedStandard();
+    expect(await run(["--refresh", "15", "--all", "--no-open"])).toBe(0);
+    expect(readHtml()).toMatch(/<meta[^>]*http-equiv="refresh"[^>]*content="15"/);
+    expect(await run(["--days", "7", "--no-open", "--refresh=0"])).toBe(0);
+    expect(readHtml()).not.toMatch(/http-equiv="refresh"/);
+  });
+
+  it("--refresh の値欠落・option誤認・不正値はexit 1で既存HTML/stateを変更しない", async () => {
+    seedStandard();
+    writeDashboardSentinels();
+    const invalidArgv = [
+      ["--refresh"],
+      ["--refresh="],
+      ["--refresh", "--all"],
+      ["--all", "--refresh"],
+      ["--refresh", "--days", "7"],
+      ["--refresh", "1.5"],
+      ["--refresh", "15x"],
+      ["--refresh", "-1"],
+      ["--refresh", "NaN"],
+      ["--refresh=1.5"],
+      ["--refresh=15x"],
+      ["--refresh=-1"],
+      ["--refresh=NaN"],
+    ];
+    for (const argv of invalidArgv) expect(await run(argv)).toBe(1);
+    expectDashboardSentinelsUnchanged();
   });
 
   it("config の dashboard.autoReloadSec が既定リロード秒になる", async () => {
@@ -542,7 +659,7 @@ describe("runDashboard — 月予算カード", () => {
     // 今月 $124(=8×$15.5)。ダミーは ts 既定=now=今月。31% は緑(ok)。
     for (let i = 0; i < 8; i++) appendTurn(makeTurn({ costUSD: 15.5, costJPY: 15.5 * 150 }));
     setBudget(400);
-    await run(["--no-open"]);
+    await run(["--no-open", "--all"]);
     const html = readHtml();
     expect(html).toContain('id="cccn-budget"');
     expect(html).toContain("<b>$124.00</b> / $400.00");
@@ -738,7 +855,7 @@ describe("runDashboard — Codex と月予算カード", () => {
     setBudget(400);
     appendTurn(makeTurn({ costUSD: 100, costJPY: 15000 })); // Claude・今月
     appendTurn(makeCodexTurn({ costUSD: 50, costJPY: 7500 })); // Codex・今月
-    await run(["--no-open"]);
+    await run(["--no-open", "--all"]);
     const html = readHtml();
     expect(html).toContain('id="cccn-budget"');
     // サーバ描画の注記(APP_JS 内の文字列リテラルと区別するため <p class="note"> 形で判定)。

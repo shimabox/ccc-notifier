@@ -237,7 +237,7 @@ describe("runHistory — canonical generation concurrency", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     const clearPromise = runHistory(["clear", "--yes"]);
-    const dashboardPromise = runDashboard(["--no-open"]);
+    const dashboardPromise = runDashboard(["--no-open", "--all"]);
     setTimeout(() => lock!.release(), 10);
     const [clearCode, dashboardCode] = await Promise.all([clearPromise, dashboardPromise]);
 

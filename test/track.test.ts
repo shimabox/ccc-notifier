@@ -464,7 +464,7 @@ describe("runTrack", () => {
   it("8a10. concurrent manual full and track leave an internally valid full snapshot/state", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-    await Promise.all([runTrack(stdinFor(transcriptPath)), runDashboard(["--no-open"])]);
+    await Promise.all([runTrack(stdinFor(transcriptPath)), runDashboard(["--no-open", "--all"])]);
     const full = join(tmpHome, "report-all.html");
     const stateFile = join(tmpHome, "cache", "dashboard-full-state.json");
     expect(existsSync(full)).toBe(true);

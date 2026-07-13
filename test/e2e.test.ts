@@ -624,9 +624,17 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     // dashboard を生成すると、SA のモデル(Sonnet 5)と「うちサブエージェント」が HTML に現れる。
     const dash = await runCli(["dashboard", "--no-open"], { env: sb.env });
     expect(dash.code).toBe(0);
+    expect(dash.stdout).toContain(join(sb.cccnHome, "report.html"));
     const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
     expect(html).toContain("Sonnet 5");
     expect(html).toContain("うちサブエージェント");
+
+    // 明示した --all だけが canonical 全履歴版と日次stateを更新する。
+    const fullDash = await runCli(["dashboard", "--all", "--no-open"], { env: sb.env });
+    expect(fullDash.code).toBe(0);
+    expect(fullDash.stdout).toContain(join(sb.cccnHome, "report-all.html"));
+    expect(readFileSync(join(sb.cccnHome, "report-all.html"), "utf8")).toContain("全履歴版 / Full history");
+    expect(existsSync(join(sb.cccnHome, "cache", "dashboard-full-state.json"))).toBe(true);
   });
 
   // ---- 11. sweep: dry-run はサマリのみ、本実行で ingest:"sweep" の履歴が入る ----
