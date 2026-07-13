@@ -68,6 +68,15 @@ export interface TurnRecord {
   prompt: string;            // 全文(ローカルのみ)。null 時は ""
   ingest?: 'sweep';          // sweep(過去分の一括回収)由来の記録の目印。hook 経由は付与しない(undefined)
   source?: 'codex';          // 無し = Claude Code(後方互換)。ingest と同じ流儀
+  /** valid Codex親turnと将来到着しうる検出台帳activityを結ぶ匿名HMAC key。UIへ表示しない。 */
+  activityProjectionKey?: string;
+  /** readerが検出台帳からpure mergeするruntime-only値。historyへは保存しない。 */
+  subagentActivity?: {
+    started: number;
+    stopped: number;
+    agentTypes: string[];
+    usageStatus: 'partial' | 'unavailable';
+  };
   unknownModels?: string[];
   subagents?: {              // サブエージェント枠(旧レコード後方互換のため optional)
     costUSD: number;                     // サブエージェント合計(丸めない)

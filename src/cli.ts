@@ -64,6 +64,29 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
   { cmd: "--help, -h", ja: "このヘルプを表示", en: "Show this help" },
 ];
 
+const CODEX_PASSIVE_EVENTS = ["Stop", "SubagentStart", "SubagentStop"] as const;
+type CodexPassiveEvent = (typeof CODEX_PASSIVE_EVENTS)[number];
+
+function isCodexPassiveEvent(value: string | undefined): value is CodexPassiveEvent {
+  return CODEX_PASSIVE_EVENTS.includes(value as CodexPassiveEvent);
+}
+
+/** Byte-exact passive hook dispatch. Errors are swallowed at this outermost boundary. */
+export async function runCodexPassiveHook(event: CodexPassiveEvent, text: string): Promise<Buffer> {
+  try {
+    if (event === "Stop") {
+      const trackMod = await import("./track");
+      await trackMod.runTrack(text, { codex: true });
+    } else {
+      const activity = await import("./codex/subagent-store");
+      activity.handleCodexSubagentHook(text, event === "SubagentStart" ? "start" : "stop");
+    }
+  } catch {
+    // A passive hook must never block Codex or put diagnostics/identifiers on stdout.
+  }
+  return event === "SubagentStart" ? Buffer.alloc(0) : Buffer.from("{}\n", "utf8");
+}
+
 const CMD_COLUMN_WIDTH = Math.max(...COMMANDS.map((c) => c.cmd.length)) + 2;
 
 const HELP_TEXT = [
@@ -151,6 +174,14 @@ export async function main(argv: string[]): Promise<number> {
 
   try {
     switch (cmd) {
+      case "__ccc-notifier-codex-hook": {
+        const event = rest[0];
+        if (!isCodexPassiveEvent(event) || rest.length !== 1) return 0;
+        const text = await readStdin();
+        const response = await runCodexPassiveHook(event, text);
+        if (response.length > 0) process.stdout.write(response);
+        return 0;
+      }
       case "track": {
         const text = await readStdin();
         // Codex の Stop hook からは `track --codex` で呼ばれる(内部コマンドのため help 文言は変えない)。

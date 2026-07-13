@@ -1,7 +1,7 @@
 // src/store.ts (T4) — ローカル永続化(config / cursor / history / error log)
 //
 // 契約: src/contracts.md の "src/store.ts (T4)" セクション参照。
-// import は ./types と Node 組み込みのみ。
+// history readerはCodex activityのruntime projectionもpure mergeする。
 
 import {
   existsSync,
@@ -16,6 +16,7 @@ import {
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { Config, Cursor, DEFAULT_CONFIG, TurnRecord } from "./types";
+import { projectCodexSubagentActivity, readCodexSubagentActivity } from "./codex/subagent-store";
 
 export interface CccnPaths {
   home: string;
@@ -316,7 +317,9 @@ export function saveCursor(transcriptPath: string, c: Cursor): void {
  */
 export function appendTurn(record: TurnRecord): void {
   const p = paths();
-  appendFileSync(p.historyFile, JSON.stringify(record) + "\n", "utf8");
+  // subagentActivityはcanonical台帳から毎回導出するruntime-only値。呼び出し側から渡されても保存しない。
+  const { subagentActivity: _runtimeActivity, ...persisted } = record;
+  appendFileSync(p.historyFile, JSON.stringify(persisted) + "\n", "utf8");
 }
 
 /**
@@ -355,9 +358,28 @@ export function readTurns(days?: number): TurnRecord[] {
       if (!Number.isFinite(ts) || ts < cutoff) continue;
     }
 
+    // runtime-only値はhistory内の保存値を信用せず、canonical台帳からだけ再構築する。
+    delete rec.subagentActivity;
     result.push(rec);
   }
 
+  const keyedRecords = result.filter(
+    (rec) => rec.source === "codex" && typeof rec.activityProjectionKey === "string" &&
+      /^[a-f0-9]{64}$/.test(rec.activityProjectionKey),
+  );
+  if (keyedRecords.length === 0) return result;
+
+  // 台帳は1 readにつき一度だけ読む。破損時は[]へfail-closedする。
+  const byProjection = new Map<string, ReturnType<typeof readCodexSubagentActivity>>();
+  for (const state of readCodexSubagentActivity()) {
+    const states = byProjection.get(state.projectionKey) ?? [];
+    states.push(state);
+    byProjection.set(state.projectionKey, states);
+  }
+  for (const rec of keyedRecords) {
+    const activity = projectCodexSubagentActivity(byProjection.get(rec.activityProjectionKey!) ?? []);
+    if (activity !== undefined) rec.subagentActivity = activity;
+  }
   return result;
 }
 

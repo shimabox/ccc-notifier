@@ -300,19 +300,50 @@ interface CodexTurnDraft {
   (prev はセグメントを跨いで持ち回る。末尾に task_complete 後の token_count が残る場合は最後のドラフトに含める)。
   **全ドラフトの acc 合計・適用後の newCursor は、同一ウィンドウに対する aggregateCodexTurn の結果と一致**(hook ↔ sweep 相互運用)
 
-### src/codex/setup.ts(新規)
+### src/codex/setup.ts / src/codex/subagent-store.ts (Gate D 準備)
 - `codexHooksFile(): string` // join(codexHome(), 'hooks.json')
-- `codexHookCommand(nodePath: string, cliPath: string): string` // `"<node>" "<cli>" track --codex`(空白対応の quote は Claude 側 hook と同じ流儀)
+- `codexHookCommand(nodePath, cliPath, event)` // `"<node>" "<cli>" __ccc-notifier-codex-hook <event>`
 ```ts
 interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPath: string | null; manualSnippet?: string; }
 ```
 - `registerCodexHook(nodePath: string, cliPath: string): CodexHookResult`
-- `removeCodexHook(): CodexHookResult` // マーカー一致エントリを除去。hooks.json が無ければ unchanged
-- 非破壊マージ: 既存の他イベント(PermissionRequest 等)・他 Stop エントリを一切変更しない。`hooks.Stop` 配列に
-  `{ hooks: [{ type: 'command', command }] }` を追記。マーカー(`matchesMarker` を command に適用)一致の既存エントリがあれば置換(重複登録防止)
+- `removeCodexHook(): CodexHookResult`
+- `Stop` / `SubagentStart` / `SubagentStop` の各handlerはtimeout 20秒。所有判定は専用内部subcommandの完全形のみ
+  (旧 `track --codex` はCLI pathがccc-notifierを含む完全形だけをStopのupgrade対象にする)。
+- 非破壊マージ: 自handlerだけをadd/update/removeし、同groupの他handler、group/handler/rootの未知キーを保持。
+  groupが空になったときだけgroupを削除し、eventが空ならeventキーも削除する。
 - 書き込み前に `hooks.json.bak-<timestamp>` バックアップ(新規作成時はバックアップなし)
-- JSON パース不能 → 書き込まず `status: 'manual'` + 追記スニペット返却(呼び出し側が表示)
+- JSON パース不能・対象event異形 → 書き込まず `status: 'manual'` + 3eventスニペット返却
 - 末尾改行付き・2スペースインデントで整形(既存ファイルの見た目を維持)
+- hook payloadは`unknown`から検証し、`session_id + turn_id`と`agent_id`をlocal secretによるdomain-separated
+  HMAC keyへ変換する。生ID、raw payload、cwd、本文、transcript pathは台帳・通常ログへ保存しない。
+- activity台帳はunique agentごとにStart/StopをOR mergeし、逆順・再送・複数Stopへ冪等。agent typeは既知safe label
+  または固定`unknown`だけを保存する。lock ownerはstagingでatomic完成後にcanonicalへno-replace publishする。same-host dead PIDは
+  age不要で一意claim回収し、live/foreign/生死不明ownerはfail-closed。旧malformed directoryは短い初期化猶予・再読込後に
+  一意rename claimできたprocessだけ回収し、releaseはtoken一致時だけ行う。canonical publishの`EEXIST`は、その直後に
+  ownerがreleaseしてcanonicalが消えても通常contentionとして再試行する。その他のpublish errorはcanonical実在時だけ
+  保守的contention、不在時は即時fail-closed。acquire deadlineは回収成功による`continue`でも迂回できない。
+- ledgerは秘密を含まないdomain-separated HMAC `keyCheck`を持つ。キーは32-byte長だけでなくkeyCheckもconstant-time照合し、
+  同長置換・1bit破損・keyCheck破損ではkey/ledgerを変更せずfail-closed。keyCheck無しのvalid v1 ledgerだけをactivity lock内で
+  一度atomic backfillする。永続化失敗はpassive wireやmain trackへ伝播させない。
+- Gate D表示投影では、validな`session_id + turn_id`を持つ通常Codex親Stop recordに、activityの有無や
+  到着順と無関係に`activityProjectionKey`(匿名HMAC key)を保存する。ただし親Stopもactivity lock内でledgerの
+  `keyCheck`を検証し、key/ledger不整合やledger破損時は未検証keyを付けずmain turn記録だけを継続する。
+  keyの存在だけでは利用ありと判定せず、対応するcanonical activityが無ければruntime `subagentActivity`を付けない。
+  生のturn/agent ID、hook由来path、raw payloadは保存せず、key生成失敗はmain turnの記録を止めない。
+  valid secretと破損ledgerの組合せでもmain turn保存は継続するが、`activityProjectionKey`は付けず投影をfail-closedにする。
+- key/ledgerのatomic staging名はraw hostnameを保存せず、domain-separated SHA-256由来の固定host tagを含める。
+  対応lock保持中に、製品固有の厳格命名、local host tag一致、regular file/dir、60秒以上の経過、same-host dead PIDを
+  すべて満たすものだけを回収し、host tag不一致・旧hostless名・live/unknown owner・進行中stagingは削除しない。
+  key/ledgerの通常write/rename失敗時はwriter自身のtmpを`finally`で削除し、特に秘密key複製を残さない。
+- same-host ownerでもPID再利用により別のlive processが同じPIDを持つ場合は安全側に倒してlockを自動回収しない。
+  timeoutが継続する場合は、該当PIDがccc-notifier/Codexの処理でないことを利用者が確認してからlockを手動退避・削除する。
+- `TurnRecord.subagentActivity`はoptionalかつruntime-only。`readTurns`がcanonical台帳を1回だけ読み、同じ
+  `activityProjectionKey`のunique agent stateから`started` / `stopped` / safeな`agentTypes` /
+  `usageStatus: 'unavailable' | 'partial'`をpure mergeする。保存済みの同名フィールドは信用しない。
+  late Start/Stopは次turnやadjustmentへ付けず元recordの次回readへ反映し、history行数・turn数・料金を変えない。
+- Gate A未承認のため、Gate D表示投影はchild transcript/token/cost/pricing/unknownModels/subagents/cursor/
+  sweep分類を一切作らない。現段階の投影statusは料金を推測せず`unavailable`。
 
 ### src/pricing.ts / src/format.ts
 - `builtinPriceTable()` に追加(USD/1M・write 系 0):
@@ -328,7 +359,11 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   agg 側が `"unknown"` のときの代替にも使う。TurnRecord に `source: 'codex'` を付与。
   subagents 収集(collectSubagentUsage)は**呼ばない**。それ以外(価格・fx・appendTurn・通知判定・
   ダッシュボード再生成・ミュート・通知なしモード)は既存共通経路
-- cli.ts: `track` コマンドの引数に `--codex` を追加して runTrack へ伝える。ヘルプ文言は変更しない(内部コマンドのため)
+- SubagentStart/Stop hookは検出台帳だけを更新し、history adjustment、料金、通知、dashboard自動生成を行わない。
+  親Stop後のlate eventも匿名keyで元turnへ結合し、表示は次の通常turnによる再生成、または手動`report` /
+  `dashboard`実行時に更新される。導入前のkey無し旧recordには遡及適用しない。
+- cli.ts: 旧`track --codex`互換に加え専用passive hookをdispatchする。`SubagentStart`はstdout 0 bytes、
+  `SubagentStop`と親`Stop`は常にUTF-8 `{}\n`だけ、全経路exit 0。親Stopだけ既存Codex trackへ渡す。
 
 ### src/setup.ts / src/doctor.ts
 - init フラグ追加: `--codex`(Codex hook を導入)/ `--no-codex`(スキップ)。排他(併用は exit 1)。
@@ -337,8 +372,13 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   導入した場合は完了メッセージで信頼確認の案内:
   「次回 codex 起動時に『Hooks need review』が表示されます。『Trust all and continue』を選ぶと有効になります(承認までは動きません)」
 - uninstall: `removeCodexHook()` も実行(未導入なら黙ってスキップ)。`--purge` は従来どおり
-- doctor: hook 登録セクションの後に Codex ブロック(検出時のみ): hooks.json のマーカーエントリ有無(コマンド全文表示)、
-  sessions/ 存在、「登録済みでも codex 側で未承認だと動かない」注意書き。未検出なら1行 info。通知なしモードの早期 return より前に置く
+- doctor: hook登録セクションの後にCodexブロックを置く。env指定なしでもuser `hooks.json` / `config.toml` と、cwdから
+  親方向へ見つけたrepo candidateの `.codex/hooks.json` / `.codex/config.toml` を確認する。project sourceが存在すれば
+  `detectCodex()` falseでもearly returnしない。JSONだけを1MiB上限・regular file・strict shapeで検査し、TOMLは存在だけを
+  opaque候補として表示して内容を解釈しない。owned handlerのsource/event/actual・expected path/timeout、検査済みJSON間の
+  exact duplicate、同一layerのJSON/TOML併存potential duplicateを表示する。trust、global/individual disabled、
+  plugin/managed/session sourceの実効状態はunknownとし、Codexの `/hooks` を最終確認先として案内する。
+  `CCCN_CODEX_HOOK_SOURCES` は標準候補を置換しないsupplemental sourceに限定する。
 
 ### src/sweep.ts
 - 既存 Claude 走査の後に Codex 走査: `codexHome()/sessions` 配下の `rollout-*.jsonl`(`YYYY/MM/DD` 3階層・
@@ -353,6 +393,8 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   選択は sessionStorage `cccn-src`(値: `all` | `claude` | `codex`、既定 all)で自動リロードを跨いで保持
 - フィルタはチャート・モデル別・プロジェクト別・ターン履歴・KPI に適用。**月予算カードは常に合算**(カード内に「全ソース合算」を小さく明記)
 - ターン履歴の行に `Codex` バッジ(source が codex のとき)。XSS 不変条件(textContent / < エスケープ)維持
+- Codex activityがある行は「利用あり・料金未集計」と開始/終了unique数・safe typeを表示する。内部key/ID/pathは
+  embed/UIへ出さず、Claudeの既存`+SA`料金表示、filter、総額、月予算は変えない。
 - slot 配色ロジックは不変(全履歴のモデル別総コスト)
 
 ### 2026-07-10 Wave 2 での契約修正(オーケストレーター認可・実装済み)

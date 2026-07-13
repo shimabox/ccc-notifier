@@ -522,7 +522,7 @@ export async function runInit(argv: string[]): Promise<number> {
   // Codex 連携の結果表示(登録を試みたときのみ)。
   if (codexResult) {
     if (codexResult.status === "written") {
-      console.log(`Codex にも Stop hook を登録しました: ${codexHooksFile()}`);
+      console.log(`Codex に Stop/SubagentStart/SubagentStop hook を登録しました: ${codexHooksFile()}`);
       if (codexResult.backupPath) {
         console.log(`  バックアップ: ${codexResult.backupPath}`);
       }
@@ -531,13 +531,13 @@ export async function runInit(argv: string[]): Promise<number> {
         "次回 codex 起動時に『Hooks need review』が表示されます。『Trust all and continue』を選ぶと有効になります(承認までは動きません)",
       );
     } else if (codexResult.status === "unchanged") {
-      console.log("Codex の Stop hook は登録済みです");
+      console.log("Codex の Stop/SubagentStart/SubagentStop hook は登録済みです");
     } else {
       // status === "manual": hooks.json が壊れている等で自動編集できなかった。
       // settings.json 破損時の printManualSnippet と同じ文体で手動追記を案内する(init 自体は成功)。
       console.error(`Codex の hooks.json を自動編集できませんでした: ${codexHooksFile()}`);
       console.error("安全のため hooks.json の自動編集を中止しました。");
-      console.error("以下の JSON を hooks.json の hooks.Stop 配列に手動で追加してください:");
+      console.error("以下の JSON の3イベントを hooks.json へ手動で追加してください:");
       console.error("");
       console.error(codexResult.manualSnippet ?? "");
       console.error("");
@@ -594,7 +594,7 @@ export async function runUninstall(argv: string[]): Promise<number> {
   // 1.5. Codex hooks.json からも本ツールの Stop エントリを除去する(未登録・不在なら黙ってスキップ)。
   const codexRemoval = removeCodexHook();
   if (codexRemoval.status === "written") {
-    console.log("Codex の Stop hook を削除しました");
+    console.log("Codex の Stop/SubagentStart/SubagentStop hook を削除しました");
   }
 
   // 2. --purge: データディレクトリを削除する。

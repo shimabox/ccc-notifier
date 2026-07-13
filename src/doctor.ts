@@ -18,7 +18,8 @@ import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
 import { codexHome, detectCodex } from "./codex/env";
-import { codexHooksFile } from "./codex/setup";
+import { CODEX_HOOK_EVENTS } from "./codex/setup";
+import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
 import { isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TurnRecord } from "./types";
@@ -176,48 +177,58 @@ async function checkHookRegistration(): Promise<boolean> {
 // hook 登録セクションの直後・通知チェック(通知なしモードの早期 return を含む)より前に置く。
 // Codex 未検出・未登録は「未使用なら問題ない」ため ❌ にはせず、exit code の意味論を変えない。
 async function checkCodex(): Promise<boolean> {
-  // Codex 未検出: 未使用なら問題ないので info 1行に留める。
-  if (!detectCodex()) {
+  const expectedCli = process.env.CCCN_CLI_PATH ?? process.argv[1] ?? "";
+  const diagnostics = diagnoseCodexHookSources({
+    codexHome: codexHome(),
+    cwd: process.cwd(),
+    expectedNodePath: process.execPath,
+    expectedCliPath: expectedCli,
+    envSources: process.env.CCCN_CODEX_HOOK_SOURCES,
+  });
+
+  // Project / supplemental source discovery must happen before detectCodex()'s user-home check.
+  if (!detectCodex() && diagnostics.candidates.length === 0) {
     log("ok", "Codex CLI は未検出です(未使用なら問題ありません)");
     return true;
   }
 
-  // hooks.json にマーカー一致の Stop エントリがあるか(あればコマンド全文を表示する)。
-  // 破損 JSON は「未登録」相当に倒す(doctor は読み取り専用。修復は init/uninstall 側に委ねる)。
-  const hooksFile = codexHooksFile();
-  const matchedCommands: string[] = [];
-  if (existsSync(hooksFile)) {
-    try {
-      const raw = await readFile(hooksFile, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      if (isRecord(parsed)) {
-        const hooks = parsed.hooks;
-        const stopEntries = isRecord(hooks) ? hooks.Stop : undefined;
-        if (Array.isArray(stopEntries)) {
-          for (const entry of stopEntries) {
-            if (!isRecord(entry)) continue;
-            const innerHooks = entry.hooks;
-            if (!Array.isArray(innerHooks)) continue;
-            for (const h of innerHooks) {
-              if (isRecord(h) && typeof h.command === "string" && matchesMarker(h.command)) {
-                matchedCommands.push(h.command);
-              }
-            }
-          }
-        }
-      }
-    } catch {
-      // 壊れた hooks.json は未登録扱い(setup.ts が manual 案内で手動追記を促す)。
+  for (const source of diagnostics.candidates) {
+    if (source.format === "toml") {
+      log("warn", `Codex inline hook候補を検出しました(${source.scope}, ${source.discovery}): ${source.path}`);
+      log("warn", "config.tomlは解釈しないためhandler・features.hooks・trustの実効状態は未確認です。Codexで /hooks を確認してください");
+    } else if (source.format === "opaque") {
+      log("warn", `Codex opaque env-extra sourceを検出しました(内容未確認): ${source.path}`);
     }
   }
 
-  if (matchedCommands.length > 0) {
-    log("ok", `Codex の Stop hook が登録されています: ${matchedCommands.join(" / ")}`);
-    // 登録済みでも codex 側で信頼承認していないと発火しないため、確認を促す(info)。
-    log("ok", "codex 側で hook を承認済みか確認してください(未承認だと通知されません)");
-  } else {
-    log("warn", "Codex を検出しましたが hook が未登録です。init --codex で登録できます");
+  for (const warning of diagnostics.warnings) {
+    if (warning.kind === "nonstandard-feature-field") {
+      log("warn", `Codex JSON sourceに非標準features.hooks fieldがあります。global disabledの根拠にはしません: ${warning.sourcePath}`);
+    } else {
+      log("warn", `Codex JSON sourceを安全に検査できません(${warning.kind}): ${warning.sourcePath}`);
+    }
   }
+
+  for (const handler of diagnostics.handlers) {
+    log(
+      handler.pathMatches && handler.timeoutMatches ? "ok" : "warn",
+      `Codex ${handler.event} hookを設定ファイル上で確認(${handler.scope}): ${handler.sourcePath}; actual nodePath=${handler.nodePath}, actual cliPath=${handler.cliPath}, expected nodePath=${process.execPath.replace(/\\/g, "/")}, expected cliPath=${expectedCli.replace(/\\/g, "/")}, 実体path=${handler.pathMatches ? "一致" : "不一致(stale/wrong)"}, timeout=${String(handler.timeout)}`,
+    );
+  }
+
+  for (const event of CODEX_HOOK_EVENTS) {
+    if (!diagnostics.handlers.some((handler) => handler.event === event)) {
+      log("warn", `Codex ${event} hookは検査できたJSON sourceでは確認できません。inline/plugin/managed sourceは未確認です。必要なら init --codex、実効状態はCodexの /hooksを確認してください`);
+    }
+  }
+  for (const duplicate of diagnostics.exactDuplicates) {
+    log("warn", `Codex ${duplicate.event} hookのexact duplicateを検査済みJSONで確認(${duplicate.count}件): ${duplicate.sources.join(" / ")}。matching hooksは複数sourceからすべて実行され得ます`);
+  }
+  for (const mixed of diagnostics.sameLayerMixedRepresentation) {
+    log("warn", `Codex ${mixed.scope} layerにhooks.jsonとconfig.tomlが併存しています(potential duplicate、TOML内容未確認): ${mixed.json} / ${mixed.toml}`);
+  }
+  log("warn", "Codex hookのglobal/individual disabled、project/hook trustは静的診断では未確認です。Codexで /hooksを確認してください");
+  log("warn", "plugin/managed/session sourceを含む実効状態は静的診断だけでは完全列挙できません。Codexで /hooksを確認してください");
 
   // sessions/ の存在。無くても「まだセッションが無いだけ」の可能性があるため ❌ にはしない。
   const sessionsDir = join(codexHome(), "sessions");

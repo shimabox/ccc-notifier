@@ -10,6 +10,7 @@
 //     track 側で無限待ちの await を追加しない。
 
 import { aggregateCodexTurn } from "./codex/transcript";
+import { codexActivityProjectionKey } from "./codex/subagent-store";
 import { writeDashboardHtml } from "./dashboard";
 import {
   isFullDashboardDue,
@@ -170,6 +171,14 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     // Codex 由来の記録には source を付ける(ダッシュボード/レポートのソース識別用。Claude は付けない)。
     if (isCodex) {
       record.source = "codex";
+      // valid parent turnにはactivityの到着順と無関係に、keyCheck検証済みの匿名join keyを保存する。
+      // key/ledger整合性の検証失敗だけをmain記録から隔離し、未検証keyは履歴へ付けない。
+      try {
+        const projectionKey = codexActivityProjectionKey(parsed);
+        if (projectionKey !== null) record.activityProjectionKey = projectionKey;
+      } catch {
+        logError("track:codex-subagent-projection", new Error("activity projection was not attached"));
+      }
     }
     if (breakdown.unknownModels.length > 0) {
       record.unknownModels = breakdown.unknownModels;

@@ -301,6 +301,7 @@ interface TurnEmbed {
   pr: string; // プロンプト(最大 PROMPT_MAX 字 + マーク)
   tr: boolean; // 切り詰めたか
   sa: { usd: string; jpy: string; models: string; apiCalls: number } | null;
+  ca?: { started: number; stopped: number; agentTypes: string[]; usageStatus: "partial" | "unavailable" };
   sc?: "codex"; // Codex 由来のみ。Claude はキー省略(容量節約・後方互換)
 }
 
@@ -320,6 +321,7 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
   const primary = rec.models[0] ?? "unknown";
   const extra = rec.models.length > 1 ? ` +${rec.models.length - 1}` : "";
   const saMark = rec.subagents ? " +SA" : "";
+  const codexActivityMark = rec.source === "codex" && rec.subagentActivity ? " +SA(未集計)" : "";
   let sa: TurnEmbed["sa"] = null;
   if (rec.subagents) {
     const saModels = Object.keys(rec.subagents.costByModel).map((m) => modelDisplayName(m));
@@ -337,7 +339,7 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
     p: basename(rec.project) || rec.project || "(unknown)",
     pf: rec.project ?? "",
     br: rec.gitBranch,
-    md: modelDisplayName(primary) + extra + saMark,
+    md: modelDisplayName(primary) + extra + saMark + codexActivityMark,
     mr: rec.models,
     ti: formatTokens(turnInputTokens(rec)),
     to: formatTokens(turnOutputTokens(rec)),
@@ -350,6 +352,14 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
   };
   // Codex 由来のみ sc を付与(Claude はキー省略で容量節約・JSON では undefined キーは出力されない)。
   if (rec.source === "codex") out.sc = "codex";
+  if (rec.source === "codex" && rec.subagentActivity) {
+    out.ca = {
+      started: rec.subagentActivity.started,
+      stopped: rec.subagentActivity.stopped,
+      agentTypes: [...rec.subagentActivity.agentTypes],
+      usageStatus: rec.subagentActivity.usageStatus,
+    };
+  }
   return out;
 }
 
@@ -1065,6 +1075,12 @@ const APP_JS = `<script>
       var saLine = document.createElement('div'); saLine.className = 'detail-meta';
       saLine.textContent = 'サブエージェント: ' + (t.sa.usd||'') + '(' + (t.sa.jpy||'') + ')· ' + (t.sa.models||'') + ' · APIコール ' + (t.sa.apiCalls||0);
       dtd.appendChild(saLine);
+    }
+    if(t.ca){
+      var caLine = document.createElement('div'); caLine.className = 'detail-meta';
+      caLine.textContent = 'Codexサブエージェント: 利用あり・料金未集計 · 開始 ' +
+        (t.ca.started||0) + ' · 終了 ' + (t.ca.stopped||0) + ' · 種別 ' + ((t.ca.agentTypes||[]).join(', ')||'unknown');
+      dtd.appendChild(caLine);
     }
     var pre = document.createElement('div'); pre.className = 'detail-prompt';
     pre.textContent = full.length ? full : '(プロンプトなし)';

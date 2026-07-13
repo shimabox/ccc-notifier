@@ -492,19 +492,20 @@ describe("runInit / runUninstall — Codex 対応", () => {
     expect(existsSync(settingsFile)).toBe(false);
   });
 
-  it("--yes --codex で hooks.json を作成し、マーカー command(track --codex)と信頼案内を出す", async () => {
+  it("--yes --codex で hooks.json を作成し、3イベントの専用commandと信頼案内を出す", async () => {
     const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
     expect(code).toBe(0);
     expect(existsSync(codexHooks)).toBe(true);
 
     const hook = readCodexHooks().hooks.Stop[0].hooks[0];
     expect(hook.command).toContain("ccc-notifier");
-    expect(hook.command).toContain("track --codex");
-    // Codex エントリは timeout を持たない。
-    expect("timeout" in hook).toBe(false);
+    expect(hook.command).toContain("__ccc-notifier-codex-hook Stop");
+    expect(hook.timeout).toBe(20);
+    expect(readCodexHooks().hooks.SubagentStart).toHaveLength(1);
+    expect(readCodexHooks().hooks.SubagentStop).toHaveLength(1);
 
     // 完了メッセージに登録の旨と信頼確認の案内が stdout に出る。
-    expect(out).toContain("Codex にも Stop hook を登録しました");
+    expect(out).toContain("Codex に Stop/SubagentStart/SubagentStop hook を登録しました");
     expect(out).toContain("Trust all and continue");
   });
 
@@ -528,7 +529,7 @@ describe("runInit / runUninstall — Codex 対応", () => {
 
     const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
     expect(code).toBe(0);
-    expect(out).toContain("Codex の Stop hook は登録済みです");
+    expect(out).toContain("Codex の Stop/SubagentStart/SubagentStop hook は登録済みです");
     // unchanged は書き込まないためバックアップは増えず、エントリも1件のまま。
     expect(codexBackups()).toHaveLength(0);
     expect(readCodexHooks().hooks.Stop).toHaveLength(1);
@@ -544,7 +545,7 @@ describe("runInit / runUninstall — Codex 対応", () => {
 
     const { code, out } = await captureIO(() => runUninstall([]));
     expect(code).toBe(0);
-    expect(out).toContain("Codex の Stop hook を削除しました");
+    expect(out).toContain("Codex の Stop/SubagentStart/SubagentStop hook を削除しました");
 
     const after = readCodexHooks();
     // Stop は空になりキーごと消え、PermissionRequest は1項目も変わらない。
@@ -556,7 +557,7 @@ describe("runInit / runUninstall — Codex 対応", () => {
     // hooks.json が無い(未登録)状態での uninstall。
     const { code, out } = await captureIO(() => runUninstall([]));
     expect(code).toBe(0);
-    expect(out).not.toContain("Codex の Stop hook を削除しました");
+    expect(out).not.toContain("Codex の Stop/SubagentStart/SubagentStop hook を削除しました");
     expect(existsSync(codexHooks)).toBe(false);
   });
 
@@ -570,8 +571,8 @@ describe("runInit / runUninstall — Codex 対応", () => {
     // ファイルは1バイトも変わらず、バックアップも作らない。
     expect(readFileSync(codexHooks, "utf8")).toBe(broken);
     expect(codexBackups()).toHaveLength(0);
-    // 手動追記スニペット(track --codex を含む)が stderr に案内される。
-    expect(err).toContain("hooks.Stop");
-    expect(err).toContain("track --codex");
+    // 手動追記スニペット(3イベントを含む)が stderr に案内される。
+    expect(err).toContain("3イベント");
+    expect(err).toContain("__ccc-notifier-codex-hook SubagentStop");
   });
 });
