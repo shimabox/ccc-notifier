@@ -646,7 +646,9 @@ describe("runDoctor — Codex ブロック", () => {
     expect(output).toContain("Codex UserPromptSubmit hook");
     expect(output).toContain("Codex SubagentStart hook");
     expect(output).toContain("設定ファイル上で確認(user)");
-    expect(output).toContain(`actual nodePath=${process.execPath}`);
+    expect(output).toContain(
+      `actual nodePath=${process.execPath.replace(/\\/g, "/")}`,
+    );
     expect(output).toContain("actual cliPath=/x/ccc-notifier/dist/cli.js");
     expect(output).toContain("expected nodePath=");
     expect(output).toContain("expected cliPath=");
