@@ -85,6 +85,18 @@ describe('unknown models', () => {
     expect(result.usd).toBe(0);
     expect(result.unknownModels).toEqual(['unknown-model-xyz']);
   });
+
+  it('prototype-like model IDs remain own zero-cost keys without changing built-ins', () => {
+    const main = Object.create(null) as UsageByModel;
+    main['__proto__'] = { input: 1, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 };
+    main['constructor'] = { input: 1, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 };
+    const result = computeCost(main, {}, table);
+    expect(Object.hasOwn(result.byModel, '__proto__')).toBe(true);
+    expect(Object.hasOwn(result.byModel, 'constructor')).toBe(true);
+    expect(result.byModel['__proto__']).toBe(0);
+    expect(result.byModel['constructor']).toBe(0);
+    expect(Object.prototype).not.toHaveProperty('input');
+  });
 });
 
 describe('loadPriceTable', () => {

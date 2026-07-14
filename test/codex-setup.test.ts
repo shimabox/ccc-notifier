@@ -68,7 +68,7 @@ afterEach(() => {
 // ============ 1. hooks.json 無し ============
 
 describe("registerCodexHook — hooks.json 不在", () => {
-  it("新規作成し、hooks.Stop に1件だけ持つ。backupPath は null・バックアップも作らない", () => {
+  it("新規作成し、4イベントに1件ずつ持つ。backupPath は null・バックアップも作らない", () => {
     expect(existsSync(hooksFile)).toBe(false);
 
     const res = registerCodexHook(NODE, CLI);
@@ -77,15 +77,17 @@ describe("registerCodexHook — hooks.json 不在", () => {
 
     const h = readHooks();
     expect(Object.keys(h)).toEqual(["hooks"]);
-    expect(Object.keys(h.hooks)).toEqual(["Stop"]);
+    expect(Object.keys(h.hooks)).toEqual(["Stop", "UserPromptSubmit", "SubagentStart", "SubagentStop"]);
     expect(h.hooks.Stop).toHaveLength(1);
+    expect(h.hooks.UserPromptSubmit).toHaveLength(1);
 
     const hook = h.hooks.Stop[0].hooks[0];
     expect(hook.type).toBe("command");
     expect(hook.command).toContain("ccc-notifier");
-    expect(hook.command).toContain("track --codex");
-    // Codex エントリは timeout を持たない。
-    expect("timeout" in hook).toBe(false);
+    expect(hook.command).toContain("__ccc-notifier-codex-hook Stop");
+    expect(hook.timeout).toBe(20);
+    expect(h.hooks.SubagentStart[0].hooks[0].command).toContain("__ccc-notifier-codex-hook SubagentStart");
+    expect(h.hooks.SubagentStop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook SubagentStop");
 
     // 末尾改行付き・2スペースインデント。
     const text = readFileSync(hooksFile, "utf8");
@@ -115,7 +117,7 @@ describe("registerCodexHook — 既存 PermissionRequest を壊さない", () =>
 
     // Stop に本ツールのエントリが1件だけ足される。
     expect(after.hooks.Stop).toHaveLength(1);
-    expect(after.hooks.Stop[0].hooks[0].command).toContain("track --codex");
+    expect(after.hooks.Stop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook Stop");
 
     // バックアップは元ファイルとバイト一致・1つだけ。
     const b = backups();
@@ -142,11 +144,106 @@ describe("registerCodexHook — 冪等", () => {
     expect(statSync(hooksFile).mtimeMs).toBe(mtimeAfterFirst);
     expect(backups()).toHaveLength(0);
   });
+
+  it("既存の正準3イベントへUserPromptSubmitだけを追加し、元rawのbackupを1つ作る", () => {
+    const hooks = Object.fromEntries(["Stop", "SubagentStart", "SubagentStop"].map((event) => [
+      event,
+      [{ hooks: [{ type: "command", command: codexHookCommand(NODE, CLI, event as "Stop" | "SubagentStart" | "SubagentStop"), timeout: 20 }] }],
+    ]));
+    const raw = JSON.stringify({ future: { keep: true }, hooks });
+    writeFileSync(hooksFile, raw, "utf8");
+
+    const result = registerCodexHook(NODE, CLI);
+    expect(result.status).toBe("written");
+    expect(readHooks().future).toEqual({ keep: true });
+    expect(readHooks().hooks.UserPromptSubmit[0].hooks[0].command)
+      .toBe(codexHookCommand(NODE, CLI, "UserPromptSubmit"));
+    expect(backups()).toHaveLength(1);
+    expect(readFileSync(join(tmpDir, backups()[0]), "utf8")).toBe(raw);
+  });
 });
 
 // ============ 4. 古いマーカーエントリの置換 ============
 
 describe("registerCodexHook — 古いコマンドの置換", () => {
+  it("任意X/Yが専用subcommandを模倣してもowned扱いせずregister/uninstallで不変", () => {
+    const impostor = {
+      futureGroupKey: { keep: true },
+      hooks: [{ type: "command", command: '"/tmp/X" "/tmp/Y" __ccc-notifier-codex-hook Stop', timeout: 20 }],
+    };
+    writeFileSync(hooksFile, JSON.stringify({ hooks: { Stop: [impostor] } }));
+    registerCodexHook(NODE, CLI);
+    expect(readHooks().hooks.Stop[0]).toEqual(impostor);
+    removeCodexHook();
+    expect(readHooks().hooks.Stop).toEqual([impostor]);
+  });
+
+  it("絶対pathでも正規ccc-notifier dist実体でない模倣commandをowned扱いしない", () => {
+    const impostor = { hooks: [{
+      type: "command",
+      command: '"/tmp/node" "/tmp/ccc-notifier-fake/cli.js" __ccc-notifier-codex-hook Stop',
+      timeout: 20,
+    }] };
+    writeFileSync(hooksFile, JSON.stringify({ hooks: { Stop: [impostor] } }));
+    registerCodexHook(NODE, CLI);
+    expect(readHooks().hooks.Stop[0]).toEqual(impostor);
+    removeCodexHook();
+    expect(readHooks().hooks.Stop[0]).toEqual(impostor);
+  });
+
+  it("既存non-owned empty groupと未知キーをregister/uninstallの両方でdeep-equal保持する", () => {
+    const empty = { matcher: "never", future: [1, 2], hooks: [] };
+    writeFileSync(hooksFile, JSON.stringify({ root: { keep: true }, hooks: { Stop: [empty] } }));
+    registerCodexHook(NODE, CLI);
+    expect(readHooks().hooks.Stop[0]).toEqual(empty);
+    removeCodexHook();
+    const after = readHooks();
+    expect(after.root).toEqual({ keep: true });
+    expect(after.hooks.Stop).toEqual([empty]);
+  });
+
+  it("同groupの他handler・group/handler未知キーをdeep-equalで保持し、文字列markerだけの他toolを所有しない", () => {
+    const sibling = { type: "command", command: "bash ccc-notifier-helper.sh", timeout: 7, custom: { a: 1 } };
+    const owned = {
+      type: "command",
+      command: codexHookCommand(NODE, OLD_CLI, "Stop"),
+      timeout: 19,
+      futureHandlerKey: { keep: true },
+    };
+    const group = { matcher: "", futureGroupKey: ["keep"], hooks: [sibling, owned] };
+    writeFileSync(hooksFile, JSON.stringify({ rootFuture: 3, hooks: { Stop: [group] } }));
+
+    registerCodexHook(NODE, CLI);
+    const after = readHooks();
+    expect(after.rootFuture).toBe(3);
+    expect(after.hooks.Stop[0].futureGroupKey).toEqual(["keep"]);
+    expect(after.hooks.Stop[0].hooks[0]).toEqual(sibling);
+    expect(after.hooks.Stop[0].hooks[1].futureHandlerKey).toEqual({ keep: true });
+    expect(after.hooks.Stop[0].hooks[1].timeout).toBe(20);
+    expect(registerCodexHook(NODE, CLI).status).toBe("unchanged");
+
+    removeCodexHook();
+    const removed = readHooks();
+    expect(removed.hooks.Stop).toEqual([{ matcher: "", futureGroupKey: ["keep"], hooks: [sibling] }]);
+  });
+
+  it("旧track --codexの完全形だけをStopでupgradeし、似た他commandは残す", () => {
+    const legacy = { type: "command", command: `"${NODE}" "${OLD_CLI}" track --codex` };
+    const similar = { type: "command", command: `"${NODE}" "/other/cli.js" track --codex` };
+    writeFileSync(hooksFile, JSON.stringify({ hooks: { Stop: [{ hooks: [legacy, similar] }] } }));
+    registerCodexHook(NODE, CLI);
+    const handlers = readHooks().hooks.Stop[0].hooks;
+    expect(handlers[0].command).toBe(codexHookCommand(NODE, CLI, "Stop"));
+    expect(handlers[1]).toEqual(similar);
+  });
+
+  it("重複した自handlerだけを除き、空になった重複groupだけを削除する", () => {
+    const handler = { type: "command", command: codexHookCommand(NODE, CLI), timeout: 20 };
+    writeFileSync(hooksFile, JSON.stringify({ hooks: { Stop: [{ marker: 1, hooks: [handler] }, { marker: 2, hooks: [handler] }] } }));
+    registerCodexHook(NODE, CLI);
+    expect(readHooks().hooks.Stop).toEqual([{ marker: 1, hooks: [handler] }]);
+  });
+
   it("マーカー一致エントリの command を更新し、重複させず、非マーカー Stop エントリは残す", () => {
     const nonMarker = { hooks: [{ type: "command", command: "bash /some/other/hook.sh" }] };
     const oldMarker = { hooks: [{ type: "command", command: codexHookCommand(NODE, OLD_CLI) }] };
@@ -208,7 +305,8 @@ describe("registerCodexHook — 破損・異形は書かず manual", () => {
     // JSON エスケープに耐える部分文字列で command 情報の存在を確認する。
     expect(res.manualSnippet).toBeDefined();
     expect(res.manualSnippet).toContain("ccc-notifier");
-    expect(res.manualSnippet).toContain("track --codex");
+    expect(res.manualSnippet).toContain("__ccc-notifier-codex-hook UserPromptSubmit");
+    expect(res.manualSnippet).toContain("__ccc-notifier-codex-hook SubagentStart");
 
     // ファイルは1バイトも変わらず、バックアップも作らない。
     expect(readFileSync(hooksFile, "utf8")).toBe(broken);
@@ -282,6 +380,9 @@ describe("removeCodexHook", () => {
 
     const after = readHooks();
     expect("Stop" in after.hooks).toBe(false); // Stop キーごと消える
+    expect("UserPromptSubmit" in after.hooks).toBe(false);
+    expect("SubagentStart" in after.hooks).toBe(false);
+    expect("SubagentStop" in after.hooks).toBe(false);
     expect(after.hooks.PermissionRequest).toBeDefined(); // 他イベントは維持
   });
 
@@ -316,14 +417,14 @@ describe("removeCodexHook", () => {
 // ============ 7. codexHookCommand のクォート流儀 ============
 
 describe("codexHookCommand — Claude 側 hook と同じクォート流儀", () => {
-  it("空白入りパスでも両パスを '\"' で囲み、末尾は track --codex", () => {
+  it("空白入りパスでも両パスを '\"' で囲み、専用subcommandを使う", () => {
     const cmd = codexHookCommand("/a b/node", "/c d/ccc-notifier/cli.js");
     // Claude 側 buildHookCommand の `"<node>" "<cli>" track` に --codex を足した形。
-    expect(cmd).toBe('"/a b/node" "/c d/ccc-notifier/cli.js" track --codex');
+    expect(cmd).toBe('"/a b/node" "/c d/ccc-notifier/cli.js" __ccc-notifier-codex-hook Stop');
     expect(cmd.startsWith('"')).toBe(true);
     expect(cmd).toContain('"/a b/node"');
     expect(cmd).toContain('"/c d/ccc-notifier/cli.js"');
-    expect(cmd.endsWith("track --codex")).toBe(true);
+    expect(cmd.endsWith("__ccc-notifier-codex-hook Stop")).toBe(true);
   });
 
   it("win32 ではパス区切りを '/' に正規化する", () => {
@@ -334,7 +435,7 @@ describe("codexHookCommand — Claude 側 hook と同じクォート流儀", () 
         "C:\\Program Files\\node.exe",
         "C:\\Users\\me\\ccc-notifier\\cli.js",
       );
-      expect(cmd).toBe('"C:/Program Files/node.exe" "C:/Users/me/ccc-notifier/cli.js" track --codex');
+      expect(cmd).toBe('"C:/Program Files/node.exe" "C:/Users/me/ccc-notifier/cli.js" __ccc-notifier-codex-hook Stop');
       expect(cmd).not.toContain("\\");
     } finally {
       if (orig) Object.defineProperty(process, "platform", orig);

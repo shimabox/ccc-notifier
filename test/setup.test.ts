@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +43,26 @@ function backupsInTmp(): string[] {
 
 function stopCommand(settings: Record<string, any>): string {
   return settings.hooks.Stop[0].hooks[0].command;
+}
+
+function snapshotTree(root: string): Record<string, string> {
+  const snapshot: Record<string, string> = {};
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const relative = prefix ? join(prefix, entry.name) : entry.name;
+      const absolute = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        snapshot[`${relative}/`] = "directory";
+        walk(absolute, relative);
+      } else if (entry.isSymbolicLink()) {
+        snapshot[relative] = "symlink";
+      } else {
+        snapshot[relative] = readFileSync(absolute, "utf8");
+      }
+    }
+  };
+  walk(root, "");
+  return snapshot;
 }
 
 beforeEach(() => {
@@ -492,20 +514,167 @@ describe("runInit / runUninstall — Codex 対応", () => {
     expect(existsSync(settingsFile)).toBe(false);
   });
 
-  it("--yes --codex で hooks.json を作成し、マーカー command(track --codex)と信頼案内を出す", async () => {
+  it("--yes --codex で hooks.json を作成し、4イベントの専用commandと信頼案内を出す", async () => {
     const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
     expect(code).toBe(0);
     expect(existsSync(codexHooks)).toBe(true);
 
     const hook = readCodexHooks().hooks.Stop[0].hooks[0];
     expect(hook.command).toContain("ccc-notifier");
-    expect(hook.command).toContain("track --codex");
-    // Codex エントリは timeout を持たない。
-    expect("timeout" in hook).toBe(false);
+    expect(hook.command).toContain("__ccc-notifier-codex-hook Stop");
+    expect(hook.timeout).toBe(20);
+    expect(readCodexHooks().hooks.SubagentStart).toHaveLength(1);
+    expect(readCodexHooks().hooks.SubagentStop).toHaveLength(1);
+    expect(readCodexHooks().hooks.UserPromptSubmit).toHaveLength(1);
 
     // 完了メッセージに登録の旨と信頼確認の案内が stdout に出る。
-    expect(out).toContain("Codex にも Stop hook を登録しました");
+    expect(out).toContain("Codex に Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を登録しました");
     expect(out).toContain("Trust all and continue");
+  });
+
+  it("既存 config の素の --yes --codex は Codex hook だけを移行し、他ファイルと通知をバイト不変に保つ", async () => {
+    mkdirSync(homeDir, { recursive: true });
+    const configRaw = `{
+  "notify": { "os": false, "slack": { "webhookUrl": "https://hooks.slack.com/services/XXX", "promptChars": 77, "sendFullPrompt": true } },
+  "minNotifyUSD": 1.25,
+  "costLabel": "actual",
+  "fx": { "fallbackRate": 177, "cacheHours": 3 },
+  "includeDailyTotal": false,
+  "monthlyBudgetUSD": 0,
+  "dashboard": { "autoRegenerate": false, "autoReloadSec": 9, "days": 14 },
+  "unknownFutureKey": { "preserve": true }
+}`;
+    const settingsRaw = fixtureRaw();
+    const lastNotifyRaw = '{"sentinel":"do-not-touch"}\n';
+    const legacyCommand = `"${process.execPath}" "${cliPath}" track --codex`;
+    const codexRaw = JSON.stringify({
+      futureTopLevel: { preserve: true },
+      hooks: {
+        Stop: [{ matcher: "", hooks: [{ type: "command", command: legacyCommand, timeout: 15 }] }],
+        PermissionRequest: [{ hooks: [{ type: "command", command: "/other/tool" }] }],
+      },
+    });
+    writeFileSync(join(homeDir, "config.json"), configRaw, "utf8");
+    writeFileSync(settingsFile, settingsRaw, "utf8");
+    writeFileSync(join(homeDir, "last-notify.json"), lastNotifyRaw, "utf8");
+    mkdirSync(join(homeDir, "cache"), { recursive: true });
+    writeFileSync(join(homeDir, "cache", "pricing.json"), '{"sentinel":"cache"}', "utf8");
+    writeFileSync(join(homeDir, "history.jsonl"), '{"sentinel":"history"}\n', "utf8");
+    writeFileSync(join(homeDir, "cursors.json"), '{"sentinel":"cursor"}', "utf8");
+    writeFileSync(join(homeDir, "report.html"), "<p>recent</p>", "utf8");
+    writeFileSync(join(homeDir, "report-all.html"), "<p>all</p>", "utf8");
+    writeFileSync(join(homeDir, "muted.json"), '{"until":null}', "utf8");
+    writeFileSync(join(homeDir, "codex-subagent-activity.json"), '{"schemaVersion":1,"agents":{}}\n', "utf8");
+    writeFileSync(codexHooks, codexRaw, "utf8");
+    const homeTreeBefore = snapshotTree(homeDir);
+
+    const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
+
+    expect(code).toBe(0);
+    expect(snapshotTree(homeDir)).toEqual(homeTreeBefore);
+    expect(readFileSync(join(homeDir, "config.json"), "utf8")).toBe(configRaw);
+    expect(readFileSync(settingsFile, "utf8")).toBe(settingsRaw);
+    expect(readFileSync(join(homeDir, "last-notify.json"), "utf8")).toBe(lastNotifyRaw);
+    expect(backupsInTmp()).toHaveLength(0);
+    expect(readdirSync(homeDir).filter((name) => name.startsWith("config.json.bak-"))).toHaveLength(0);
+    expect(codexBackups()).toHaveLength(1);
+    expect(readFileSync(join(codexHome, codexBackups()[0]), "utf8")).toBe(codexRaw);
+
+    const migrated = readCodexHooks();
+    expect(migrated.futureTopLevel).toEqual({ preserve: true });
+    expect(migrated.hooks.PermissionRequest).toEqual(JSON.parse(codexRaw).hooks.PermissionRequest);
+    expect(migrated.hooks.Stop[0].matcher).toBe("");
+    expect(migrated.hooks.Stop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook Stop");
+    expect(migrated.hooks.SubagentStart).toHaveLength(1);
+    expect(migrated.hooks.SubagentStop).toHaveLength(1);
+    expect(migrated.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(out).toContain("Codex hook のみを確認・更新しました");
+    expect(out).toContain("テスト通知も送信していません");
+    expect(out).toContain("Codex を再起動");
+    expect(out).not.toContain("settings を更新しました");
+  });
+
+  it("既存 config が不正 JSON でも読み込まず、Codex hook 限定移行を行う", async () => {
+    mkdirSync(homeDir, { recursive: true });
+    const brokenConfig = "{ broken config";
+    writeFileSync(join(homeDir, "config.json"), brokenConfig, "utf8");
+    const absentClaudeDir = join(tmpDir, "absent-claude-home");
+    process.env.CCCN_CLAUDE_SETTINGS = join(absentClaudeDir, "settings.json");
+
+    const { code, out } = await captureIO(() => runInit(["-y", "--codex"]));
+
+    expect(code).toBe(0);
+    expect(readFileSync(join(homeDir, "config.json"), "utf8")).toBe(brokenConfig);
+    expect(existsSync(join(homeDir, "error.log"))).toBe(false);
+    expect(existsSync(join(homeDir, "cache"))).toBe(false);
+    expect(existsSync(absentClaudeDir)).toBe(false);
+    expect(readCodexHooks().hooks.SubagentStop).toHaveLength(1);
+    expect(out).toContain("Codex hook のみを確認・更新しました");
+  });
+
+  it("既存 config でも設定変更フラグ付き --codex は通常 init として明示設定を反映する", async () => {
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(
+      join(homeDir, "config.json"),
+      JSON.stringify({ notify: { os: true, slack: null }, monthlyBudgetUSD: 0 }),
+      "utf8",
+    );
+
+    const { code, out } = await captureIO(() =>
+      runInit(["--yes", "--codex", "--budget", "500"]),
+    );
+
+    expect(code).toBe(0);
+    expect(JSON.parse(readFileSync(join(homeDir, "config.json"), "utf8")).monthlyBudgetUSD).toBe(500);
+    expect(existsSync(settingsFile)).toBe(true);
+    expect(existsSync(join(homeDir, "last-notify.json"))).toBe(true);
+    expect(out).toContain("settings を更新しました");
+    expect(out).not.toContain("Codex hook のみを確認・更新しました");
+  });
+
+  it("値欠落フラグや未知フラグを含む argv は Codex hook 限定移行に入らない", async () => {
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(
+      join(homeDir, "config.json"),
+      JSON.stringify({ notify: { os: false, slack: null }, monthlyBudgetUSD: 0 }),
+      "utf8",
+    );
+
+    const missingValue = await captureIO(() => runInit(["--yes", "--codex", "--budget"]));
+    expect(missingValue.code).toBe(0);
+    expect(missingValue.out).toContain("settings を更新しました");
+    expect(missingValue.out).not.toContain("Codex hook のみを確認・更新しました");
+
+    const unknown = await captureIO(() => runInit(["--yes", "--codex", "--unknown"]));
+    expect(unknown.code).toBe(0);
+    expect(unknown.out).toContain("settings を更新しました");
+    expect(unknown.out).not.toContain("Codex hook のみを確認・更新しました");
+  });
+
+  it("dangling symlink の config path entry も既存扱いにして限定移行し、symlink を保持する", async () => {
+    mkdirSync(homeDir, { recursive: true });
+    const configPath = join(homeDir, "config.json");
+    symlinkSync(join(homeDir, "missing-target.json"), configPath);
+
+    const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
+
+    expect(code).toBe(0);
+    expect(out).toContain("Codex hook のみを確認・更新しました");
+    expect(existsSync(configPath)).toBe(false); // target は依然として不在
+    expect(existsSync(settingsFile)).toBe(false);
+    expect(readCodexHooks().hooks.SubagentStart).toHaveLength(1);
+  });
+
+  it("config path entry を ENOENT 以外で判定できない場合は全変更を中止して exit 1", async () => {
+    symlinkSync(homeDir, homeDir); // config.json の lstat が ELOOP になる自己参照symlink
+
+    const { code, err } = await captureIO(() => runInit(["--yes", "--codex"]));
+
+    expect(code).toBe(1);
+    expect(err).toContain("config.json の存在を安全に確認できませんでした");
+    expect(err).toContain("すべての変更を中止しました");
+    expect(existsSync(codexHooks)).toBe(false);
+    expect(existsSync(settingsFile)).toBe(false);
   });
 
   it("--yes のみ(--codex 未指定)は Codex に一切触れず hooks.json を作らない", async () => {
@@ -528,7 +697,7 @@ describe("runInit / runUninstall — Codex 対応", () => {
 
     const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
     expect(code).toBe(0);
-    expect(out).toContain("Codex の Stop hook は登録済みです");
+    expect(out).toContain("Codex の Stop/UserPromptSubmit/SubagentStart/SubagentStop hook は登録済みです");
     // unchanged は書き込まないためバックアップは増えず、エントリも1件のまま。
     expect(codexBackups()).toHaveLength(0);
     expect(readCodexHooks().hooks.Stop).toHaveLength(1);
@@ -544,7 +713,7 @@ describe("runInit / runUninstall — Codex 対応", () => {
 
     const { code, out } = await captureIO(() => runUninstall([]));
     expect(code).toBe(0);
-    expect(out).toContain("Codex の Stop hook を削除しました");
+    expect(out).toContain("Codex の Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を削除しました");
 
     const after = readCodexHooks();
     // Stop は空になりキーごと消え、PermissionRequest は1項目も変わらない。
@@ -556,22 +725,41 @@ describe("runInit / runUninstall — Codex 対応", () => {
     // hooks.json が無い(未登録)状態での uninstall。
     const { code, out } = await captureIO(() => runUninstall([]));
     expect(code).toBe(0);
-    expect(out).not.toContain("Codex の Stop hook を削除しました");
+    expect(out).not.toContain("Codex の Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を削除しました");
     expect(existsSync(codexHooks)).toBe(false);
   });
 
-  it("壊れた hooks.json + --yes --codex は manual 案内を出し、ファイル不変で init は成功(exit 0)", async () => {
+  it("壊れた hooks.json の限定移行は manual 案内を出し、ファイル不変で exit 1", async () => {
+    const broken = "{ this is not valid json ";
+    mkdirSync(homeDir, { recursive: true });
+    const configRaw = '{"sentinel":"preserve"}';
+    writeFileSync(join(homeDir, "config.json"), configRaw, "utf8");
+    writeFileSync(codexHooks, broken, "utf8");
+
+    const { code, err } = await captureIO(() => runInit(["--yes", "--codex"]));
+    expect(code).toBe(1);
+    // ファイルは1バイトも変わらず、バックアップも作らない。
+    expect(readFileSync(codexHooks, "utf8")).toBe(broken);
+    expect(codexBackups()).toHaveLength(0);
+    expect(readFileSync(join(homeDir, "config.json"), "utf8")).toBe(configRaw);
+    expect(existsSync(settingsFile)).toBe(false);
+    expect(existsSync(join(homeDir, "last-notify.json"))).toBe(false);
+    // 手動追記スニペット(4イベントを含む)が stderr に案内される。
+    expect(err).toContain("4イベント");
+    expect(err).toContain("__ccc-notifier-codex-hook SubagentStop");
+    expect(err).toContain("限定移行を完了できませんでした");
+  });
+
+  it("config 不在の通常 init は壊れた Codex hooks を副次エラーとして扱い exit 0 を維持する", async () => {
     const broken = "{ this is not valid json ";
     writeFileSync(codexHooks, broken, "utf8");
 
     const { code, err } = await captureIO(() => runInit(["--yes", "--codex"]));
-    // Codex hooks.json が壊れていても init 自体は成功する(Claude 側は正常に完了)。
+
     expect(code).toBe(0);
-    // ファイルは1バイトも変わらず、バックアップも作らない。
     expect(readFileSync(codexHooks, "utf8")).toBe(broken);
-    expect(codexBackups()).toHaveLength(0);
-    // 手動追記スニペット(track --codex を含む)が stderr に案内される。
-    expect(err).toContain("hooks.Stop");
-    expect(err).toContain("track --codex");
+    expect(err).toContain("4イベント");
+    expect(existsSync(join(homeDir, "config.json"))).toBe(true);
+    expect(existsSync(settingsFile)).toBe(true);
   });
 });

@@ -386,6 +386,7 @@ describe("runDoctor", () => {
     delete process.env.CCCN_CLAUDE_PROJECTS;
     delete process.env.CCCN_CLAUDE_SETTINGS;
     delete process.env.CCCN_CODEX_HOME;
+    delete process.env.CCCN_CODEX_HOOK_SOURCES;
     delete process.env.CCCN_DRY_RUN;
     delete process.env.CCCN_HOME;
     vi.unstubAllGlobals();
@@ -401,6 +402,8 @@ describe("runDoctor", () => {
     expect(code).toBe(0);
     expect((output.match(/❌/g) ?? []).length).toBe(0);
     expect((output.match(/✅/g) ?? []).length).toBeGreaterThan(0);
+    expect(output).toContain("Claude Code 直近セッション合計:");
+    expect(output).not.toContain("✅ 直近セッション合計:");
   });
 
   it("Stop エントリの無い settings.json では 1 を返す", async () => {
@@ -574,11 +577,30 @@ describe("runDoctor — Codex ブロック", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in test")));
   });
 
+  function writeOwnedStopHook(codexHome: string, legacy = false): void {
+    mkdirSync(codexHome, { recursive: true });
+    const command = legacy
+      ? `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" track --codex`
+      : `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook Stop`;
+    writeFileSync(join(codexHome, "hooks.json"), JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command, timeout: 20 }] }] },
+    }));
+  }
+
+  function placeDoctorRollout(codexHome: string, fixture = "rollout-multiturn.jsonl"): string {
+    const dir = join(codexHome, "sessions", "2026", "07", "14");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "rollout-doctor.jsonl");
+    copyFileSync(fileURLToPath(new URL(`./fixtures/codex/${fixture}`, import.meta.url)), path);
+    return path;
+  }
+
   afterEach(() => {
     delete process.env.CCCN_HOME;
     delete process.env.CCCN_CLAUDE_PROJECTS;
     delete process.env.CCCN_CLAUDE_SETTINGS;
     delete process.env.CCCN_CODEX_HOME;
+    delete process.env.CCCN_CODEX_HOOK_SOURCES;
     delete process.env.CCCN_DRY_RUN;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -598,13 +620,16 @@ describe("runDoctor — Codex ブロック", () => {
   it("Codex 検出+hook 登録済みなら ok 行(コマンド全文)と承認注意を出し、❌ 無しで 0 を返す", async () => {
     const codexHome = join(tmpHome, "codex-home");
     mkdirSync(codexHome, { recursive: true });
-    // マーカー(ccc-notifier)を含む Stop エントリを持つ hooks.json。
+    // 専用内部subcommandを持つ4イベントの hooks.json。
     writeFileSync(
       join(codexHome, "hooks.json"),
       JSON.stringify(
         {
           hooks: {
-            Stop: [{ hooks: [{ type: "command", command: '"node" "/x/ccc-notifier/cli.js" track --codex' }] }],
+            Stop: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook Stop`, timeout: 20 }] }],
+            UserPromptSubmit: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook UserPromptSubmit`, timeout: 20 }] }],
+            SubagentStart: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook SubagentStart`, timeout: 20 }] }],
+            SubagentStop: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook SubagentStop`, timeout: 20 }] }],
           },
         },
         null,
@@ -617,10 +642,38 @@ describe("runDoctor — Codex ブロック", () => {
     const { code, output } = await captureLogs(() => runDoctor());
 
     expect(code).toBe(0);
-    expect(output).toContain("Codex の Stop hook が登録されています");
-    expect(output).toContain("track --codex"); // コマンド全文を表示
-    expect(output).toContain("承認"); // 承認済みか確認する注意書き
+    expect(output).toContain("Codex Stop hook");
+    expect(output).toContain("Codex UserPromptSubmit hook");
+    expect(output).toContain("Codex SubagentStart hook");
+    expect(output).toContain("設定ファイル上で確認(user)");
+    expect(output).toContain(
+      `actual nodePath=${process.execPath.replace(/\\/g, "/")}`,
+    );
+    expect(output).toContain("actual cliPath=/x/ccc-notifier/dist/cli.js");
+    expect(output).toContain("expected nodePath=");
+    expect(output).toContain("expected cliPath=");
+    expect(output).toContain("実体path=不一致(stale/wrong)");
+    expect(output).toContain("project/hook trustは静的診断では未確認");
+    expect(output).not.toContain("Codex UserPromptSubmit hookは検査できたJSON sourceでは確認できません");
     expect((output.match(/❌/g) ?? []).length).toBe(0);
+  });
+
+  it("旧3event設定はUserPromptSubmit不足を明示して4hook migrationを促す", async () => {
+    const codexHome = join(tmpHome, "codex-home-old-three");
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "hooks.json"), JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook Stop`, timeout: 20 }] }],
+        SubagentStart: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook SubagentStart`, timeout: 20 }] }],
+        SubagentStop: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook SubagentStop`, timeout: 20 }] }],
+      },
+    }));
+    process.env.CCCN_CODEX_HOME = codexHome;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain("Codex UserPromptSubmit hookは検査できたJSON sourceでは確認できません");
+    expect(output).toContain("必要なら init --codex");
   });
 
   it("Codex 検出+hook 未登録なら warn 行を出すが ❌ にはせず 0 を返す", async () => {
@@ -631,7 +684,197 @@ describe("runDoctor — Codex ブロック", () => {
     const { code, output } = await captureLogs(() => runDoctor());
 
     expect(code).toBe(0);
-    expect(output).toContain("Codex を検出しましたが hook が未登録です");
+    expect(output).toContain("Codex Stop hookは検査できたJSON sourceでは確認できません");
+    expect(output).toContain("Codex SubagentStop hookは検査できたJSON sourceでは確認できません");
     expect((output.match(/❌/g) ?? []).length).toBe(0);
+  });
+
+  it("所有Stop hook設定済みの場合だけ単一最新rolloutをモデル別にAPI換算しClaudeと別表示する", async () => {
+    const codexHome = join(tmpHome, "codex-home-total");
+    writeOwnedStopHook(codexHome);
+    placeDoctorRollout(codexHome);
+    process.env.CCCN_CODEX_HOME = codexHome;
+
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain(`Codex 最新rollout合計: ${formatUSD(0.0180125)}`);
+    expect(output).toContain("API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計");
+    expect(output).not.toContain("Claude + Codex");
+  });
+
+  it("厳格な旧track --codex Stopも設定済み扱いにする", async () => {
+    const codexHome = join(tmpHome, "codex-home-legacy-total");
+    writeOwnedStopHook(codexHome, true);
+    placeDoctorRollout(codexHome, "rollout-basic.jsonl");
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain(`Codex 最新rollout合計: ${formatUSD(0.064106)}`);
+    expect(output).toContain("API換算");
+  });
+
+  it("rolloutがあっても所有Stop hook未設定・TOMLだけなら合計もskip行も出さない", async () => {
+    const codexHome = join(tmpHome, "codex-home-unowned-total");
+    mkdirSync(codexHome, { recursive: true });
+    placeDoctorRollout(codexHome);
+    writeFileSync(join(codexHome, "config.toml"), "[hooks]\nopaque=true\n");
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).not.toContain("Codex 最新rollout合計:");
+  });
+
+  it("env-extra JSONだけの所有Stopは診断するが金額gateには使わない", async () => {
+    const codexHome = join(tmpHome, "codex-home-env-extra-only");
+    mkdirSync(codexHome, { recursive: true });
+    placeDoctorRollout(codexHome);
+    const extra = join(tmpHome, "supplemental-hooks.json");
+    writeFileSync(extra, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{
+        type: "command",
+        command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook Stop`,
+        timeout: 20,
+      }] }] },
+    }));
+    process.env.CCCN_CODEX_HOME = codexHome;
+    process.env.CCCN_CODEX_HOOK_SOURCES = extra;
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain("Codex Stop hookを設定ファイル上で確認(env-extra)");
+    expect(output).not.toContain("Codex 最新rollout合計:");
+  });
+
+  it("設定済みでもsessions無しはwarnだけでexit 0", async () => {
+    const codexHome = join(tmpHome, "codex-home-no-sessions");
+    writeOwnedStopHook(codexHome);
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain("Codex 最新rollout合計: セッションディレクトリがないためスキップ");
+    expect(output).not.toContain("❌ Codex 最新rollout合計");
+  });
+
+  it("unknown modelは安全化したmodel名と過少計上警告を出してexit 0", async () => {
+    const codexHome = join(tmpHome, "codex-home-unknown-total");
+    writeOwnedStopHook(codexHome);
+    const rollout = placeDoctorRollout(codexHome);
+    const changed = readFileSync(rollout, "utf8").replaceAll(
+      "gpt-5-codex",
+      "unknown-model\\u000a\\u2028\\u2029\\u202eSECRET",
+    );
+    writeFileSync(rollout, changed);
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain("Codex 最新rollout合計:");
+    expect(output).toContain("単価不明モデルを含むため過少計上");
+    expect(output).toContain("unknown-modelSECRET");
+    expect(output).not.toContain("unknown-model\nSECRET");
+    expect(output).not.toContain("\u2028");
+    expect(output).not.toContain("\u2029");
+    expect(output).not.toContain("\u202e");
+  });
+
+  it("prototype-like model IDでも組込みを変更せずwarn+exit 0", async () => {
+    const codexHome = join(tmpHome, "codex-home-prototype-models");
+    writeOwnedStopHook(codexHome);
+    const rollout = placeDoctorRollout(codexHome);
+    const changed = readFileSync(rollout, "utf8")
+      .replaceAll("gpt-5.5", "__proto__")
+      .replaceAll("gpt-5-codex", "constructor");
+    writeFileSync(rollout, changed);
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const prototypeBefore = Object.getOwnPropertyNames(Object.prototype);
+    const constructorBefore = Object.getOwnPropertyNames(Object);
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain("⚠️ Codex 最新rollout合計:");
+    expect(output).toContain("__proto__");
+    expect(output).toContain("constructor");
+    expect(Object.getOwnPropertyNames(Object.prototype)).toEqual(prototypeBefore);
+    expect(Object.getOwnPropertyNames(Object)).toEqual(constructorBefore);
+  });
+
+  it("探索不完全なら金額を表示せずwarnだけでexit 0", async () => {
+    const codexHome = join(tmpHome, "codex-home-incomplete");
+    writeOwnedStopHook(codexHome);
+    writeFileSync(join(codexHome, "sessions"), "not-a-directory");
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const { code, output } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    expect(output).toContain("⚠️ Codex 最新rollout合計: rollout探索を完全に検証できず最新を確定できないためスキップ");
+    expect(output).not.toContain("✅ Codex 最新rollout合計:");
+  });
+
+  it("Codex合計診断はrollout/history/cursor/activity/dashboardをbyte-exactに変えずlockも作らない", async () => {
+    const codexHome = join(tmpHome, "codex-home-read-only");
+    writeOwnedStopHook(codexHome);
+    const rollout = placeDoctorRollout(codexHome);
+    process.env.CCCN_CODEX_HOME = codexHome;
+    const sentinels = [
+      join(tmpHome, "history.jsonl"),
+      join(tmpHome, "cursors.json"),
+      join(tmpHome, "codex-subagent-activity.json"),
+      join(tmpHome, "codex-subagent-key"),
+      join(tmpHome, "report.html"),
+    ];
+    for (const [index, file] of sentinels.entries()) writeFileSync(file, `sentinel-${index}\n`);
+    const before = new Map([...sentinels, rollout].map((file) => [file, readFileSync(file)]));
+
+    const { code } = await captureLogs(() => runDoctor());
+    expect(code).toBe(0);
+    for (const [file, bytes] of before) expect(readFileSync(file)).toEqual(bytes);
+    expect(existsSync(join(tmpHome, "cache", "data.lock"))).toBe(false);
+    expect(existsSync(join(tmpHome, "codex-subagent-activity.lock"))).toBe(false);
+    expect(existsSync(join(tmpHome, "codex-subagent-key.lock"))).toBe(false);
+  });
+
+  it("hooks無効・timeout不一致・複数source重複・trust制限を明示する", async () => {
+    const codexHome = join(tmpHome, "codex-home");
+    const extra = join(tmpHome, "project-hooks.json");
+    mkdirSync(codexHome, { recursive: true });
+    const makeHooks = (timeout: number) => ({
+      features: { hooks: false },
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook Stop`, timeout }] }],
+        SubagentStart: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook SubagentStart`, timeout }] }],
+        SubagentStop: [{ hooks: [{ type: "command", command: `"${process.execPath}" "/x/ccc-notifier/dist/cli.js" __ccc-notifier-codex-hook SubagentStop`, timeout }] }],
+      },
+    });
+    writeFileSync(join(codexHome, "hooks.json"), JSON.stringify(makeHooks(10)));
+    writeFileSync(extra, JSON.stringify(makeHooks(20)));
+    process.env.CCCN_CODEX_HOME = codexHome;
+    process.env.CCCN_CODEX_HOOK_SOURCES = extra;
+
+    const { output } = await captureLogs(() => runDoctor());
+    expect(output).toContain("timeout=10");
+    expect(output).toContain("非標準features.hooks field");
+    expect(output).toContain("exact duplicate");
+    expect(output).toContain("project/hook trustは静的診断では未確認");
+    delete process.env.CCCN_CODEX_HOOK_SOURCES;
+  });
+
+  it("Codex home不在でもproject標準sourceをearly-return前に診断しTOMLをunknown表示する", async () => {
+    const repo = join(tmpHome, "project-repo");
+    const nested = join(repo, "nested");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(join(repo, ".codex"), { recursive: true });
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(repo, ".codex", "config.toml"), '# [hooks]\nsecret = "DO-NOT-PRINT"');
+    process.env.CCCN_CODEX_HOME = join(tmpHome, "missing-codex-home");
+    const previous = process.cwd();
+    try {
+      process.chdir(nested);
+      const { code, output } = await captureLogs(() => runDoctor());
+      expect(code).toBe(0);
+      expect(output).not.toContain("Codex CLI は未検出です");
+      expect(output).toContain("inline hook候補を検出しました(project, standard)");
+      expect(output).toContain("config.tomlは解釈しない");
+      expect(output).toContain("plugin/managed/session source");
+      expect(output).toContain("/hooks");
+      expect(output).not.toContain("DO-NOT-PRINT");
+    } finally {
+      process.chdir(previous);
+    }
   });
 });

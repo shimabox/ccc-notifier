@@ -91,7 +91,7 @@ export function computeCost(
   sidechain: UsageByModel,
   table: PriceTable,
 ): CostBreakdown {
-  const byModel: Record<string, number> = {};
+  const byModel = Object.create(null) as Record<string, number>;
   const unknownModels: string[] = [];
   let usd = 0;
 
@@ -110,7 +110,7 @@ export function computeCost(
             tokens.cacheRead * p.cacheRead) /
           1_000_000;
       }
-      byModel[model] = (byModel[model] ?? 0) + cost;
+      byModel[model] = (Object.hasOwn(byModel, model) ? byModel[model] : 0) + cost;
       usd += cost;
     }
   };

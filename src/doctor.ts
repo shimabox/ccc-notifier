@@ -18,10 +18,13 @@ import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
 import { codexHome, detectCodex } from "./codex/env";
-import { codexHooksFile } from "./codex/setup";
+import { CODEX_HOOK_EVENTS } from "./codex/setup";
+import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
+import { findLatestCodexRollout } from "./codex/sessions";
+import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import { isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
-import type { Config, TurnRecord } from "./types";
+import type { Config, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
 type Status = "ok" | "warn" | "fail";
 
@@ -175,49 +178,59 @@ async function checkHookRegistration(): Promise<boolean> {
 // ---- 1b. Codex CLI の hook 登録確認(検出時のみ) ----
 // hook 登録セクションの直後・通知チェック(通知なしモードの早期 return を含む)より前に置く。
 // Codex 未検出・未登録は「未使用なら問題ない」ため ❌ にはせず、exit code の意味論を変えない。
-async function checkCodex(): Promise<boolean> {
-  // Codex 未検出: 未使用なら問題ないので info 1行に留める。
-  if (!detectCodex()) {
+async function checkCodex(): Promise<{ ok: boolean; stopConfigured: boolean }> {
+  const expectedCli = process.env.CCCN_CLI_PATH ?? process.argv[1] ?? "";
+  const diagnostics = diagnoseCodexHookSources({
+    codexHome: codexHome(),
+    cwd: process.cwd(),
+    expectedNodePath: process.execPath,
+    expectedCliPath: expectedCli,
+    envSources: process.env.CCCN_CODEX_HOOK_SOURCES,
+  });
+
+  // Project / supplemental source discovery must happen before detectCodex()'s user-home check.
+  if (!detectCodex() && diagnostics.candidates.length === 0) {
     log("ok", "Codex CLI は未検出です(未使用なら問題ありません)");
-    return true;
+    return { ok: true, stopConfigured: false };
   }
 
-  // hooks.json にマーカー一致の Stop エントリがあるか(あればコマンド全文を表示する)。
-  // 破損 JSON は「未登録」相当に倒す(doctor は読み取り専用。修復は init/uninstall 側に委ねる)。
-  const hooksFile = codexHooksFile();
-  const matchedCommands: string[] = [];
-  if (existsSync(hooksFile)) {
-    try {
-      const raw = await readFile(hooksFile, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      if (isRecord(parsed)) {
-        const hooks = parsed.hooks;
-        const stopEntries = isRecord(hooks) ? hooks.Stop : undefined;
-        if (Array.isArray(stopEntries)) {
-          for (const entry of stopEntries) {
-            if (!isRecord(entry)) continue;
-            const innerHooks = entry.hooks;
-            if (!Array.isArray(innerHooks)) continue;
-            for (const h of innerHooks) {
-              if (isRecord(h) && typeof h.command === "string" && matchesMarker(h.command)) {
-                matchedCommands.push(h.command);
-              }
-            }
-          }
-        }
-      }
-    } catch {
-      // 壊れた hooks.json は未登録扱い(setup.ts が manual 案内で手動追記を促す)。
+  for (const source of diagnostics.candidates) {
+    if (source.format === "toml") {
+      log("warn", `Codex inline hook候補を検出しました(${source.scope}, ${source.discovery}): ${source.path}`);
+      log("warn", "config.tomlは解釈しないためhandler・features.hooks・trustの実効状態は未確認です。Codexで /hooks を確認してください");
+    } else if (source.format === "opaque") {
+      log("warn", `Codex opaque env-extra sourceを検出しました(内容未確認): ${source.path}`);
     }
   }
 
-  if (matchedCommands.length > 0) {
-    log("ok", `Codex の Stop hook が登録されています: ${matchedCommands.join(" / ")}`);
-    // 登録済みでも codex 側で信頼承認していないと発火しないため、確認を促す(info)。
-    log("ok", "codex 側で hook を承認済みか確認してください(未承認だと通知されません)");
-  } else {
-    log("warn", "Codex を検出しましたが hook が未登録です。init --codex で登録できます");
+  for (const warning of diagnostics.warnings) {
+    if (warning.kind === "nonstandard-feature-field") {
+      log("warn", `Codex JSON sourceに非標準features.hooks fieldがあります。global disabledの根拠にはしません: ${warning.sourcePath}`);
+    } else {
+      log("warn", `Codex JSON sourceを安全に検査できません(${warning.kind}): ${warning.sourcePath}`);
+    }
   }
+
+  for (const handler of diagnostics.handlers) {
+    log(
+      handler.pathMatches && handler.timeoutMatches ? "ok" : "warn",
+      `Codex ${handler.event} hookを設定ファイル上で確認(${handler.scope}): ${handler.sourcePath}; actual nodePath=${handler.nodePath}, actual cliPath=${handler.cliPath}, expected nodePath=${process.execPath.replace(/\\/g, "/")}, expected cliPath=${expectedCli.replace(/\\/g, "/")}, 実体path=${handler.pathMatches ? "一致" : "不一致(stale/wrong)"}, timeout=${String(handler.timeout)}`,
+    );
+  }
+
+  for (const event of CODEX_HOOK_EVENTS) {
+    if (!diagnostics.handlers.some((handler) => handler.event === event)) {
+      log("warn", `Codex ${event} hookは検査できたJSON sourceでは確認できません。inline/plugin/managed sourceは未確認です。必要なら init --codex、実効状態はCodexの /hooksを確認してください`);
+    }
+  }
+  for (const duplicate of diagnostics.exactDuplicates) {
+    log("warn", `Codex ${duplicate.event} hookのexact duplicateを検査済みJSONで確認(${duplicate.count}件): ${duplicate.sources.join(" / ")}。matching hooksは複数sourceからすべて実行され得ます`);
+  }
+  for (const mixed of diagnostics.sameLayerMixedRepresentation) {
+    log("warn", `Codex ${mixed.scope} layerにhooks.jsonとconfig.tomlが併存しています(potential duplicate、TOML内容未確認): ${mixed.json} / ${mixed.toml}`);
+  }
+  log("warn", "Codex hookのglobal/individual disabled、project/hook trustは静的診断では未確認です。Codexで /hooksを確認してください");
+  log("warn", "plugin/managed/session sourceを含む実効状態は静的診断だけでは完全列挙できません。Codexで /hooksを確認してください");
 
   // sessions/ の存在。無くても「まだセッションが無いだけ」の可能性があるため ❌ にはしない。
   const sessionsDir = join(codexHome(), "sessions");
@@ -227,7 +240,12 @@ async function checkCodex(): Promise<boolean> {
     log("ok", `Codex のセッションディレクトリはまだありません: ${sessionsDir}(セッション未作成の可能性があります)`);
   }
 
-  return true;
+  return {
+    ok: true,
+    stopConfigured: diagnostics.handlers.some(
+      (handler) => handler.event === "Stop" && handler.scope !== "env-extra",
+    ),
+  };
 }
 
 // ---- 2. Claude projects ディレクトリ + 最新 transcript のパース確認 ----
@@ -433,16 +451,16 @@ async function checkNotification(cfg: Config): Promise<boolean> {
 }
 
 // ---- 7. 直近セッションの合計 USD ----
-async function checkRecentSessionTotal(latestTranscript: string | null): Promise<boolean> {
+async function checkClaudeRecentSessionTotal(latestTranscript: string | null): Promise<boolean> {
   if (latestTranscript === null) {
-    log("warn", "直近セッション合計: transcript が見つからないため計算をスキップしました");
+    log("warn", "Claude Code 直近セッション合計: transcript が見つからないため計算をスキップしました");
     return true;
   }
 
   try {
     const aggregate = await aggregateNewTurn(latestTranscript, null);
     if (aggregate === null) {
-      log("warn", "直近セッション合計: 新規 usage が無いため計算できませんでした");
+      log("warn", "Claude Code 直近セッション合計: 新規 usage が無いため計算できませんでした");
       return true;
     }
 
@@ -452,11 +470,79 @@ async function checkRecentSessionTotal(latestTranscript: string | null): Promise
     const breakdown = computeCost(aggregate.main, aggregate.sidechain, table);
     log(
       "ok",
-      `直近セッション合計: ${formatUSD(breakdown.usd)}(Claude Code の /cost の Total cost と見比べてください)`,
+      `Claude Code 直近セッション合計: ${formatUSD(breakdown.usd)}(Claude Code の /cost の Total cost と見比べてください)`,
     );
     return true;
   } catch (err) {
-    log("warn", `直近セッション合計の計算中にエラーが発生しました: ${errMessage(err)}`);
+    log("warn", `Claude Code 直近セッション合計の計算中にエラーが発生しました: ${errMessage(err)}`);
+    return true;
+  }
+}
+
+function emptyBuckets(): TokenBuckets {
+  return { input: 0, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 };
+}
+
+function mergeUsage(target: UsageByModel, incoming: UsageByModel): void {
+  for (const [model, bucket] of Object.entries(incoming)) {
+    const merged = Object.hasOwn(target, model) ? target[model] : emptyBuckets();
+    merged.input += bucket.input;
+    merged.output += bucket.output;
+    merged.cacheWrite5m += bucket.cacheWrite5m;
+    merged.cacheWrite1h += bucket.cacheWrite1h;
+    merged.cacheRead += bucket.cacheRead;
+    target[model] = merged;
+  }
+}
+
+function safeUnknownModels(models: readonly string[]): string {
+  const safe = [...new Set(models.map((model) =>
+    model.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, 64) || "unknown"
+  ))].sort();
+  const shown = safe.slice(0, 5);
+  return `${shown.join(", ")}${safe.length > shown.length ? `, ...(+${safe.length - shown.length})` : ""}`;
+}
+
+async function checkCodexRecentSessionTotal(configured: boolean): Promise<boolean> {
+  if (!configured) return true;
+  try {
+    const sessionsRoot = join(codexHome(), "sessions");
+    if (!existsSync(sessionsRoot)) {
+      log("warn", "Codex 最新rollout合計: セッションディレクトリがないためスキップ");
+      return true;
+    }
+
+    const discovery = await findLatestCodexRollout(sessionsRoot);
+    if (discovery.unreadableDirs > 0 || discovery.unreadableFiles > 0) {
+      log("warn", "Codex 最新rollout合計: rollout探索を完全に検証できず最新を確定できないためスキップ");
+      return true;
+    }
+    if (discovery.latest === null) {
+      log("warn", "Codex 最新rollout合計: rolloutが見つからないためスキップ");
+      return true;
+    }
+
+    // The latest single rollout is read from byte zero. Returned cursors are deliberately discarded.
+    const drafts = await splitIntoCodexTurnDrafts(discovery.latest, null);
+    if (drafts === null || drafts.length === 0) {
+      log("warn", "Codex 最新rollout合計: usageがない、または有効なtoken_countを解析できません");
+      return true;
+    }
+    const usage = Object.create(null) as UsageByModel;
+    for (const draft of drafts) mergeUsage(usage, draft.agg.main);
+    const table = await loadPriceTable(paths().cacheDir, { offline: true });
+    const breakdown = computeCost(usage, {}, table);
+    if (breakdown.unknownModels.length > 0) {
+      log(
+        "warn",
+        `Codex 最新rollout合計: ${formatUSD(breakdown.usd)}(API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計。ただし単価不明モデルを含むため過少計上の可能性があります: ${safeUnknownModels(breakdown.unknownModels)})`,
+      );
+    } else {
+      log("ok", `Codex 最新rollout合計: ${formatUSD(breakdown.usd)}(API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計)`);
+    }
+    return true;
+  } catch {
+    log("warn", "Codex 最新rollout合計の計算中にエラーが発生したためスキップ");
     return true;
   }
 }
@@ -466,7 +552,12 @@ export async function runDoctor(): Promise<number> {
 
   results.push(await safeRun("settings.json", () => checkHookRegistration()));
   // hook 登録セクションの直後・通知チェックより前に Codex ブロックを置く。
-  results.push(await safeRun("codex", () => checkCodex()));
+  let codexStopConfigured = false;
+  results.push(await safeRun("codex", async () => {
+    const result = await checkCodex();
+    codexStopConfigured = result.stopConfigured;
+    return result.ok;
+  }));
 
   let latestTranscript: string | null = null;
   results.push(
@@ -483,7 +574,8 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("pricing", () => checkPricing()));
   results.push(await safeRun("fx", () => checkFx(cfg)));
   results.push(await safeRun("notify", () => checkNotification(cfg)));
-  results.push(await safeRun("recent-session", () => checkRecentSessionTotal(latestTranscript)));
+  results.push(await safeRun("claude-recent-session", () => checkClaudeRecentSessionTotal(latestTranscript)));
+  results.push(await safeRun("codex-recent-session", () => checkCodexRecentSessionTotal(codexStopConfigured)));
 
   const hasFailure = results.some((ok) => ok === false);
   return hasFailure ? 1 : 0;

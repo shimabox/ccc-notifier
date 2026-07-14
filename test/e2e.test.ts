@@ -68,9 +68,9 @@ interface RunCliResult {
 }
 
 /** dist/cli.js を実際の子プロセスとして起動し、終了コード・stdout・stderr をまとめて返す。 */
-function runCli(args: string[], opts: { env: NodeJS.ProcessEnv; stdin?: string }): Promise<RunCliResult> {
+function runCli(args: string[], opts: { env: NodeJS.ProcessEnv; stdin?: string; cwd?: string }): Promise<RunCliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI_PATH, ...args], { env: opts.env });
+    const child = spawn(process.execPath, [CLI_PATH, ...args], { env: opts.env, cwd: opts.cwd });
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -467,7 +467,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(readJson(sb.settingsPath).hooks.Stop).toHaveLength(1);
 
     // --- doctor ---
-    const doctor = await runCli(["doctor"], { env: sb.env });
+    const doctor = await runCli(["doctor"], { env: sb.env, cwd: sb.tmp });
     expect(doctor.code).toBe(0);
     expect(doctor.stdout).not.toContain("❌");
     expect(doctor.stdout).toContain("✅");
@@ -511,7 +511,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(existsSync(join(sb.cccnHome, "last-notify.json"))).toBe(false);
 
     // --- doctor ---
-    const doctor = await runCli(["doctor"], { env: sb.env });
+    const doctor = await runCli(["doctor"], { env: sb.env, cwd: sb.tmp });
     expect(doctor.code).toBe(0);
     expect(doctor.stdout).toContain("ダッシュボードのみモード");
     expect(doctor.stdout).not.toContain("OS・Slack とも無効");
@@ -665,15 +665,15 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
   // 自分で用意してから使う。
   // ================================================================================
 
-  // ---- 12. Codex: init --codex は hooks.json に track --codex を登録し、次回 codex 起動時の
+  // ---- 12. Codex: init --codex は hooks.json に4つの専用hookを登録し、次回 codex 起動時の
   //          信頼承認(Trust all and continue)を案内する。doctor はそれを検出して報告する ----
-  it("12. init --yes --codex: hooks.json に track --codex を登録して Trust all and continue を案内し、doctor が検出+登録済みを報告する", async () => {
+  it("12. init --yes --codex: hooks.json に4eventを登録して Trust all and continue を案内し、doctor が検出+登録済みを報告する", async () => {
     // Codex ホームはディレクトリだけ用意する(hooks.json はまだ無い = 新規作成パスを通す)。
     mkdirSync(sb.codexHome, { recursive: true });
 
     const init = await runCli(["init", "--yes", "--codex"], { env: sb.env });
     expect(init.code).toBe(0);
-    expect(init.stdout).toContain("Codex にも Stop hook を登録しました");
+    expect(init.stdout).toContain("Codex に Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を登録しました");
     expect(init.stdout).toContain("Trust all and continue");
 
     const hooksPath = join(sb.codexHome, "hooks.json");
@@ -682,14 +682,242 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const codexCommand: string = hooksJson.hooks.Stop[0].hooks[0].command;
     // buildHookCommand と同様、win32 は "\" を "/" に正規化するため比較側も正規化する。
     expect(codexCommand).toContain(CLI_PATH.replace(/\\/g, "/"));
-    expect(codexCommand).toContain("track --codex");
+    expect(codexCommand).toContain("__ccc-notifier-codex-hook Stop");
+    expect(hooksJson.hooks.UserPromptSubmit[0].hooks[0].command).toContain("__ccc-notifier-codex-hook UserPromptSubmit");
+    expect(hooksJson.hooks.SubagentStart[0].hooks[0].timeout).toBe(20);
+    expect(hooksJson.hooks.SubagentStop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook SubagentStop");
+
+    const doctorRolloutDir = join(sb.codexHome, "sessions", "2026", "07", "14");
+    mkdirSync(doctorRolloutDir, { recursive: true });
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_MULTITURN, join(doctorRolloutDir, "rollout-doctor.jsonl"));
 
     // --- doctor: Codex ブロックが検出+登録済み+承認注意を報告する ---
-    const doctor = await runCli(["doctor"], { env: sb.env });
+    const doctor = await runCli(["doctor"], { env: sb.env, cwd: sb.tmp });
     expect(doctor.code).toBe(0);
     expect(doctor.stdout).not.toContain("❌");
-    expect(doctor.stdout).toContain("Codex の Stop hook が登録されています");
-    expect(doctor.stdout).toContain("承認済みか確認してください");
+    expect(doctor.stdout).toContain("Codex Stop hook");
+    expect(doctor.stdout).toContain("Codex SubagentStart hook");
+    expect(doctor.stdout).toContain(`actual nodePath=${process.execPath.replace(/\\/g, "/")}`);
+    expect(doctor.stdout).toContain(`actual cliPath=${CLI_PATH.replace(/\\/g, "/")}`);
+    expect(doctor.stdout).toContain(`expected cliPath=${CLI_PATH.replace(/\\/g, "/")}`);
+    expect(doctor.stdout).toContain("実体path=一致");
+    expect(doctor.stdout).toContain("project/hook trustは静的診断では未確認");
+    expect(doctor.stdout).toContain("Claude Code 直近セッション合計:");
+    expect(doctor.stdout).toContain("Codex 最新rollout合計: $0.018(API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計)");
+  });
+
+  it("12a. 既存ユーザーの init --yes --codex は Codex hook だけを移行する", async () => {
+    mkdirSync(sb.codexHome, { recursive: true });
+    const configPath = join(sb.cccnHome, "config.json");
+    const lastNotifyPath = join(sb.cccnHome, "last-notify.json");
+    const hooksPath = join(sb.codexHome, "hooks.json");
+    const configRaw = '{\n  "notify": { "os": false, "slack": null },\n  "monthlyBudgetUSD": 0,\n  "unknown": true\n}';
+    const settingsRaw = readFileSync(sb.settingsPath, "utf8");
+    const lastNotifyRaw = '{"sentinel":"unchanged"}\n';
+    const hooksRaw = JSON.stringify({
+      unknown: "preserve",
+      hooks: {
+        Stop: [{ hooks: [{
+          type: "command",
+          command: `"${process.execPath}" "${CLI_PATH}" track --codex`,
+          timeout: 15,
+        }] }],
+        PermissionRequest: [{ hooks: [{ type: "command", command: "/other/hook" }] }],
+      },
+    });
+    writeFileSync(configPath, configRaw, "utf8");
+    writeFileSync(lastNotifyPath, lastNotifyRaw, "utf8");
+    writeFileSync(hooksPath, hooksRaw, "utf8");
+
+    const init = await runCli(["init", "--yes", "--codex"], { env: sb.env });
+
+    expect(init.code).toBe(0);
+    expect(init.stdout).toContain("Codex hook のみを確認・更新しました");
+    expect(init.stdout).not.toContain("settings を更新しました");
+    expect(readFileSync(configPath, "utf8")).toBe(configRaw);
+    expect(readFileSync(sb.settingsPath, "utf8")).toBe(settingsRaw);
+    expect(readFileSync(lastNotifyPath, "utf8")).toBe(lastNotifyRaw);
+    const hookBackups = readdirSync(sb.codexHome).filter((name) => name.startsWith("hooks.json.bak-"));
+    expect(hookBackups).toHaveLength(1);
+    expect(readFileSync(join(sb.codexHome, hookBackups[0]), "utf8")).toBe(hooksRaw);
+    const migrated = readJson(hooksPath);
+    expect(migrated.unknown).toBe("preserve");
+    expect(migrated.hooks.PermissionRequest[0].hooks[0].command).toBe("/other/hook");
+    expect(migrated.hooks.Stop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook Stop");
+    expect(migrated.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(migrated.hooks.SubagentStart).toHaveLength(1);
+    expect(migrated.hooks.SubagentStop).toHaveLength(1);
+  });
+
+  it("12b. passive hook wire: UserPrompt/Startは0 bytes、SubagentStop/親Stopはexact {}+LF", async () => {
+    const identity = { session_id: "session-a", turn_id: "turn-a", agent_id: "agent-a", agent_type: "explorer" };
+    const prompt = await runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+      env: sb.env,
+      stdin: JSON.stringify({ ...identity, hook_event_name: "UserPromptSubmit", prompt: "private-canary" }),
+    });
+    expect(prompt.code).toBe(0);
+    expect(Buffer.from(prompt.stdout)).toEqual(Buffer.alloc(0));
+    const start = await runCli(["__ccc-notifier-codex-hook", "SubagentStart"], {
+      env: sb.env,
+      stdin: JSON.stringify({ ...identity, hook_event_name: "SubagentStart" }),
+    });
+    expect(start.code).toBe(0);
+    expect(Buffer.from(start.stdout)).toEqual(Buffer.alloc(0));
+
+    const subStop = await runCli(["__ccc-notifier-codex-hook", "SubagentStop"], {
+      env: sb.env,
+      stdin: JSON.stringify({ ...identity, hook_event_name: "SubagentStop", agent_transcript_path: "/not-stored" }),
+    });
+    expect(subStop.code).toBe(0);
+    expect(Buffer.from(subStop.stdout)).toEqual(Buffer.from("{}\n"));
+
+    const parentStop = await runCli(["__ccc-notifier-codex-hook", "Stop"], {
+      env: sb.env,
+      stdin: "invalid parent payload",
+    });
+    expect(parentStop.code).toBe(0);
+    expect(Buffer.from(parentStop.stdout)).toEqual(Buffer.from("{}\n"));
+  });
+
+  it("12c. 別プロセスの並行writerがatomic台帳へunique agentを失わず保存する", async () => {
+    writeFileSync(join(sb.cccnHome, "codex-subagent-key"), Buffer.alloc(32, 0x5a));
+    writeFileSync(join(sb.cccnHome, "codex-subagent-activity.json"), `${JSON.stringify({ schemaVersion: 1, agents: {} })}\n`);
+    const malformedLock = join(sb.cccnHome, "codex-subagent-activity.lock");
+    mkdirSync(malformedLock);
+    writeFileSync(join(malformedLock, "owner.json.tmp-crash"), "partial");
+    const oldLock = new Date(Date.now() - 1_000);
+    utimesSync(malformedLock, oldLock, oldLock);
+    const root = await runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+      env: sb.env,
+      stdin: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session-concurrent",
+        turn_id: "root-A",
+        prompt: "PROMPT-CANARY",
+      }),
+    });
+    expect(root.code).toBe(0);
+    expect(root.stdout).toBe("");
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+      runCli(["__ccc-notifier-codex-hook", i % 2 === 0 ? "SubagentStart" : "SubagentStop"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: i % 2 === 0 ? "SubagentStart" : "SubagentStop",
+          session_id: "session-concurrent",
+          turn_id: `child-${i}`,
+          agent_id: `agent-${i % 5}`,
+          agent_type: "worker",
+        }),
+      })));
+    expect(results.every((result) => result.code === 0)).toBe(true);
+    const ledger = readJson(join(sb.cccnHome, "codex-subagent-activity.json"));
+    const agents = Object.values(ledger.roots).flatMap((value: any) => Object.keys(value.agents));
+    expect(agents).toHaveLength(5);
+    expect(ledger.keyCheck).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(ledger)).not.toContain("PROMPT-CANARY");
+    expect(JSON.stringify(ledger)).not.toContain("session-concurrent");
+    expect(JSON.stringify(ledger)).not.toContain("child-");
+
+    const lateAgentStart = await runCli(["__ccc-notifier-codex-hook", "SubagentStart"], {
+      env: sb.env,
+      stdin: JSON.stringify({
+        hook_event_name: "SubagentStart",
+        session_id: "session-concurrent",
+        turn_id: "child-X",
+        agent_id: "late-agent",
+        agent_type: "explorer",
+      }),
+    });
+    expect(lateAgentStart.stdout).toBe("");
+    const rollout = join(sb.tmp, "rollout-root-A.jsonl");
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_BASIC, rollout);
+    const parentPayload = JSON.parse(readFileSync(FIXTURE_CODEX_STOP_PAYLOAD, "utf8"));
+    const [parent, lateStop] = await Promise.all([
+      runCli(["__ccc-notifier-codex-hook", "Stop"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          ...parentPayload,
+          hook_event_name: "Stop",
+          session_id: "session-concurrent",
+          turn_id: "root-A",
+          transcript_path: rollout,
+        }),
+      }),
+      runCli(["__ccc-notifier-codex-hook", "SubagentStop"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: "SubagentStop",
+          session_id: "session-concurrent",
+          turn_id: "child-Y",
+          agent_id: "late-agent",
+          agent_type: "explorer",
+        }),
+      }),
+    ]);
+    expect(parent.stdout).toBe("{}\n");
+    expect(lateStop.stdout).toBe("{}\n");
+    const report = await runCli(["report", "--days", "9999", "--json"], { env: sb.env });
+    expect(JSON.parse(report.stdout).total.codexSubagentActivity).toMatchObject({ turns: 1 });
+    await runCli(["dashboard", "--no-open"], { env: sb.env });
+    const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
+    expect(html).toContain("利用あり・料金未集計");
+    for (const forbidden of ["PROMPT-CANARY", "session-concurrent", "child-X", "child-Y", "late-agent"]) {
+      expect(html).not.toContain(forbidden);
+    }
+  });
+
+  it("12d. 並行UserPromptとSubagentStartはactivity lock取得順どおり単一rootへだけ割り当てる", async () => {
+    const sessionId = "session-root-race";
+    const firstRoot = await runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+      env: sb.env,
+      stdin: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: sessionId,
+        turn_id: "root-A",
+        prompt: "RACE-PROMPT-A",
+      }),
+    });
+    expect(firstRoot.code).toBe(0);
+
+    const [nextRoot, start] = await Promise.all([
+      runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: "UserPromptSubmit",
+          session_id: sessionId,
+          turn_id: "root-B",
+          prompt: "RACE-PROMPT-B",
+        }),
+      }),
+      runCli(["__ccc-notifier-codex-hook", "SubagentStart"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: "SubagentStart",
+          session_id: sessionId,
+          turn_id: "child-X",
+          agent_id: "race-agent",
+          agent_type: "worker",
+        }),
+      }),
+    ]);
+    expect(nextRoot.code).toBe(0);
+    expect(start.code).toBe(0);
+    expect(nextRoot.stdout).toBe("");
+    expect(start.stdout).toBe("");
+
+    const ledger = readJson(join(sb.cccnHome, "codex-subagent-activity.json"));
+    const session = Object.values(ledger.sessions)[0] as any;
+    const roots = Object.entries(ledger.roots) as Array<[string, any]>;
+    expect(roots).toHaveLength(2);
+    expect(roots.filter(([, root]) => Object.keys(root.agents).length === 1)).toHaveLength(1);
+    expect(roots.filter(([, root]) => Object.keys(root.agents).length === 0)).toHaveLength(1);
+    expect(ledger.agentAssignments[Object.keys(ledger.agentAssignments)[0]]).toBe(
+      roots.find(([, root]) => Object.keys(root.agents).length === 1)?.[0],
+    );
+    expect(ledger.roots[session.activeRootKey].status).toBe("open");
+    expect(JSON.stringify(ledger)).not.toContain("RACE-PROMPT");
+    expect(JSON.stringify(ledger)).not.toContain(sessionId);
+    expect(JSON.stringify(ledger)).not.toContain("race-agent");
   });
 
   // ---- 13. Codex: track --codex は rollout の累積カウンタを逐次ステップ差分で集計し、

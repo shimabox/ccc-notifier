@@ -86,7 +86,7 @@ node dist/cli.js init
 
    ひとこと実行して応答が完了すると、通知が届きます。
 
-届かない場合は `npx ccc-notifier doctor` で診断できます。hook登録・設定ファイル・単価表・為替レート・テスト通知・直近セッション合計などを ✅ / ⚠️ / ❌ で表示し、❌ が1つでもあれば終了コード1を返します(通知が来ないときの詳しい対処は [FAQ](docs/faq.md) 参照)。
+届かない場合は `npx ccc-notifier doctor` で診断できます。hook登録・設定ファイル・単価表・為替レート・テスト通知・直近セッション合計などを ✅ / ⚠️ / ❌ で表示し、❌ が1つでもあれば終了コード1を返します。Claude Codeは直近セッション、Codexは最新の単一rolloutを別々に表示して合算せず、Codexは常にAPI換算の参考値です(通知が来ないときの詳しい対処は [FAQ](docs/faq.md) 参照)。
 
 ### 非対話実行(CI・スクリプト向け)/ Non-interactive flags
 
@@ -102,15 +102,17 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 | `--label <api_equivalent\|actual>` | コスト表示ラベルを指定 |
 | `--rate <number>` | USD/JPY フォールバックレートを指定 |
 | `--budget <USD>` | 月予算(USD)を指定(0 で無効)。未指定なら既定 **$400**(既存設定があれば維持) |
-| `--codex` | Codex CLI にも Stop hook を導入する(`~/.codex` 未検出でも強制導入。詳細は [Codex CLI 対応](docs/codex.md)) |
+| `--codex` | Codex CLI にも Stop hook を導入する。既存設定がある環境で素の `init --yes --codex` を実行した場合はCodex hookだけを安全に更新する(`~/.codex` 未検出でも強制導入。詳細は [Codex CLI 対応](docs/codex.md)) |
 | `--no-codex` | Codex hook を導入しない(検出しても触らない)。`--codex` とは併用不可 |
+
+アップデート後に古い Codex hook を更新する既存ユーザーは、`npx ccc-notifier init --yes --codex` を一度実行し、Codexを完全に再起動して `/hooks` で Stop / UserPromptSubmit / SubagentStart / SubagentStop の4つを信頼済みにしてください。UserPromptSubmitは追加された新しいhookなので、以前の3つが信頼済みでも別途レビューが必要です。この素のコマンドは既存のSlack・OS通知、予算、単価表示、為替、Claude settingsを変更せず、テスト通知も送りません。設定全体を変更する場合は対話 `init` または設定フラグ付きの非対話initを使います（通常initとして設定ファイル更新・Claude hookマージ・テスト通知が行われます）。
 
 ## コマンド一覧 / Commands
 
 | コマンド | 説明 |
 |---|---|
 | `init` | Stop hook を対話形式でセットアップ(前述のフラグで非対話実行も可) |
-| `doctor` | hook登録・設定・単価表・為替・通知・直近セッション合計を診断 |
+| `doctor` | hook登録・設定・単価表・為替・通知・Claude直近セッション/Codex最新rollout合計を診断 |
 | `report [--days N] [--json]` | 蓄積した履歴を集計してターミナルに表示(`--days` の既定は30、不正な値も30扱い)。`--json` で機械可読な出力 |
 | `dashboard [--all\|--days N] [--no-open] [--out <path>] [--refresh <sec>\|--no-refresh]` | 履歴を可視化した HTML ダッシュボードを生成してブラウザで開く(引数なしは設定期間の直近版 `report.html`、`--all` は全履歴版 `report-all.html`。詳細は [ダッシュボード](docs/dashboard.md)) |
 | `sweep [--dry-run] [--days N] [--include-active]` | 過去の未計上分(hook 導入前や後から完了したサブエージェント分)を一括で履歴に取り込む。ローカル走査のみで **Claude API を呼ばず料金ゼロ**・二重計上なし(詳細は [過去分の取り込み](docs/sweep.md)) |

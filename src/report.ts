@@ -126,6 +126,12 @@ interface TotalAgg {
   costUSD: number; // SA 込みの総額
   costJPY: number; // SA 込みの総額
   subagentsUSD: number; // うちサブエージェント部分の合計(0 なら 0)
+  codexSubagentActivity?: { // 利用検出のみ。無ければ旧JSON出力を変えない
+    turns: number;
+    started: number;
+    stopped: number;
+    usageStatus: "unavailable";
+  };
 }
 
 interface Aggregated {
@@ -189,6 +195,15 @@ function aggregate(turns: TurnRecord[]): Aggregated {
     total.costUSD += totalUsd;
     total.costJPY += totalJpy;
     total.subagentsUSD += saUsd;
+    if (rec.source === "codex" && rec.subagentActivity) {
+      const activity = total.codexSubagentActivity ?? {
+        turns: 0, started: 0, stopped: 0, usageStatus: "unavailable" as const,
+      };
+      activity.turns += 1;
+      activity.started += rec.subagentActivity.started;
+      activity.stopped += rec.subagentActivity.stopped;
+      total.codexSubagentActivity = activity;
+    }
   }
 
   const daily = [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -231,6 +246,13 @@ function printTable(result: Aggregated, days: number): void {
   );
   if (result.total.subagentsUSD > 0) {
     console.log(`(うちサブエージェント ${formatUSD(result.total.subagentsUSD)})`);
+  }
+  if (result.total.codexSubagentActivity) {
+    const activity = result.total.codexSubagentActivity;
+    console.log(
+      `(Codexサブエージェント利用あり・料金未集計: ${activity.turns}ターン` +
+      ` / 開始${activity.started}・終了${activity.stopped})`,
+    );
   }
 
   console.log("");
