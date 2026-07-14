@@ -10,6 +10,7 @@
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -21,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import * as p from "@clack/prompts";
 
 import type { TurnRecord } from "./types";
-import { paths, readConfig } from "./store";
+import { configFilePath, paths, readConfig } from "./store";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { detectCodex } from "./codex/env";
@@ -167,10 +168,13 @@ function parseInitFlags(argv: string[]): InitFlags {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") flags.yes = true;
-    else if (a === "--os-only") flags.osOnly = true;
-    else if (a === "--slack-only") flags.slackOnly = true;
-    else if (a === "--no-notify") flags.noNotify = true;
-    else if (a === "--codex") flags.codex = true;
+    else if (a === "--os-only") {
+      flags.osOnly = true;
+    } else if (a === "--slack-only") {
+      flags.slackOnly = true;
+    } else if (a === "--no-notify") {
+      flags.noNotify = true;
+    } else if (a === "--codex") flags.codex = true;
     else if (a === "--no-codex") flags.noCodex = true;
     else if (a === "--slack-webhook" || a.startsWith("--slack-webhook=")) {
       flags.slackWebhook = takeValue(argv, i, "--slack-webhook");
@@ -187,6 +191,47 @@ function parseInitFlags(argv: string[]): InitFlags {
     }
   }
   return flags;
+}
+
+/**
+ * config path entry の存在を symlink 自体も含めて副作用なく判定する。
+ * null は ENOENT 以外の理由で安全に判定できなかったことを表す。
+ */
+function configPathEntryExists(path: string): boolean | null {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (err) {
+    if (isPlainObject(err) && err.code === "ENOENT") return false;
+    return null;
+  }
+}
+
+/** 素の `init --yes --codex`（順不同、-y可）だけを限定移行候補にする。 */
+function isExactCodexMigrationInvocation(argv: string[], flags: InitFlags): boolean {
+  return flags.yes && flags.codex && argv.every((arg) => arg === "--yes" || arg === "-y" || arg === "--codex");
+}
+
+/** Codex hook 登録結果を通常 init / 限定移行で同じ文言に揃えて表示する。 */
+function printCodexHookResult(codexResult: CodexHookResult): void {
+  if (codexResult.status === "written") {
+    console.log(`Codex に Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を登録しました: ${codexHooksFile()}`);
+    if (codexResult.backupPath) {
+      console.log(`  バックアップ: ${codexResult.backupPath}`);
+    }
+    console.log(
+      "次回 codex 起動時に『Hooks need review』が表示されます。『Trust all and continue』を選ぶと有効になります(承認までは動きません)",
+    );
+  } else if (codexResult.status === "unchanged") {
+    console.log("Codex の Stop/UserPromptSubmit/SubagentStart/SubagentStop hook は登録済みです");
+  } else {
+    console.error(`Codex の hooks.json を自動編集できませんでした: ${codexHooksFile()}`);
+    console.error("安全のため hooks.json の自動編集を中止しました。");
+    console.error("以下の JSON の4イベントを hooks.json へ手動で追加してください:");
+    console.error("");
+    console.error(codexResult.manualSnippet ?? "");
+    console.error("");
+  }
 }
 
 function parseUninstallFlags(argv: string[]): UninstallFlags {
@@ -271,6 +316,38 @@ export async function runInit(argv: string[]): Promise<number> {
   if (flags.codex && flags.noCodex) {
     console.error("--codex と --no-codex は同時に指定できません");
     return 1;
+  }
+
+  // 既存利用者向けの安全な hook 移行。config の存在確認は副作用なしで行い、
+  // この経路では config の解釈・Claude settings・通知処理へ一切進まない。
+  const exactMigrationInvocation = isExactCodexMigrationInvocation(argv, flags);
+  const configEntryState = exactMigrationInvocation
+    ? configPathEntryExists(configFilePath())
+    : false;
+  if (configEntryState === null) {
+    console.error(`config.json の存在を安全に確認できませんでした: ${configFilePath()}`);
+    console.error("安全のため Codex hook を含むすべての変更を中止しました。");
+    return 1;
+  }
+  const codexOnlyMigration = exactMigrationInvocation && configEntryState;
+  if (codexOnlyMigration) {
+    const codexResult = registerCodexHook(process.execPath, resolveCliPath());
+    printCodexHookResult(codexResult);
+    if (codexResult.status === "manual") {
+      console.error(
+        "Codex hook 限定移行を完了できませんでした。config.json、Claude settings、通知設定は変更していません。",
+      );
+      return 1;
+    }
+    console.log(
+      "Codex hook のみを確認・更新しました。config.json、Claude settings、通知設定は変更せず、テスト通知も送信していません。",
+    );
+    if (codexResult.status === "written") {
+      console.log(
+        "Codex を再起動し、/hooks で Stop / UserPromptSubmit / SubagentStart / SubagentStop を信頼済みにしてください。",
+      );
+    }
+    return 0;
   }
   // Codex hook を登録するかどうか(下の分岐で確定する)。
   //   非対話: --codex のときだけ true(どちらも未指定なら Codex に触らない)。
@@ -521,27 +598,7 @@ export async function runInit(argv: string[]): Promise<number> {
 
   // Codex 連携の結果表示(登録を試みたときのみ)。
   if (codexResult) {
-    if (codexResult.status === "written") {
-      console.log(`Codex に Stop/SubagentStart/SubagentStop hook を登録しました: ${codexHooksFile()}`);
-      if (codexResult.backupPath) {
-        console.log(`  バックアップ: ${codexResult.backupPath}`);
-      }
-      // Codex は hook を初回起動時に信頼確認する。承認するまで hook は発火しない。
-      console.log(
-        "次回 codex 起動時に『Hooks need review』が表示されます。『Trust all and continue』を選ぶと有効になります(承認までは動きません)",
-      );
-    } else if (codexResult.status === "unchanged") {
-      console.log("Codex の Stop/SubagentStart/SubagentStop hook は登録済みです");
-    } else {
-      // status === "manual": hooks.json が壊れている等で自動編集できなかった。
-      // settings.json 破損時の printManualSnippet と同じ文体で手動追記を案内する(init 自体は成功)。
-      console.error(`Codex の hooks.json を自動編集できませんでした: ${codexHooksFile()}`);
-      console.error("安全のため hooks.json の自動編集を中止しました。");
-      console.error("以下の JSON の3イベントを hooks.json へ手動で追加してください:");
-      console.error("");
-      console.error(codexResult.manualSnippet ?? "");
-      console.error("");
-    }
+    printCodexHookResult(codexResult);
   }
   return 0;
 }
@@ -594,7 +651,7 @@ export async function runUninstall(argv: string[]): Promise<number> {
   // 1.5. Codex hooks.json からも本ツールの Stop エントリを除去する(未登録・不在なら黙ってスキップ)。
   const codexRemoval = removeCodexHook();
   if (codexRemoval.status === "written") {
-    console.log("Codex の Stop/SubagentStart/SubagentStop hook を削除しました");
+    console.log("Codex の Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を削除しました");
   }
 
   // 2. --purge: データディレクトリを削除する。

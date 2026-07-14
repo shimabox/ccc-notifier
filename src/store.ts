@@ -37,18 +37,31 @@ export interface CccnPaths {
 const ERROR_LOG_MAX_BYTES = 1024 * 1024; // 1MB
 
 /**
+ * ccc-notifier のデータ home を副作用なしで解決する。
+ * 存在確認だけをしたい呼び出し側のため、ディレクトリは作成しない。
+ */
+export function dataHomePath(): string {
+  return process.env.CCCN_HOME || join(homedir(), ".ccc-notifier");
+}
+
+/** config.json のパスを副作用なしで解決する。 */
+export function configFilePath(): string {
+  return join(dataHomePath(), "config.json");
+}
+
+/**
  * データディレクトリ配下の各パスを返す。
  * - CCCN_HOME は呼び出しのたびに評価する(モジュールロード時に固定しない)。
  * - home / cacheDir はここで冪等に mkdirSync(recursive) しておく。
  */
 export function paths(): CccnPaths {
-  const home = process.env.CCCN_HOME || join(homedir(), ".ccc-notifier");
+  const home = dataHomePath();
   const cacheDir = join(home, "cache");
   mkdirSync(home, { recursive: true });
   mkdirSync(cacheDir, { recursive: true });
   return {
     home,
-    configFile: join(home, "config.json"),
+    configFile: configFilePath(),
     historyFile: join(home, "history.jsonl"),
     cursorsFile: join(home, "cursors.json"),
     cacheDir,

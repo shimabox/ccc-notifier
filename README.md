@@ -102,8 +102,10 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 | `--label <api_equivalent\|actual>` | コスト表示ラベルを指定 |
 | `--rate <number>` | USD/JPY フォールバックレートを指定 |
 | `--budget <USD>` | 月予算(USD)を指定(0 で無効)。未指定なら既定 **$400**(既存設定があれば維持) |
-| `--codex` | Codex CLI にも Stop hook を導入する(`~/.codex` 未検出でも強制導入。詳細は [Codex CLI 対応](docs/codex.md)) |
+| `--codex` | Codex CLI にも Stop hook を導入する。既存設定がある環境で素の `init --yes --codex` を実行した場合はCodex hookだけを安全に更新する(`~/.codex` 未検出でも強制導入。詳細は [Codex CLI 対応](docs/codex.md)) |
 | `--no-codex` | Codex hook を導入しない(検出しても触らない)。`--codex` とは併用不可 |
+
+アップデート後に古い Codex hook を更新する既存ユーザーは、`npx ccc-notifier init --yes --codex` を一度実行し、Codexを完全に再起動して `/hooks` で Stop / UserPromptSubmit / SubagentStart / SubagentStop の4つを信頼済みにしてください。UserPromptSubmitは追加された新しいhookなので、以前の3つが信頼済みでも別途レビューが必要です。この素のコマンドは既存のSlack・OS通知、予算、単価表示、為替、Claude settingsを変更せず、テスト通知も送りません。設定全体を変更する場合は対話 `init` または設定フラグ付きの非対話initを使います（通常initとして設定ファイル更新・Claude hookマージ・テスト通知が行われます）。
 
 ## コマンド一覧 / Commands
 

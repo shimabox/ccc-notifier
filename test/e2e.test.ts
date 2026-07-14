@@ -665,15 +665,15 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
   // 自分で用意してから使う。
   // ================================================================================
 
-  // ---- 12. Codex: init --codex は hooks.json に3つの専用hookを登録し、次回 codex 起動時の
+  // ---- 12. Codex: init --codex は hooks.json に4つの専用hookを登録し、次回 codex 起動時の
   //          信頼承認(Trust all and continue)を案内する。doctor はそれを検出して報告する ----
-  it("12. init --yes --codex: hooks.json に3eventを登録して Trust all and continue を案内し、doctor が検出+登録済みを報告する", async () => {
+  it("12. init --yes --codex: hooks.json に4eventを登録して Trust all and continue を案内し、doctor が検出+登録済みを報告する", async () => {
     // Codex ホームはディレクトリだけ用意する(hooks.json はまだ無い = 新規作成パスを通す)。
     mkdirSync(sb.codexHome, { recursive: true });
 
     const init = await runCli(["init", "--yes", "--codex"], { env: sb.env });
     expect(init.code).toBe(0);
-    expect(init.stdout).toContain("Codex に Stop/SubagentStart/SubagentStop hook を登録しました");
+    expect(init.stdout).toContain("Codex に Stop/UserPromptSubmit/SubagentStart/SubagentStop hook を登録しました");
     expect(init.stdout).toContain("Trust all and continue");
 
     const hooksPath = join(sb.codexHome, "hooks.json");

@@ -15,9 +15,13 @@ Codex CLI を検出しました。Codex にもコスト通知を入れますか?
 CI・スクリプトなど非対話で実行する場合はフラグで指定します。
 
 ```bash
-npx ccc-notifier init --yes --codex     # Codex にも Stop hook を導入する
+npx ccc-notifier init --yes --codex     # Codex に4つの連携hookを導入する
 npx ccc-notifier init --yes --no-codex  # Codex には触らない(検出しても何もしない)
 ```
+
+すでに ccc-notifier の `config.json` がある環境では、アップデート後に素の `init --yes --codex` を一度実行すると、ccc-notifier所有のCodex hookだけを現在の形式へ更新します。Slack・OS通知、予算、単価表示、為替、Claude settings、履歴などは変更せず、テスト通知も送りません。その後Codexを完全に再起動し、`/hooks` で Stop / UserPromptSubmit / SubagentStart / SubagentStop の4つが有効・信頼済みであることを確認してください。UserPromptSubmitは新規hookなので、以前の3hookが信頼済みでも追加レビューが必要です。
+
+初回セットアップ（`config.json` 不在）は従来どおりconfig、Claude hook、Codex hook、テスト通知を含む全体セットアップです。また、既存環境でも対話 `init` や `--budget`、`--slack-only` などの設定フラグを付けた非対話initは通常initになります。全体設定を変更したい場合に使えますが、configの再書き込み、Claude settingsのマージ、有効な通知先へのテスト通知が行われる点に注意してください。
 
 - `--codex` は `~/.codex` が未検出でも強制的に導入します(このとき `~/.codex` ディレクトリと `hooks.json` を新規作成します)。
 - `--codex` と `--no-codex` は同時に指定できません。

@@ -8,10 +8,12 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendTurn,
+  configFilePath,
+  dataHomePath,
   loadCursor,
   logError,
   paths,
@@ -67,6 +69,22 @@ function makeCursor(overrides: Partial<Cursor> = {}): Cursor {
 }
 
 describe("paths", () => {
+  it("CCCN_HOME 未指定時も既定home/config pathを副作用なしで解決する", () => {
+    delete process.env.CCCN_HOME;
+
+    expect(dataHomePath()).toBe(join(homedir(), ".ccc-notifier"));
+    expect(configFilePath()).toBe(join(homedir(), ".ccc-notifier", "config.json"));
+  });
+
+  it("副作用なし helper は CCCN_HOME/config.json を解決するだけでディレクトリを作らない", () => {
+    const nestedHome = join(tmpHome, "not-created", "home");
+    process.env.CCCN_HOME = nestedHome;
+
+    expect(dataHomePath()).toBe(nestedHome);
+    expect(configFilePath()).toBe(join(nestedHome, "config.json"));
+    expect(existsSync(nestedHome)).toBe(false);
+  });
+
   it("CCCN_HOME を反映してディレクトリを自動作成し、呼び出しのたびに評価する", () => {
     const nestedHome = join(tmpHome, "nested", "home");
     process.env.CCCN_HOME = nestedHome;
