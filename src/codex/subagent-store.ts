@@ -21,9 +21,26 @@ export type CodexSubagentEventKind = "start" | "stop";
 
 export interface ValidatedCodexSubagentEvent {
   kind: CodexSubagentEventKind;
-  projectionKey: string;
+  sessionKey: string;
   agentKey: string;
   agentTypeLabel: string;
+}
+
+export interface ValidatedCodexRootEvent {
+  sessionKey: string;
+  rootKey: string;
+}
+
+interface RawCodexSubagentEvent {
+  kind: CodexSubagentEventKind;
+  sessionId: string;
+  agentId: string;
+  agentTypeLabel: string;
+}
+
+interface RawCodexRootEvent {
+  sessionId: string;
+  turnId: string;
 }
 
 export interface CodexSubagentActivityState {
@@ -37,11 +54,39 @@ export interface CodexSubagentActivityState {
   lastObservedAt: string;
 }
 
-interface Ledger {
+interface LedgerV1 {
   schemaVersion: 1;
   keyCheck?: string;
   agents: Record<string, CodexSubagentActivityState>;
 }
+
+interface RootState {
+  sessionKey: string;
+  status: "open" | "closed" | "abandoned";
+  openedAt: string;
+  openedSequence: number;
+  closedAt?: string;
+  closedSequence?: number;
+  agents: Record<string, CodexSubagentActivityState>;
+}
+
+interface SessionState {
+  activeRootKey: string | null;
+  latestRootKey: string | null;
+}
+
+interface LedgerV2 {
+  schemaVersion: 2;
+  keyCheck: string;
+  sequence: number;
+  sessions: Record<string, SessionState>;
+  roots: Record<string, RootState>;
+  agentAssignments: Record<string, string>;
+  conflictedAgents: Record<string, true>;
+  legacyV1?: { agents: Record<string, CodexSubagentActivityState> };
+}
+
+type Ledger = LedgerV1 | LedgerV2;
 
 const KNOWN_AGENT_TYPES = new Map([
   ["default", "default"],
@@ -61,6 +106,11 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const allowlist = new Set(allowed);
+  return Object.keys(value).every((key) => allowlist.has(key));
+}
+
 function activityPaths() {
   const home = paths().home;
   return {
@@ -68,6 +118,7 @@ function activityPaths() {
     salt: join(home, "codex-subagent-key"),
     lock: join(home, "codex-subagent-activity.lock"),
     keyLock: join(home, "codex-subagent-key.lock"),
+    legacyBackup: join(home, "codex-subagent-activity.v1.json"),
   };
 }
 
@@ -103,9 +154,9 @@ function loadOrCreateSecret(): Buffer {
   }
 }
 
-function keyed(secret: Buffer, domain: string, ...values: string[]): string {
+function keyedV2(secret: Buffer, domain: string, ...values: string[]): string {
   const hmac = createHmac("sha256", secret);
-  hmac.update(`ccc-notifier:${domain}:v1\0`);
+  hmac.update(`ccc-notifier:${domain}\0`);
   for (const value of values) {
     hmac.update(String(Buffer.byteLength(value)));
     hmac.update(":");
@@ -136,6 +187,15 @@ export function validateCodexSubagentPayload(
   payload: unknown,
   expectedKind?: CodexSubagentEventKind,
 ): ValidatedCodexSubagentEvent | null {
+  const raw = validateRawCodexSubagentPayload(payload, expectedKind);
+  if (raw === null) return null;
+  return deriveCodexSubagentEvent(loadVerifiedSecret(), raw);
+}
+
+function validateRawCodexSubagentPayload(
+  payload: unknown,
+  expectedKind?: CodexSubagentEventKind,
+): RawCodexSubagentEvent | null {
   if (!isObject(payload)) return null;
   const eventName = payload.hook_event_name;
   const kind = eventName === "SubagentStart" ? "start" : eventName === "SubagentStop" ? "stop" : null;
@@ -147,25 +207,39 @@ export function validateCodexSubagentPayload(
     typeof agentId !== "string" || agentId.length === 0 || agentId.length > 1024
   ) return null;
 
-  const secret = loadVerifiedSecret();
-  const projectionKey = keyed(secret, "parent-turn", sessionId, turnId);
   return {
     kind,
-    projectionKey,
-    agentKey: keyed(secret, "agent", projectionKey, agentId),
+    sessionId,
+    agentId,
     agentTypeLabel: normalizeAgentType(payload.agent_type),
   };
 }
 
-/** Parent Stop payloadからkeyCheck検証済みlocal secretの匿名turn keyだけを導出する。 */
-export function codexActivityProjectionKey(payload: unknown): string | null {
+function deriveCodexSubagentEvent(secret: Buffer, raw: RawCodexSubagentEvent): ValidatedCodexSubagentEvent {
+  return {
+    kind: raw.kind,
+    sessionKey: keyedV2(secret, "root-session-v2", raw.sessionId),
+    agentKey: keyedV2(secret, "agent-identity-v2", raw.sessionId, raw.agentId),
+    agentTypeLabel: raw.agentTypeLabel,
+  };
+}
+
+function validateCodexRootPayload(payload: unknown, expectedEvent: "UserPromptSubmit" | "Stop"): RawCodexRootEvent | null {
   if (!isObject(payload)) return null;
+  if (payload.hook_event_name !== expectedEvent) return null;
   const { session_id: sessionId, turn_id: turnId } = payload;
   if (
     typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 1024 ||
     typeof turnId !== "string" || turnId.length === 0 || turnId.length > 1024
   ) return null;
-  return keyed(loadVerifiedSecret(), "parent-turn", sessionId, turnId);
+  return { sessionId, turnId };
+}
+
+function deriveCodexRootEvent(secret: Buffer, raw: RawCodexRootEvent): ValidatedCodexRootEvent {
+  return {
+    sessionKey: keyedV2(secret, "root-session-v2", raw.sessionId),
+    rootKey: keyedV2(secret, "root-turn-v2", raw.sessionId, raw.turnId),
+  };
 }
 
 function isoMin(a: string, b: string): string {
@@ -180,7 +254,9 @@ export function reduceCodexSubagentActivity(
   previous: CodexSubagentActivityState | undefined,
   event: ValidatedCodexSubagentEvent,
   observedAt: string,
+  projectionKey = previous?.projectionKey,
 ): CodexSubagentActivityState {
+  if (projectionKey === undefined) throw new Error("missing root assignment");
   const incomingLabel = event.agentTypeLabel;
   const label = previous === undefined
     ? incomingLabel
@@ -191,7 +267,7 @@ export function reduceCodexSubagentActivity(
         : [previous.agentTypeLabel, incomingLabel].sort()[0];
   return {
     schemaVersion: 1,
-    projectionKey: event.projectionKey,
+    projectionKey,
     agentKey: event.agentKey,
     agentTypeLabel: label,
     startObserved: (previous?.startObserved ?? false) || event.kind === "start",
@@ -444,7 +520,11 @@ export function acquireCodexActivityLock(
 }
 
 function validState(value: unknown): value is CodexSubagentActivityState {
-  return isObject(value) && value.schemaVersion === 1 &&
+  return isObject(value) &&
+    hasOnlyKeys(value, [
+      "schemaVersion", "projectionKey", "agentKey", "agentTypeLabel", "startObserved", "stopObserved",
+      "firstObservedAt", "lastObservedAt",
+    ]) && value.schemaVersion === 1 &&
     typeof value.projectionKey === "string" && /^[a-f0-9]{64}$/.test(value.projectionKey) &&
     typeof value.agentKey === "string" && /^[a-f0-9]{64}$/.test(value.agentKey) &&
     typeof value.agentTypeLabel === "string" && SAFE_AGENT_TYPES.has(value.agentTypeLabel) &&
@@ -454,24 +534,116 @@ function validState(value: unknown): value is CodexSubagentActivityState {
     value.firstObservedAt <= value.lastObservedAt;
 }
 
-function readLedger(): Ledger {
-  const file = activityPaths().ledger;
-  if (!existsSync(file)) return { schemaVersion: 1, agents: {} };
-  const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-  if (!isObject(parsed) || parsed.schemaVersion !== 1 || !isObject(parsed.agents)) {
-    throw new Error("invalid activity ledger");
-  }
-  if (parsed.keyCheck !== undefined &&
-    (typeof parsed.keyCheck !== "string" || !/^[a-f0-9]{64}$/.test(parsed.keyCheck))) {
-    throw new Error("invalid activity ledger keyCheck");
-  }
-  for (const [key, state] of Object.entries(parsed.agents)) {
-    if (!validState(state) || state.agentKey !== key) throw new Error("invalid activity ledger entry");
-  }
-  return parsed as unknown as Ledger;
+function isHexKey(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
-function atomicWriteLedger(ledger: Ledger): void {
+function validateV1(value: unknown): LedgerV1 {
+  if (!isObject(value) || !hasOnlyKeys(value, ["schemaVersion", "keyCheck", "agents"]) ||
+    value.schemaVersion !== 1 || !isObject(value.agents)) {
+    throw new Error("invalid activity ledger");
+  }
+  if (value.keyCheck !== undefined && !isHexKey(value.keyCheck)) {
+    throw new Error("invalid activity ledger keyCheck");
+  }
+  for (const [key, state] of Object.entries(value.agents)) {
+    if (!validState(state) || state.agentKey !== key) throw new Error("invalid activity ledger entry");
+  }
+  return value as unknown as LedgerV1;
+}
+
+function validSessionState(value: unknown): value is SessionState {
+  return isObject(value) && hasOnlyKeys(value, ["activeRootKey", "latestRootKey"]) &&
+    (value.activeRootKey === null || isHexKey(value.activeRootKey)) &&
+    (value.latestRootKey === null || isHexKey(value.latestRootKey));
+}
+
+function validRootState(value: unknown): value is RootState {
+  if (!isObject(value) || !hasOnlyKeys(value, [
+    "sessionKey", "status", "openedAt", "openedSequence", "closedAt", "closedSequence", "agents",
+  ]) || !isHexKey(value.sessionKey) ||
+    (value.status !== "open" && value.status !== "closed" && value.status !== "abandoned") ||
+    typeof value.openedAt !== "string" || !Number.isFinite(Date.parse(value.openedAt)) ||
+    typeof value.openedSequence !== "number" || !Number.isSafeInteger(value.openedSequence) || value.openedSequence < 1 ||
+    !isObject(value.agents)) return false;
+  if (value.closedAt !== undefined &&
+    (typeof value.closedAt !== "string" || !Number.isFinite(Date.parse(value.closedAt)))) return false;
+  if (value.closedSequence !== undefined &&
+    (typeof value.closedSequence !== "number" || !Number.isSafeInteger(value.closedSequence) || value.closedSequence < 1)) return false;
+  if (value.status === "closed" && (value.closedAt === undefined || value.closedSequence === undefined)) return false;
+  if (value.status !== "closed" && (value.closedAt !== undefined || value.closedSequence !== undefined)) return false;
+  for (const [key, state] of Object.entries(value.agents)) {
+    if (!validState(state) || state.agentKey !== key) return false;
+  }
+  return true;
+}
+
+function validateV2(value: unknown): LedgerV2 {
+  if (!isObject(value) || !hasOnlyKeys(value, [
+    "schemaVersion", "keyCheck", "sequence", "sessions", "roots", "agentAssignments", "conflictedAgents",
+    "legacyV1",
+  ]) || value.schemaVersion !== 2 || !isHexKey(value.keyCheck) ||
+    typeof value.sequence !== "number" || !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
+    !isObject(value.sessions) || !isObject(value.roots) || !isObject(value.agentAssignments) ||
+    !isObject(value.conflictedAgents)) throw new Error("invalid activity ledger v2");
+  for (const [key, session] of Object.entries(value.sessions)) {
+    if (!isHexKey(key) || !validSessionState(session)) throw new Error("invalid activity session");
+  }
+  for (const [key, root] of Object.entries(value.roots)) {
+    if (!isHexKey(key) || !validRootState(root)) throw new Error("invalid activity root");
+  }
+  for (const [agentKey, rootKey] of Object.entries(value.agentAssignments)) {
+    if (!isHexKey(agentKey) || !isHexKey(rootKey) || !(rootKey in value.roots)) {
+      throw new Error("invalid activity assignment");
+    }
+  }
+  for (const [agentKey, marker] of Object.entries(value.conflictedAgents)) {
+    if (!isHexKey(agentKey) || marker !== true) throw new Error("invalid activity conflict");
+  }
+  if (value.legacyV1 !== undefined) {
+    if (!isObject(value.legacyV1) || !hasOnlyKeys(value.legacyV1, ["agents"]) ||
+      !isObject(value.legacyV1.agents)) {
+      throw new Error("invalid legacy activity ledger");
+    }
+    for (const [key, state] of Object.entries(value.legacyV1.agents)) {
+      if (!validState(state) || state.agentKey !== key) throw new Error("invalid legacy activity entry");
+    }
+  }
+  const ledger = value as unknown as LedgerV2;
+  for (const [agentKey, rootKey] of Object.entries(ledger.agentAssignments)) {
+    if (ledger.roots[rootKey]?.agents[agentKey] === undefined) {
+      throw new Error("invalid activity assignment state");
+    }
+  }
+  const openCount = new Map<string, number>();
+  const rootedAgents = new Set<string>();
+  for (const [rootKey, root] of Object.entries(ledger.roots)) {
+    if (ledger.sessions[root.sessionKey] === undefined) throw new Error("missing activity session");
+    if (root.status === "open") openCount.set(root.sessionKey, (openCount.get(root.sessionKey) ?? 0) + 1);
+    for (const [agentKey, state] of Object.entries(root.agents)) {
+      if (state.projectionKey !== rootKey) throw new Error("activity projection root mismatch");
+      if (rootedAgents.has(agentKey)) throw new Error("activity agent appears in multiple roots");
+      rootedAgents.add(agentKey);
+      if (ledger.agentAssignments[agentKey] !== rootKey) throw new Error("missing reverse activity assignment");
+    }
+  }
+  for (const [sessionKey, session] of Object.entries(ledger.sessions)) {
+    if ((openCount.get(sessionKey) ?? 0) > 1) throw new Error("ambiguous open root state");
+    if (session.activeRootKey !== null) {
+      const root = ledger.roots[session.activeRootKey];
+      if (root === undefined || root.sessionKey !== sessionKey || root.status !== "open") {
+        throw new Error("invalid active root pointer");
+      }
+    }
+    if (session.latestRootKey !== null) {
+      const root = ledger.roots[session.latestRootKey];
+      if (root === undefined || root.sessionKey !== sessionKey) throw new Error("invalid latest root pointer");
+    }
+  }
+  return ledger;
+}
+
+function atomicWriteLedger(ledger: LedgerV2): void {
   const file = activityPaths().ledger;
   const tmp = `${file}.${stagingHostTag()}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
@@ -482,12 +654,53 @@ function atomicWriteLedger(ledger: Ledger): void {
   }
 }
 
-function verifyOrBackfillKeyCheck(secret: Buffer, ledger: Ledger): Ledger {
-  if (ledger.keyCheck !== undefined) {
-    if (!keyCheckMatches(secret, ledger.keyCheck)) throw new Error("activity key integrity mismatch; manual recovery required");
+function emptyV2(secret: Buffer): LedgerV2 {
+  return {
+    schemaVersion: 2,
+    keyCheck: computeKeyCheck(secret),
+    sequence: 0,
+    sessions: {},
+    roots: {},
+    agentAssignments: {},
+    conflictedAgents: {},
+  };
+}
+
+function writeLegacyBackup(raw: string): void {
+  const file = activityPaths().legacyBackup;
+  if (existsSync(file)) {
+    if (readFileSync(file, "utf8") !== raw) throw new Error("activity v1 backup mismatch");
+    return;
+  }
+  const tmp = `${file}.${stagingHostTag()}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, raw, { encoding: "utf8", mode: 0o600 });
+    renameSync(tmp, file);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/** Caller holds the activity lock. Valid v1 is backed up once and atomically migrated. */
+function readLedgerForMutation(secret: Buffer): LedgerV2 {
+  const file = activityPaths().ledger;
+  if (!existsSync(file)) return emptyV2(secret);
+  const raw = readFileSync(file, "utf8");
+  const parsed: unknown = JSON.parse(raw);
+  if (isObject(parsed) && parsed.schemaVersion === 2) {
+    const ledger = validateV2(parsed);
+    if (!keyCheckMatches(secret, ledger.keyCheck)) {
+      throw new Error("activity key integrity mismatch; manual recovery required");
+    }
     return ledger;
   }
-  const migrated: Ledger = { ...ledger, keyCheck: computeKeyCheck(secret) };
+  const legacy = validateV1(parsed);
+  if (legacy.keyCheck !== undefined && !keyCheckMatches(secret, legacy.keyCheck)) {
+    throw new Error("activity key integrity mismatch; manual recovery required");
+  }
+  writeLegacyBackup(raw);
+  const migrated = emptyV2(secret);
+  migrated.legacyV1 = { agents: legacy.agents };
   atomicWriteLedger(migrated);
   return migrated;
 }
@@ -497,29 +710,88 @@ function loadVerifiedSecret(): Buffer {
   try {
     cleanupStaleFileStaging(activityPaths().ledger, 12);
     const secret = loadOrCreateSecret();
-    verifyOrBackfillKeyCheck(secret, readLedger());
+    const ledger = readLedgerForMutation(secret);
+    if (!existsSync(activityPaths().ledger)) atomicWriteLedger(ledger);
     return secret;
   } finally {
     lock.release();
   }
 }
 
+function recordCodexSubagentEventInLedger(
+  ledger: LedgerV2,
+  event: ValidatedCodexSubagentEvent,
+  observedAt: string,
+): CodexSubagentActivityState | null {
+  if (!Number.isFinite(Date.parse(observedAt))) throw new Error("invalid observation timestamp");
+  if (ledger.conflictedAgents[event.agentKey] === true) return null;
+
+  let rootKey = ledger.agentAssignments[event.agentKey];
+  const session = ledger.sessions[event.sessionKey];
+  const activeRootKey = session?.activeRootKey ?? null;
+  if (rootKey !== undefined) {
+    const assignedRoot = ledger.roots[rootKey];
+    if (assignedRoot === undefined || assignedRoot.sessionKey !== event.sessionKey) {
+      throw new Error("invalid activity assignment integrity");
+    }
+    if (event.kind === "start" && activeRootKey !== null && activeRootKey !== rootKey) {
+      ledger.conflictedAgents[event.agentKey] = true;
+      atomicWriteLedger(ledger);
+      logError("codex-subagent:agent-conflict", new Error("agent identity conflict; event was not recorded"));
+      return null;
+    }
+  } else {
+    // A Stop without a prior assignment may be a late event from an older root. Even while
+    // another root is active, assigning it would be a guess and could corrupt that turn.
+    if (event.kind !== "start" || activeRootKey === null) return null;
+    const activeRoot = ledger.roots[activeRootKey];
+    if (activeRoot === undefined || activeRoot.status !== "open" || activeRoot.sessionKey !== event.sessionKey) {
+      return null;
+    }
+    rootKey = activeRootKey;
+    ledger.agentAssignments[event.agentKey] = rootKey;
+  }
+
+  const root = ledger.roots[rootKey];
+  if (root === undefined) throw new Error("missing assigned activity root");
+  const prior = root.agents[event.agentKey];
+  const next = reduceCodexSubagentActivity(prior, event, observedAt, rootKey);
+  root.agents[event.agentKey] = next;
+  atomicWriteLedger(ledger);
+  return next;
+}
+
 export function recordCodexSubagentEvent(
   event: ValidatedCodexSubagentEvent,
   options: { observedAt?: string; lockTimeoutMs?: number } = {},
-): CodexSubagentActivityState {
+): CodexSubagentActivityState | null {
   const lock = acquireCodexActivityLock(options.lockTimeoutMs ?? 2_000);
   try {
     cleanupStaleFileStaging(activityPaths().ledger, 12);
     const secret = loadOrCreateSecret();
-    const ledger = verifyOrBackfillKeyCheck(secret, readLedger());
-    const prior = ledger.agents[event.agentKey];
+    const ledger = readLedgerForMutation(secret);
     const observedAt = options.observedAt ?? new Date().toISOString();
-    if (!Number.isFinite(Date.parse(observedAt))) throw new Error("invalid observation timestamp");
-    const next = reduceCodexSubagentActivity(prior, event, observedAt);
-    ledger.agents[event.agentKey] = next;
-    atomicWriteLedger(ledger);
-    return next;
+    return recordCodexSubagentEventInLedger(ledger, event, observedAt);
+  } finally {
+    lock.release();
+  }
+}
+
+/** Raw hook identity, HMAC derivation, active-root lookup, and write share one lock. */
+export function recordCodexSubagentPayload(
+  payload: unknown,
+  expectedKind: CodexSubagentEventKind,
+  options: { observedAt?: string; lockTimeoutMs?: number } = {},
+): CodexSubagentActivityState | null {
+  const lock = acquireCodexActivityLock(options.lockTimeoutMs ?? 2_000);
+  try {
+    const raw = validateRawCodexSubagentPayload(payload, expectedKind);
+    if (raw === null) throw new Error("invalid hook payload");
+    cleanupStaleFileStaging(activityPaths().ledger, 12);
+    const secret = loadOrCreateSecret();
+    const ledger = readLedgerForMutation(secret);
+    const event = deriveCodexSubagentEvent(secret, raw);
+    return recordCodexSubagentEventInLedger(ledger, event, options.observedAt ?? new Date().toISOString());
   } finally {
     lock.release();
   }
@@ -527,13 +799,117 @@ export function recordCodexSubagentEvent(
 
 export function readCodexSubagentActivity(projectionKey?: string): CodexSubagentActivityState[] {
   try {
-    return Object.values(readLedger().agents).filter(
+    const file = activityPaths().ledger;
+    if (!existsSync(file)) return [];
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    let states: CodexSubagentActivityState[];
+    if (isObject(parsed) && parsed.schemaVersion === 1) {
+      const ledger = validateV1(parsed);
+      if (ledger.keyCheck !== undefined) {
+        const secret = readFileSync(activityPaths().salt);
+        if (secret.length !== 32 || !keyCheckMatches(secret, ledger.keyCheck)) {
+          throw new Error("activity key integrity mismatch; read was rejected");
+        }
+      }
+      states = Object.values(ledger.agents);
+    } else {
+      const ledger = validateV2(parsed);
+      const secret = readFileSync(activityPaths().salt);
+      if (secret.length !== 32 || !keyCheckMatches(secret, ledger.keyCheck)) {
+        throw new Error("activity key integrity mismatch; read was rejected");
+      }
+      states = [
+        ...Object.values(ledger.roots).flatMap((root) => Object.values(root.agents)),
+        ...Object.values(ledger.legacyV1?.agents ?? {}),
+      ];
+    }
+    return states.filter(
       (state) => projectionKey === undefined || state.projectionKey === projectionKey,
     );
   } catch (error) {
     logError("codex-subagent:read-ledger", error);
     return [];
   }
+}
+
+function nextSequence(ledger: LedgerV2): number {
+  if (ledger.sequence >= Number.MAX_SAFE_INTEGER) throw new Error("activity sequence exhausted");
+  ledger.sequence += 1;
+  return ledger.sequence;
+}
+
+export function openCodexRootContext(
+  payload: unknown,
+  options: { observedAt?: string; lockTimeoutMs?: number } = {},
+): string | null {
+  const lock = acquireCodexActivityLock(options.lockTimeoutMs ?? 2_000);
+  try {
+    const raw = validateCodexRootPayload(payload, "UserPromptSubmit");
+    if (raw === null) return null;
+    const secret = loadOrCreateSecret();
+    const ledger = readLedgerForMutation(secret);
+    const event = deriveCodexRootEvent(secret, raw);
+    const observedAt = options.observedAt ?? new Date().toISOString();
+    if (!Number.isFinite(Date.parse(observedAt))) throw new Error("invalid observation timestamp");
+    const existing = ledger.roots[event.rootKey];
+    if (existing !== undefined) {
+      return event.rootKey;
+    }
+    const session = ledger.sessions[event.sessionKey] ?? { activeRootKey: null, latestRootKey: null };
+    if (session.activeRootKey !== null) {
+      const previous = ledger.roots[session.activeRootKey];
+      if (previous === undefined || previous.status !== "open") throw new Error("invalid active root state");
+      previous.status = "abandoned";
+    }
+    const sequence = nextSequence(ledger);
+    ledger.roots[event.rootKey] = {
+      sessionKey: event.sessionKey,
+      status: "open",
+      openedAt: observedAt,
+      openedSequence: sequence,
+      agents: {},
+    };
+    session.activeRootKey = event.rootKey;
+    session.latestRootKey = event.rootKey;
+    ledger.sessions[event.sessionKey] = session;
+    atomicWriteLedger(ledger);
+    return event.rootKey;
+  } finally {
+    lock.release();
+  }
+}
+
+export function closeCodexRootContext(
+  payload: unknown,
+  options: { observedAt?: string; lockTimeoutMs?: number } = {},
+): string | null {
+  const lock = acquireCodexActivityLock(options.lockTimeoutMs ?? 2_000);
+  try {
+    const raw = validateCodexRootPayload(payload, "Stop");
+    if (raw === null) return null;
+    const secret = loadOrCreateSecret();
+    const ledger = readLedgerForMutation(secret);
+    const event = deriveCodexRootEvent(secret, raw);
+    const root = ledger.roots[event.rootKey];
+    if (root === undefined || root.sessionKey !== event.sessionKey) return null;
+    if (root.status === "closed") return event.rootKey;
+    const observedAt = options.observedAt ?? new Date().toISOString();
+    if (!Number.isFinite(Date.parse(observedAt))) throw new Error("invalid observation timestamp");
+    root.status = "closed";
+    root.closedAt = observedAt;
+    root.closedSequence = nextSequence(ledger);
+    const session = ledger.sessions[event.sessionKey];
+    if (session?.activeRootKey === event.rootKey) session.activeRootKey = null;
+    atomicWriteLedger(ledger);
+    return event.rootKey;
+  } finally {
+    lock.release();
+  }
+}
+
+/** Backward-compatible export: parent Stop now closes an exact v2 root context. */
+export function codexActivityProjectionKey(payload: unknown): string | null {
+  return closeCodexRootContext(payload);
 }
 
 /** canonical台帳のunique stateをreader用runtime値へ投影する。料金は推測しない。 */
@@ -553,9 +929,7 @@ export function projectCodexSubagentActivity(
 export function handleCodexSubagentHook(rawText: string, kind: CodexSubagentEventKind): void {
   try {
     const parsed: unknown = JSON.parse(rawText);
-    const event = validateCodexSubagentPayload(parsed, kind);
-    if (event === null) throw new Error("invalid hook payload");
-    recordCodexSubagentEvent(event);
+    recordCodexSubagentPayload(parsed, kind);
   } catch (error) {
     const integrityFailure = error instanceof Error &&
       (error.message.includes("activity key integrity mismatch") ||
@@ -567,5 +941,16 @@ export function handleCodexSubagentHook(rawText: string, kind: CodexSubagentEven
         ? "key integrity mismatch; manual recovery required; hook event was not recorded"
         : "hook event was not recorded"),
     );
+  }
+}
+
+
+/** Passive UserPromptSubmit boundary. Prompt/body/path fields are never persisted or logged. */
+export function handleCodexUserPromptSubmitHook(rawText: string): void {
+  try {
+    const parsed: unknown = JSON.parse(rawText);
+    if (openCodexRootContext(parsed) === null) throw new Error("invalid hook payload");
+  } catch {
+    logError("codex-root-hook", new Error("root context was not recorded"));
   }
 }

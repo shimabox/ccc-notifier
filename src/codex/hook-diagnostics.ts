@@ -5,8 +5,7 @@ import {
   CODEX_HOOK_EVENTS,
   CODEX_HOOK_TIMEOUT_SECONDS,
   type CodexHookEventName,
-  isOwnedCodexHookCommand,
-  parseOwnedCodexHookCommand,
+  parseConfiguredOwnedCodexHookCommand,
 } from "./setup";
 
 export type HookSourceScope = "user" | "project" | "env-extra";
@@ -170,8 +169,8 @@ function inspectJson(
     for (const group of groups) {
       if (!isObject(group) || !Array.isArray(group.hooks)) continue;
       for (const handler of group.hooks) {
-        if (!isObject(handler) || handler.type !== "command" || !isOwnedCodexHookCommand(handler.command, event)) continue;
-        const command = parseOwnedCodexHookCommand(handler.command);
+        if (!isObject(handler) || handler.type !== "command") continue;
+        const command = parseConfiguredOwnedCodexHookCommand(handler.command, event);
         if (command === null) continue;
         handlers.push({
           sourcePath: source.path,

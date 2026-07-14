@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -8,7 +8,9 @@ import { createHash } from "node:crypto";
 import { runCodexPassiveHook } from "../src/cli";
 import {
   acquireCodexActivityLock,
+  closeCodexRootContext,
   normalizeAgentType,
+  openCodexRootContext,
   readCodexSubagentActivity,
   recordCodexSubagentEvent,
   reduceCodexSubagentActivity,
@@ -38,6 +40,15 @@ describe("Codex subagent Gate D activity", () => {
     last_assistant_message: "private body",
   };
 
+  function openDefaultRoot(): string {
+    return openCodexRootContext({
+      hook_event_name: "UserPromptSubmit",
+      session_id: start.session_id,
+      turn_id: "raw-root-turn-secret",
+      prompt: "private prompt body",
+    }, { observedAt: "2026-07-13T00:00:00.000Z" })!;
+  }
+
   function localStagingHostTag(): string {
     return createHash("sha256")
       .update("ccc-notifier:staging-host:v1\0")
@@ -54,15 +65,15 @@ describe("Codex subagent Gate D activity", () => {
     expect(validateCodexSubagentPayload(start, "start")).not.toBeNull();
   });
 
-  it("local secret内ではkeyが決定的で、異なるturn/agentは別keyになる", () => {
+  it("local secret内ではsession/agent keyが決定的で、child turn_idは親join identityに使わない", () => {
     const a = validateCodexSubagentPayload(start)!;
     const b = validateCodexSubagentPayload({ ...start })!;
     const otherTurn = validateCodexSubagentPayload({ ...start, turn_id: "turn-b" })!;
     const otherAgent = validateCodexSubagentPayload({ ...start, agent_id: "agent-b" })!;
     expect(a).toEqual(b);
-    expect(a.projectionKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(a.sessionKey).toMatch(/^[a-f0-9]{64}$/);
     expect(a.agentKey).not.toBe(otherAgent.agentKey);
-    expect(a.projectionKey).not.toBe(otherTurn.projectionKey);
+    expect(a).toEqual(otherTurn);
   });
 
   it("Start/Stop逆順・再送・複数Stopを同じunique stateへ収束させる", () => {
@@ -71,10 +82,10 @@ describe("Codex subagent Gate D activity", () => {
     const t1 = "2026-07-13T00:00:00.000Z";
     const t2 = "2026-07-13T00:01:00.000Z";
     const normal = reduceCodexSubagentActivity(
-      reduceCodexSubagentActivity(undefined, startEvent, t1), stopEvent, t2,
+      reduceCodexSubagentActivity(undefined, startEvent, t1, "a".repeat(64)), stopEvent, t2,
     );
     const reverse = reduceCodexSubagentActivity(
-      reduceCodexSubagentActivity(undefined, stopEvent, t2), startEvent, t1,
+      reduceCodexSubagentActivity(undefined, stopEvent, t2, "a".repeat(64)), startEvent, t1,
     );
     const resent = reduceCodexSubagentActivity(normal, stopEvent, t2);
     expect(reverse).toEqual(normal);
@@ -83,6 +94,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("台帳はraw payload・本文・path・生IDを一切保存しない", () => {
+    const rootKey = openDefaultRoot();
     const event = validateCodexSubagentPayload(start)!;
     recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
     const raw = readFileSync(join(home, "codex-subagent-activity.json"), "utf8");
@@ -90,7 +102,7 @@ describe("Codex subagent Gate D activity", () => {
       "raw-session-secret", "raw-turn-secret", "raw-agent-secret", "/private/secret",
       "parent.jsonl", "child.jsonl", "private body", "agent_transcript_path", "transcript_path", "cwd",
     ]) expect(raw).not.toContain(forbidden);
-    expect(JSON.parse(raw).agents[event.agentKey]).toMatchObject({ agentTypeLabel: "explorer" });
+    expect(JSON.parse(raw).roots[rootKey].agents[event.agentKey]).toMatchObject({ agentTypeLabel: "explorer" });
   });
 
   it("agent_typeは制御文字・過長・未知値を固定safe labelへ落とす", () => {
@@ -100,6 +112,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("atomic台帳へ多数のwriter入力を冪等mergeする", async () => {
+    openDefaultRoot();
     const events = Array.from({ length: 50 }, (_, i) => validateCodexSubagentPayload({
       ...start,
       hook_event_name: i % 2 === 0 ? "SubagentStart" : "SubagentStop",
@@ -110,10 +123,19 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("lock timeoutと破損台帳はfail-safeで既存データを上書きしない", () => {
+    openDefaultRoot();
     const event = validateCodexSubagentPayload(start)!;
-    mkdirSync(join(home, "codex-subagent-activity.lock"));
+    const lockPath = join(home, "codex-subagent-activity.lock");
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      token: "a".repeat(32),
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    }));
     expect(() => recordCodexSubagentEvent(event, { lockTimeoutMs: 20 })).toThrow("lock timeout");
-    rmSync(join(home, "codex-subagent-activity.lock"), { recursive: true });
+    expect(existsSync(lockPath)).toBe(true);
+    rmSync(lockPath, { recursive: true });
     const broken = "{broken";
     writeFileSync(join(home, "codex-subagent-activity.json"), broken);
     expect(readCodexSubagentActivity()).toEqual([]);
@@ -158,6 +180,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("production defaultで新しいsame-host dead PID lockをstale待ちせず即時回収してeventを1回記録する", () => {
+    openDefaultRoot();
     const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
     const lockPath = join(home, "codex-subagent-activity.lock");
     mkdirSync(lockPath);
@@ -170,6 +193,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("production defaultでowner publish前crashのmalformed canonical lockを短い猶予後claim回収する", () => {
+    openDefaultRoot();
     const lockPath = join(home, "codex-subagent-activity.lock");
     mkdirSync(lockPath);
     writeFileSync(join(lockPath, "owner.json.tmp-crash"), "truncated-owner");
@@ -260,6 +284,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("activity lock内で厳格命名の古いdead-PID ledger stagingだけを削除する", () => {
+    openDefaultRoot();
     expect(validateCodexSubagentPayload(start)).not.toBeNull();
     const event = validateCodexSubagentPayload(start)!;
     const ledgerFile = join(home, "codex-subagent-activity.json");
@@ -307,6 +332,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("既存ledger+invalid keyは両ファイル不変でfail-closed、手動key復旧後の再送identityは不変", async () => {
+    openDefaultRoot();
     const before = validateCodexSubagentPayload(start)!;
     recordCodexSubagentEvent(before, { observedAt: "2026-07-13T00:00:00.000Z" });
     const keyFile = join(home, "codex-subagent-key");
@@ -338,6 +364,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("同長32-byte key置換と1bit破損をkeyCheckで拒否しledger identityを増やさない", async () => {
+    openDefaultRoot();
     const event = validateCodexSubagentPayload(start)!;
     recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
     const keyFile = join(home, "codex-subagent-key");
@@ -364,6 +391,7 @@ describe("Codex subagent Gate D activity", () => {
   });
 
   it("keyCheck 1bit破損を拒否してkey/check/agentsを上書きしない", async () => {
+    openDefaultRoot();
     const event = validateCodexSubagentPayload(start)!;
     recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
     const keyFile = join(home, "codex-subagent-key");
@@ -378,34 +406,219 @@ describe("Codex subagent Gate D activity", () => {
     expect(readFileSync(ledgerFile, "utf8")).toBe(corruptLedger);
   });
 
-  it("keyCheck無しの正常な既存v1 ledgerをlock内で一度だけbackfillする", () => {
+  it("keyCheck無しの正常な既存v1 ledgerをlock内で一度だけv2へ移行する", () => {
     const event = validateCodexSubagentPayload(start)!;
     const ledgerFile = join(home, "codex-subagent-activity.json");
     writeFileSync(ledgerFile, `${JSON.stringify({ schemaVersion: 1, agents: {} })}\n`);
+    openDefaultRoot();
     recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
     const first = readFileSync(ledgerFile, "utf8");
+    expect(JSON.parse(first).schemaVersion).toBe(2);
     expect(JSON.parse(first).keyCheck).toMatch(/^[a-f0-9]{64}$/);
     recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
     expect(readFileSync(ledgerFile, "utf8")).toBe(first);
   });
 
   it("台帳agentTypeLabelのscript/control/長大なsemantic破損をfail-closedにする", () => {
+    const rootKey = openDefaultRoot();
     const event = validateCodexSubagentPayload(start)!;
     recordCodexSubagentEvent(event);
     const file = join(home, "codex-subagent-activity.json");
     for (const bad of ["<script>", "worker\u0000", "x".repeat(1000)]) {
       const ledger = JSON.parse(readFileSync(file, "utf8"));
-      ledger.agents[event.agentKey].agentTypeLabel = bad;
+      ledger.roots[rootKey].agents[event.agentKey].agentTypeLabel = bad;
       writeFileSync(file, JSON.stringify(ledger));
       expect(readCodexSubagentActivity()).toEqual([]);
-      ledger.agents[event.agentKey].agentTypeLabel = "worker";
+      ledger.roots[rootKey].agents[event.agentKey].agentTypeLabel = "worker";
       writeFileSync(file, JSON.stringify(ledger));
     }
   });
 
-  it("wireはStart 0 bytes、Stop系 exact {}+LFで内部失敗時も同じ", async () => {
+  it("v2 root/state/assignmentの双方向不整合と未知fieldをfail-closedにする", () => {
+    const rootA = openDefaultRoot();
+    const event = validateCodexSubagentPayload(start)!;
+    recordCodexSubagentEvent(event);
+    closeCodexRootContext({
+      hook_event_name: "Stop", session_id: start.session_id, turn_id: "raw-root-turn-secret",
+    });
+    const rootB = openCodexRootContext({
+      hook_event_name: "UserPromptSubmit", session_id: start.session_id, turn_id: "root-B",
+    })!;
+    const file = join(home, "codex-subagent-activity.json");
+    const baseline = readFileSync(file, "utf8");
+    const corruptions: Array<(ledger: any) => void> = [
+      (ledger) => { ledger.roots[rootA].agents[event.agentKey].projectionKey = rootB; },
+      (ledger) => { delete ledger.agentAssignments[event.agentKey]; },
+      (ledger) => { ledger.roots[rootB].agents[event.agentKey] = ledger.roots[rootA].agents[event.agentKey]; },
+      (ledger) => { ledger.roots[rootA].agents[event.agentKey].rawPayload = "PRIVATE-CANARY"; },
+    ];
+    for (const corrupt of corruptions) {
+      const ledger = JSON.parse(baseline);
+      corrupt(ledger);
+      const raw = `${JSON.stringify(ledger)}\n`;
+      writeFileSync(file, raw);
+      expect(readCodexSubagentActivity()).toEqual([]);
+      expect(() => openCodexRootContext({
+        hook_event_name: "UserPromptSubmit", session_id: start.session_id, turn_id: "root-C",
+      })).toThrow(/activity|ledger|assignment|projection/i);
+      expect(readFileSync(file, "utf8")).toBe(raw);
+    }
+  });
+
+  it("allowlist外fieldを含むv1はbackupへ複製せず元rawのまま拒否する", () => {
+    const legacyState = {
+      schemaVersion: 1,
+      projectionKey: "a".repeat(64),
+      agentKey: "b".repeat(64),
+      agentTypeLabel: "worker",
+      startObserved: true,
+      stopObserved: false,
+      firstObservedAt: "2026-07-13T00:00:00.000Z",
+      lastObservedAt: "2026-07-13T00:00:00.000Z",
+      prompt: "PRIVATE-V1-CANARY",
+    };
+    writeFileSync(join(home, "codex-subagent-key"), Buffer.alloc(32, 0x5a), { mode: 0o600 });
+    const file = join(home, "codex-subagent-activity.json");
+    const raw = `${JSON.stringify({ schemaVersion: 1, agents: { [legacyState.agentKey]: legacyState } })}\n`;
+    writeFileSync(file, raw);
+
+    expect(() => openDefaultRoot()).toThrow("invalid activity ledger entry");
+    expect(readFileSync(file, "utf8")).toBe(raw);
+    expect(existsSync(join(home, "codex-subagent-activity.v1.json"))).toBe(false);
+  });
+
+  it("root context無しの未知agentは時間に関係なくfail-closedで保存しない", () => {
+    const event = validateCodexSubagentPayload(start)!;
+    expect(recordCodexSubagentEvent(event)).toBeNull();
+    expect(readCodexSubagentActivity()).toEqual([]);
+  });
+
+  it("root A/Bを分離し、既知late Stopだけを元rootへ収束させる", () => {
+    const rootA = openDefaultRoot();
+    const agentAStart = validateCodexSubagentPayload({ ...start, turn_id: "child-X" })!;
+    recordCodexSubagentEvent(agentAStart, { observedAt: "2026-07-13T00:00:01.000Z" });
+    expect(closeCodexRootContext({
+      hook_event_name: "Stop", session_id: start.session_id, turn_id: "raw-root-turn-secret",
+    })).toBe(rootA);
+
+    const rootB = openCodexRootContext({
+      hook_event_name: "UserPromptSubmit", session_id: start.session_id, turn_id: "root-B",
+    })!;
+    const agentB = validateCodexSubagentPayload({ ...start, turn_id: "child-B", agent_id: "agent-B" })!;
+    recordCodexSubagentEvent(agentB);
+    const lateAStop = validateCodexSubagentPayload({
+      ...start, hook_event_name: "SubagentStop", turn_id: "child-Y",
+    })!;
+    recordCodexSubagentEvent(lateAStop, { observedAt: "2026-07-13T00:00:02.000Z" });
+
+    expect(readCodexSubagentActivity(rootA)).toMatchObject([{ startObserved: true, stopObserved: true }]);
+    expect(readCodexSubagentActivity(rootB)).toMatchObject([{ startObserved: true, stopObserved: false }]);
+  });
+
+  it("root A close後にroot Bがactiveでも、未割当のA late StopをBへ誤帰属しない", () => {
+    const rootA = openDefaultRoot();
+    closeCodexRootContext({
+      hook_event_name: "Stop", session_id: start.session_id, turn_id: "raw-root-turn-secret",
+    });
+    const rootB = openCodexRootContext({
+      hook_event_name: "UserPromptSubmit", session_id: start.session_id, turn_id: "root-B",
+    })!;
+    const unknownLateStop = validateCodexSubagentPayload({
+      ...start,
+      hook_event_name: "SubagentStop",
+      turn_id: "child-from-root-A",
+      agent_id: "agent-with-missing-start",
+    })!;
+
+    expect(recordCodexSubagentEvent(unknownLateStop)).toBeNull();
+    expect(readCodexSubagentActivity(rootA)).toEqual([]);
+    expect(readCodexSubagentActivity(rootB)).toEqual([]);
+    const ledger = JSON.parse(readFileSync(join(home, "codex-subagent-activity.json"), "utf8"));
+    expect(ledger.agentAssignments[unknownLateStop.agentKey]).toBeUndefined();
+  });
+
+  it("別root active中の既知agent Startはassignmentを移さずconflictとして固定する", () => {
+    const rootA = openDefaultRoot();
+    const event = validateCodexSubagentPayload(start)!;
+    recordCodexSubagentEvent(event);
+    closeCodexRootContext({
+      hook_event_name: "Stop", session_id: start.session_id, turn_id: "raw-root-turn-secret",
+    });
+    openCodexRootContext({
+      hook_event_name: "UserPromptSubmit", session_id: start.session_id, turn_id: "root-B",
+    });
+
+    expect(recordCodexSubagentEvent(event)).toBeNull();
+    const ledger = JSON.parse(readFileSync(join(home, "codex-subagent-activity.json"), "utf8"));
+    expect(ledger.agentAssignments[event.agentKey]).toBe(rootA);
+    expect(ledger.conflictedAgents[event.agentKey]).toBe(true);
+    const error = readFileSync(join(home, "error.log"), "utf8");
+    expect(error).toContain("agent identity conflict");
+    expect(error).not.toContain(start.session_id);
+    expect(error).not.toContain(start.agent_id);
+  });
+
+  it("root A open中のroot B開始はAをabandonedにし、Aのexact StopはB activeを変えない", () => {
+    const rootA = openDefaultRoot();
+    const rootB = openCodexRootContext({
+      hook_event_name: "UserPromptSubmit", session_id: start.session_id, turn_id: "root-B",
+    })!;
+    let ledger = JSON.parse(readFileSync(join(home, "codex-subagent-activity.json"), "utf8"));
+    expect(ledger.roots[rootA].status).toBe("abandoned");
+    expect(ledger.roots[rootB].status).toBe("open");
+    expect(ledger.sessions[ledger.roots[rootB].sessionKey].activeRootKey).toBe(rootB);
+
+    expect(closeCodexRootContext({
+      hook_event_name: "Stop", session_id: start.session_id, turn_id: "raw-root-turn-secret",
+    })).toBe(rootA);
+    ledger = JSON.parse(readFileSync(join(home, "codex-subagent-activity.json"), "utf8"));
+    expect(ledger.roots[rootA].status).toBe("closed");
+    expect(ledger.sessions[ledger.roots[rootB].sessionKey].activeRootKey).toBe(rootB);
+  });
+
+  it("valid v1をraw backup付きで一度だけv2へ移行しlegacy activityを保持する", () => {
+    const legacyState = {
+      schemaVersion: 1,
+      projectionKey: "a".repeat(64),
+      agentKey: "b".repeat(64),
+      agentTypeLabel: "worker",
+      startObserved: true,
+      stopObserved: false,
+      firstObservedAt: "2026-07-13T00:00:00.000Z",
+      lastObservedAt: "2026-07-13T00:00:00.000Z",
+    };
+    writeFileSync(join(home, "codex-subagent-key"), Buffer.alloc(32, 0x5a), { mode: 0o600 });
+    const rawV1 = `${JSON.stringify({ schemaVersion: 1, agents: { [legacyState.agentKey]: legacyState } })}\n`;
+    writeFileSync(join(home, "codex-subagent-activity.json"), rawV1);
+
+    const rootKey = openDefaultRoot();
+    const firstV2 = readFileSync(join(home, "codex-subagent-activity.json"), "utf8");
+    expect(rootKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.parse(firstV2).schemaVersion).toBe(2);
+    expect(JSON.parse(firstV2).legacyV1.agents[legacyState.agentKey]).toEqual(legacyState);
+    expect(readFileSync(join(home, "codex-subagent-activity.v1.json"), "utf8")).toBe(rawV1);
+    expect(readCodexSubagentActivity(legacyState.projectionKey)).toEqual([legacyState]);
+
+    expect(openDefaultRoot()).toBe(rootKey);
+    expect(readFileSync(join(home, "codex-subagent-activity.json"), "utf8")).toBe(firstV2);
+    expect(readdirSync(home).filter((name) => name === "codex-subagent-activity.v1.json")).toHaveLength(1);
+  });
+
+  it("wireはUserPrompt/Start 0 bytes、Stop系 exact {}+LFで内部失敗時も同じ", async () => {
+    const promptPayload = {
+      hook_event_name: "UserPromptSubmit",
+      session_id: start.session_id,
+      turn_id: "root-wire",
+      prompt: "PROMPT-CANARY-DO-NOT-PERSIST",
+      cwd: "/private/wire",
+    };
+    expect(await runCodexPassiveHook("UserPromptSubmit", JSON.stringify(promptPayload))).toEqual(Buffer.alloc(0));
     expect(await runCodexPassiveHook("SubagentStart", JSON.stringify(start))).toEqual(Buffer.alloc(0));
+    const persisted = readFileSync(join(home, "codex-subagent-activity.json"), "utf8");
+    expect(persisted).not.toContain("PROMPT-CANARY-DO-NOT-PERSIST");
+    expect(persisted).not.toContain("/private/wire");
     expect(await runCodexPassiveHook("SubagentStart", "not json")).toEqual(Buffer.alloc(0));
+    expect(await runCodexPassiveHook("UserPromptSubmit", "not json")).toEqual(Buffer.alloc(0));
     expect(await runCodexPassiveHook("SubagentStop", "not json")).toEqual(Buffer.from("{}\n"));
     expect(await runCodexPassiveHook("Stop", "not json")).toEqual(Buffer.from("{}\n"));
   });

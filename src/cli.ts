@@ -64,7 +64,7 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
   { cmd: "--help, -h", ja: "このヘルプを表示", en: "Show this help" },
 ];
 
-const CODEX_PASSIVE_EVENTS = ["Stop", "SubagentStart", "SubagentStop"] as const;
+const CODEX_PASSIVE_EVENTS = ["Stop", "UserPromptSubmit", "SubagentStart", "SubagentStop"] as const;
 type CodexPassiveEvent = (typeof CODEX_PASSIVE_EVENTS)[number];
 
 function isCodexPassiveEvent(value: string | undefined): value is CodexPassiveEvent {
@@ -77,6 +77,9 @@ export async function runCodexPassiveHook(event: CodexPassiveEvent, text: string
     if (event === "Stop") {
       const trackMod = await import("./track");
       await trackMod.runTrack(text, { codex: true });
+    } else if (event === "UserPromptSubmit") {
+      const activity = await import("./codex/subagent-store");
+      activity.handleCodexUserPromptSubmitHook(text);
     } else {
       const activity = await import("./codex/subagent-store");
       activity.handleCodexSubagentHook(text, event === "SubagentStart" ? "start" : "stop");
@@ -84,7 +87,9 @@ export async function runCodexPassiveHook(event: CodexPassiveEvent, text: string
   } catch {
     // A passive hook must never block Codex or put diagnostics/identifiers on stdout.
   }
-  return event === "SubagentStart" ? Buffer.alloc(0) : Buffer.from("{}\n", "utf8");
+  return event === "SubagentStart" || event === "UserPromptSubmit"
+    ? Buffer.alloc(0)
+    : Buffer.from("{}\n", "utf8");
 }
 
 const CMD_COLUMN_WIDTH = Math.max(...COMMANDS.map((c) => c.cmd.length)) + 2;

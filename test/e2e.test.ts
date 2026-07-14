@@ -683,6 +683,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     // buildHookCommand と同様、win32 は "\" を "/" に正規化するため比較側も正規化する。
     expect(codexCommand).toContain(CLI_PATH.replace(/\\/g, "/"));
     expect(codexCommand).toContain("__ccc-notifier-codex-hook Stop");
+    expect(hooksJson.hooks.UserPromptSubmit[0].hooks[0].command).toContain("__ccc-notifier-codex-hook UserPromptSubmit");
     expect(hooksJson.hooks.SubagentStart[0].hooks[0].timeout).toBe(20);
     expect(hooksJson.hooks.SubagentStop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook SubagentStop");
 
@@ -699,8 +700,14 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(doctor.stdout).toContain("project/hook trustは静的診断では未確認");
   });
 
-  it("12b. passive hook wire: Startは0 bytes、SubagentStop/親Stopはexact {}+LF", async () => {
+  it("12b. passive hook wire: UserPrompt/Startは0 bytes、SubagentStop/親Stopはexact {}+LF", async () => {
     const identity = { session_id: "session-a", turn_id: "turn-a", agent_id: "agent-a", agent_type: "explorer" };
+    const prompt = await runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+      env: sb.env,
+      stdin: JSON.stringify({ ...identity, hook_event_name: "UserPromptSubmit", prompt: "private-canary" }),
+    });
+    expect(prompt.code).toBe(0);
+    expect(Buffer.from(prompt.stdout)).toEqual(Buffer.alloc(0));
     const start = await runCli(["__ccc-notifier-codex-hook", "SubagentStart"], {
       env: sb.env,
       stdin: JSON.stringify({ ...identity, hook_event_name: "SubagentStart" }),
@@ -731,21 +738,137 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     writeFileSync(join(malformedLock, "owner.json.tmp-crash"), "partial");
     const oldLock = new Date(Date.now() - 1_000);
     utimesSync(malformedLock, oldLock, oldLock);
+    const root = await runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+      env: sb.env,
+      stdin: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session-concurrent",
+        turn_id: "root-A",
+        prompt: "PROMPT-CANARY",
+      }),
+    });
+    expect(root.code).toBe(0);
+    expect(root.stdout).toBe("");
     const results = await Promise.all(Array.from({ length: 20 }, (_, i) =>
       runCli(["__ccc-notifier-codex-hook", i % 2 === 0 ? "SubagentStart" : "SubagentStop"], {
         env: sb.env,
         stdin: JSON.stringify({
           hook_event_name: i % 2 === 0 ? "SubagentStart" : "SubagentStop",
           session_id: "session-concurrent",
-          turn_id: "turn-concurrent",
+          turn_id: `child-${i}`,
           agent_id: `agent-${i % 5}`,
           agent_type: "worker",
         }),
       })));
     expect(results.every((result) => result.code === 0)).toBe(true);
     const ledger = readJson(join(sb.cccnHome, "codex-subagent-activity.json"));
-    expect(Object.keys(ledger.agents)).toHaveLength(5);
+    const agents = Object.values(ledger.roots).flatMap((value: any) => Object.keys(value.agents));
+    expect(agents).toHaveLength(5);
     expect(ledger.keyCheck).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(ledger)).not.toContain("PROMPT-CANARY");
+    expect(JSON.stringify(ledger)).not.toContain("session-concurrent");
+    expect(JSON.stringify(ledger)).not.toContain("child-");
+
+    const lateAgentStart = await runCli(["__ccc-notifier-codex-hook", "SubagentStart"], {
+      env: sb.env,
+      stdin: JSON.stringify({
+        hook_event_name: "SubagentStart",
+        session_id: "session-concurrent",
+        turn_id: "child-X",
+        agent_id: "late-agent",
+        agent_type: "explorer",
+      }),
+    });
+    expect(lateAgentStart.stdout).toBe("");
+    const rollout = join(sb.tmp, "rollout-root-A.jsonl");
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_BASIC, rollout);
+    const parentPayload = JSON.parse(readFileSync(FIXTURE_CODEX_STOP_PAYLOAD, "utf8"));
+    const [parent, lateStop] = await Promise.all([
+      runCli(["__ccc-notifier-codex-hook", "Stop"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          ...parentPayload,
+          hook_event_name: "Stop",
+          session_id: "session-concurrent",
+          turn_id: "root-A",
+          transcript_path: rollout,
+        }),
+      }),
+      runCli(["__ccc-notifier-codex-hook", "SubagentStop"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: "SubagentStop",
+          session_id: "session-concurrent",
+          turn_id: "child-Y",
+          agent_id: "late-agent",
+          agent_type: "explorer",
+        }),
+      }),
+    ]);
+    expect(parent.stdout).toBe("{}\n");
+    expect(lateStop.stdout).toBe("{}\n");
+    const report = await runCli(["report", "--days", "9999", "--json"], { env: sb.env });
+    expect(JSON.parse(report.stdout).total.codexSubagentActivity).toMatchObject({ turns: 1 });
+    await runCli(["dashboard", "--no-open"], { env: sb.env });
+    const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
+    expect(html).toContain("利用あり・料金未集計");
+    for (const forbidden of ["PROMPT-CANARY", "session-concurrent", "child-X", "child-Y", "late-agent"]) {
+      expect(html).not.toContain(forbidden);
+    }
+  });
+
+  it("12d. 並行UserPromptとSubagentStartはactivity lock取得順どおり単一rootへだけ割り当てる", async () => {
+    const sessionId = "session-root-race";
+    const firstRoot = await runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+      env: sb.env,
+      stdin: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: sessionId,
+        turn_id: "root-A",
+        prompt: "RACE-PROMPT-A",
+      }),
+    });
+    expect(firstRoot.code).toBe(0);
+
+    const [nextRoot, start] = await Promise.all([
+      runCli(["__ccc-notifier-codex-hook", "UserPromptSubmit"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: "UserPromptSubmit",
+          session_id: sessionId,
+          turn_id: "root-B",
+          prompt: "RACE-PROMPT-B",
+        }),
+      }),
+      runCli(["__ccc-notifier-codex-hook", "SubagentStart"], {
+        env: sb.env,
+        stdin: JSON.stringify({
+          hook_event_name: "SubagentStart",
+          session_id: sessionId,
+          turn_id: "child-X",
+          agent_id: "race-agent",
+          agent_type: "worker",
+        }),
+      }),
+    ]);
+    expect(nextRoot.code).toBe(0);
+    expect(start.code).toBe(0);
+    expect(nextRoot.stdout).toBe("");
+    expect(start.stdout).toBe("");
+
+    const ledger = readJson(join(sb.cccnHome, "codex-subagent-activity.json"));
+    const session = Object.values(ledger.sessions)[0] as any;
+    const roots = Object.entries(ledger.roots) as Array<[string, any]>;
+    expect(roots).toHaveLength(2);
+    expect(roots.filter(([, root]) => Object.keys(root.agents).length === 1)).toHaveLength(1);
+    expect(roots.filter(([, root]) => Object.keys(root.agents).length === 0)).toHaveLength(1);
+    expect(ledger.agentAssignments[Object.keys(ledger.agentAssignments)[0]]).toBe(
+      roots.find(([, root]) => Object.keys(root.agents).length === 1)?.[0],
+    );
+    expect(ledger.roots[session.activeRootKey].status).toBe("open");
+    expect(JSON.stringify(ledger)).not.toContain("RACE-PROMPT");
+    expect(JSON.stringify(ledger)).not.toContain(sessionId);
+    expect(JSON.stringify(ledger)).not.toContain("race-agent");
   });
 
   // ---- 13. Codex: track --codex は rollout の累積カウンタを逐次ステップ差分で集計し、

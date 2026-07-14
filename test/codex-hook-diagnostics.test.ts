@@ -26,7 +26,7 @@ describe("Codex hook source diagnostics", () => {
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  function owned(event: "Stop" | "SubagentStart" | "SubagentStop" = "Stop") {
+  function owned(event: "Stop" | "UserPromptSubmit" | "SubagentStart" | "SubagentStop" = "Stop") {
     return { type: "command", command: codexHookCommand("/usr/bin/node", "/opt/ccc-notifier/dist/cli.js", event), timeout: 20 };
   }
 
@@ -76,6 +76,51 @@ describe("Codex hook source diagnostics", () => {
     expect(result.handlers).toHaveLength(2);
     expect(result.exactDuplicates).toEqual([{ event: "Stop", count: 2, sources: [join(userHome, "hooks.json"), join(repo, ".codex", "hooks.json")] }]);
     expect(JSON.stringify(result)).not.toContain("SECRET-UNKNOWN");
+  });
+
+  it("UserPromptSubmitのpath/timeout不一致とduplicateを既存eventと同じ規則で検出する", () => {
+    writeFileSync(join(userHome, "hooks.json"), JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [{ hooks: [
+          { ...owned("UserPromptSubmit"), timeout: 19 },
+          { type: "command", command: codexHookCommand("/usr/bin/node", "/other/ccc-notifier/dist/cli.js", "UserPromptSubmit"), timeout: 20 },
+        ] }],
+      },
+    }));
+    const result = diagnoseCodexHookSources({
+      codexHome: userHome,
+      cwd,
+      expectedNodePath: "/usr/bin/node",
+      expectedCliPath: "/opt/ccc-notifier/dist/cli.js",
+    });
+    expect(result.handlers).toHaveLength(2);
+    expect(result.handlers[0]).toMatchObject({ event: "UserPromptSubmit", pathMatches: true, timeoutMatches: false });
+    expect(result.handlers[1]).toMatchObject({ event: "UserPromptSubmit", pathMatches: false, timeoutMatches: true });
+    expect(result.exactDuplicates).toEqual([{
+      event: "UserPromptSubmit",
+      count: 2,
+      sources: [join(userHome, "hooks.json")],
+    }]);
+  });
+
+  it("厳格な旧track --codex Stopだけを所有handlerとして認識し類似commandを拒否する", () => {
+    writeFileSync(join(userHome, "hooks.json"), JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [
+          { type: "command", command: '"/usr/bin/node" "/opt/ccc-notifier/dist/cli.js" track --codex', timeout: 15 },
+          { type: "command", command: '"/usr/bin/node" "/opt/ccc-notifier/dist/cli.js" track --codex-extra', timeout: 15 },
+          { type: "command", command: '"/usr/bin/node" "/tmp/other/dist/cli.js" track --codex', timeout: 15 },
+        ] }],
+      },
+    }));
+    const result = diagnoseCodexHookSources({
+      codexHome: userHome,
+      cwd,
+      expectedNodePath: "/usr/bin/node",
+      expectedCliPath: "/opt/ccc-notifier/dist/cli.js",
+    });
+    expect(result.handlers).toHaveLength(1);
+    expect(result.handlers[0]).toMatchObject({ event: "Stop", nodePath: "/usr/bin/node" });
   });
 
   it("同一layerのJSON/TOML併存はpotentialだけでTOML内容を解釈しない", () => {

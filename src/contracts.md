@@ -308,26 +308,38 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 ```
 - `registerCodexHook(nodePath: string, cliPath: string): CodexHookResult`
 - `removeCodexHook(): CodexHookResult`
-- `Stop` / `SubagentStart` / `SubagentStop` の各handlerはtimeout 20秒。所有判定は専用内部subcommandの完全形のみ
+- `Stop` / `UserPromptSubmit` / `SubagentStart` / `SubagentStop` の各handlerはtimeout 20秒。所有判定は専用内部subcommandの完全形のみ
   (旧 `track --codex` はCLI pathがccc-notifierを含む完全形だけをStopのupgrade対象にする)。
 - 非破壊マージ: 自handlerだけをadd/update/removeし、同groupの他handler、group/handler/rootの未知キーを保持。
   groupが空になったときだけgroupを削除し、eventが空ならeventキーも削除する。
 - 書き込み前に `hooks.json.bak-<timestamp>` バックアップ(新規作成時はバックアップなし)
-- JSON パース不能・対象event異形 → 書き込まず `status: 'manual'` + 3eventスニペット返却
+- JSON パース不能・対象event異形 → 書き込まず `status: 'manual'` + 4eventスニペット返却
 - 末尾改行付き・2スペースインデントで整形(既存ファイルの見た目を維持)
-- hook payloadは`unknown`から検証し、`session_id + turn_id`と`agent_id`をlocal secretによるdomain-separated
-  HMAC keyへ変換する。生ID、raw payload、cwd、本文、transcript pathは台帳・通常ログへ保存しない。
-- activity台帳はunique agentごとにStart/StopをOR mergeし、逆順・再送・複数Stopへ冪等。agent typeは既知safe label
+- v2の匿名keyは`sessionKey=HMAC(root-session-v2, session_id)`、`rootKey=HMAC(root-turn-v2, session_id, root turn_id)`、
+  `agentKey=HMAC(agent-identity-v2, session_id, agent_id)`とする。subagent hook自身の`turn_id`は検証するがjoinに使わず保存しない。
+  生ID、prompt、raw payload、cwd、本文、transcript pathは台帳・backup・通常ログへ保存しない。
+- UserPromptSubmitはsessionごとのactive rootをopenする。同sessionの別rootがopenなら旧rootをabandonedにしactivityを移さない。
+  親Stopはexactなsession+root turnでopen/abandoned rootをcloseし、closed再送では同じrootKeyを返す。root未記録なら推測作成しない。
+- SubagentStartだけが未割当agentをexactly oneのopen active rootへassignmentする。SubagentStopは既存assignmentだけを更新し、
+  active rootがあっても未割当Stopを新規assignmentしない。既知agentのlate Stop/再送は元rootへ更新し、未知late event、root不在、
+  複数open、別root中の同agent Start(ID再利用疑い)はfail-closed。conflictは匿名markerと固定diagnosticだけを残す。
+- production hookはraw identityの構造検証、secretからのHMAC導出、active root参照、assignment/writeまでを同じactivity lock内で
+  完了する。UserPromptSubmit/親Stopもraw identityからroot遷移までを同じlock内で行い、並行時の帰属はlock取得順と一致させる。
+- activity台帳はroot内のunique agentごとにStart/StopをOR mergeし、逆順・再送・複数Stopへ冪等。agent typeは既知safe label
   または固定`unknown`だけを保存する。lock ownerはstagingでatomic完成後にcanonicalへno-replace publishする。same-host dead PIDは
   age不要で一意claim回収し、live/foreign/生死不明ownerはfail-closed。旧malformed directoryは短い初期化猶予・再読込後に
   一意rename claimできたprocessだけ回収し、releaseはtoken一致時だけ行う。canonical publishの`EEXIST`は、その直後に
   ownerがreleaseしてcanonicalが消えても通常contentionとして再試行する。その他のpublish errorはcanonical実在時だけ
   保守的contention、不在時は即時fail-closed。acquire deadlineは回収成功による`continue`でも迂回できない。
-- ledgerは秘密を含まないdomain-separated HMAC `keyCheck`を持つ。キーは32-byte長だけでなくkeyCheckもconstant-time照合し、
-  同長置換・1bit破損・keyCheck破損ではkey/ledgerを変更せずfail-closed。keyCheck無しのvalid v1 ledgerだけをactivity lock内で
-  一度atomic backfillする。永続化失敗はpassive wireやmain trackへ伝播させない。
-- Gate D表示投影では、validな`session_id + turn_id`を持つ通常Codex親Stop recordに、activityの有無や
-  到着順と無関係に`activityProjectionKey`(匿名HMAC key)を保存する。ただし親Stopもactivity lock内でledgerの
+- ledger schema v2はsession/root/assignment/conflict/sequenceと任意の`legacyV1.agents`を持つ。秘密を含まないHMAC `keyCheck`を維持し、
+  valid v1は元rawの製品固有backupを一度だけ作ってatomicにv2へ移行する。復元不能なv1 keyを別rootへ推測再割当しない。
+  v1/v2の全objectはschema allowlist外fieldを拒否し、raw/private fieldをmigration backupや再writeで複製しない。v2では各stateの
+  `projectionKey`が外側rootKeyと一致し、全root agentがexactly one rootだけに存在して`agentAssignments`から同じrootへ双方向参照
+  されることを必須とする。不一致はread/mutationともfail-closedで、元台帳を上書きしない。
+  キーは32-byte長だけでなくkeyCheckもconstant-time照合し、
+  同長置換・1bit破損・keyCheck破損ではkey/ledgerを変更せずfail-closed。永続化失敗はpassive wireやmain trackへ伝播させない。
+- Gate D表示投影では、UserPromptSubmitで記録済みのexact rootを親Stopがcloseできた場合だけ、activityの有無と
+  到着順と無関係に`activityProjectionKey`(v2 rootKey)を保存する。親Stopはpricing/FX/transcript集計より前にactivity lock内でledgerの
   `keyCheck`を検証し、key/ledger不整合やledger破損時は未検証keyを付けずmain turn記録だけを継続する。
   keyの存在だけでは利用ありと判定せず、対応するcanonical activityが無ければruntime `subagentActivity`を付けない。
   生のturn/agent ID、hook由来path、raw payloadは保存せず、key生成失敗はmain turnの記録を止めない。
@@ -341,7 +353,8 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - `TurnRecord.subagentActivity`はoptionalかつruntime-only。`readTurns`がcanonical台帳を1回だけ読み、同じ
   `activityProjectionKey`のunique agent stateから`started` / `stopped` / safeな`agentTypes` /
   `usageStatus: 'unavailable' | 'partial'`をpure mergeする。保存済みの同名フィールドは信用しない。
-  late Start/Stopは次turnやadjustmentへ付けず元recordの次回readへ反映し、history行数・turn数・料金を変えない。
+  assignment済みagentのlate Stopは次turnへ付けず元recordの次回readへ反映し、history行数・turn数・料金を変えない。
+  v1 Historyは`legacyV1.agents`の旧projection keyと完全一致する場合だけread-only投影を継続する。
 - Gate A未承認のため、Gate D表示投影はchild transcript/token/cost/pricing/unknownModels/subagents/cursor/
   sweep分類を一切作らない。現段階の投影statusは料金を推測せず`unavailable`。
 
@@ -359,10 +372,10 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   agg 側が `"unknown"` のときの代替にも使う。TurnRecord に `source: 'codex'` を付与。
   subagents 収集(collectSubagentUsage)は**呼ばない**。それ以外(価格・fx・appendTurn・通知判定・
   ダッシュボード再生成・ミュート・通知なしモード)は既存共通経路
-- SubagentStart/Stop hookは検出台帳だけを更新し、history adjustment、料金、通知、dashboard自動生成を行わない。
-  親Stop後のlate eventも匿名keyで元turnへ結合し、表示は次の通常turnによる再生成、または手動`report` /
-  `dashboard`実行時に更新される。導入前のkey無し旧recordには遡及適用しない。
-- cli.ts: 旧`track --codex`互換に加え専用passive hookをdispatchする。`SubagentStart`はstdout 0 bytes、
+- UserPromptSubmit/SubagentStart/Stop hookは利用記録だけを更新し、history adjustment、料金、通知、dashboard自動生成を行わない。
+  assignment済みagentの親Stop後late eventだけを匿名keyで元turnへ結合し、表示は次の通常turnによる再生成、または手動`report` /
+  `dashboard`実行時に更新する。曖昧な未知late eventと導入前のkey無し旧recordには遡及適用しない。
+- cli.ts: 旧`track --codex`互換に加え専用passive hookをdispatchする。`UserPromptSubmit`と`SubagentStart`はstdout 0 bytes、
   `SubagentStop`と親`Stop`は常にUTF-8 `{}\n`だけ、全経路exit 0。親Stopだけ既存Codex trackへ渡す。
 
 ### src/setup.ts / src/doctor.ts
@@ -379,6 +392,8 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   exact duplicate、同一layerのJSON/TOML併存potential duplicateを表示する。trust、global/individual disabled、
   plugin/managed/session sourceの実効状態はunknownとし、Codexの `/hooks` を最終確認先として案内する。
   `CCCN_CODEX_HOOK_SOURCES` は標準候補を置換しないsupplemental sourceに限定する。
+- setup/doctor/docsはStop / UserPromptSubmit / SubagentStart / SubagentStopの4eventを一貫して表示し、3eventからの更新後は
+  Codex再起動と追加UserPromptSubmitを含む4eventのtrust確認を案内する。
 
 ### src/sweep.ts
 - 既存 Claude 走査の後に Codex 走査: `codexHome()/sessions` 配下の `rollout-*.jsonl`(`YYYY/MM/DD` 3階層・

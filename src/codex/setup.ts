@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 
 import { codexHome } from "./env";
 
-export const CODEX_HOOK_EVENTS = ["Stop", "SubagentStart", "SubagentStop"] as const;
+export const CODEX_HOOK_EVENTS = ["Stop", "UserPromptSubmit", "SubagentStart", "SubagentStop"] as const;
 export type CodexHookEventName = (typeof CODEX_HOOK_EVENTS)[number];
 export const CODEX_HOOK_TIMEOUT_SECONDS = 20;
 
@@ -62,10 +62,15 @@ function tokenize(command: string): string[] | null {
   return result;
 }
 
-function isLegacyOwnedCommand(command: string): boolean {
+function parseLegacyOwnedCommand(command: string): ParsedOwnedCommand | null {
   const tokens = tokenize(command);
-  return tokens !== null && tokens.length === 4 && isCccNotifierExecutablePair(tokens[0], tokens[1]) &&
-    tokens[2] === "track" && tokens[3] === "--codex";
+  if (tokens === null || tokens.length !== 4 || !isCccNotifierExecutablePair(tokens[0], tokens[1]) ||
+    tokens[2] !== "track" || tokens[3] !== "--codex") return null;
+  return {
+    nodePath: normalizeExecutablePath(tokens[0]),
+    cliPath: normalizeExecutablePath(tokens[1]),
+    event: "Stop",
+  };
 }
 
 function isCccNotifierExecutablePair(nodePath: string, cliPath: string): boolean {
@@ -95,11 +100,19 @@ export function isOwnedCodexHookCommand(command: unknown, event?: CodexHookEvent
   return parsed !== null && (event === undefined || parsed.event === event);
 }
 
+/** Diagnostics/setup migration ownership: new dedicated command plus exact historical Stop shape. */
+export function parseConfiguredOwnedCodexHookCommand(
+  command: unknown,
+  event?: CodexHookEventName,
+): ParsedOwnedCommand | null {
+  const parsed = parseOwnedCodexHookCommand(command) ??
+    (typeof command === "string" ? parseLegacyOwnedCommand(command) : null);
+  return parsed !== null && (event === undefined || parsed.event === event) ? parsed : null;
+}
+
 function isOwnedHandler(value: unknown, event: CodexHookEventName): boolean {
   if (!isPlainObject(value) || value.type !== "command") return false;
-  if (isOwnedCodexHookCommand(value.command, event)) return true;
-  // Only the exact historical command shape is recognized for a one-time Stop upgrade.
-  return event === "Stop" && typeof value.command === "string" && isLegacyOwnedCommand(value.command);
+  return parseConfiguredOwnedCodexHookCommand(value.command, event) !== null;
 }
 
 function canonicalHandler(command: string): Record<string, unknown> {

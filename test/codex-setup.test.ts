@@ -68,7 +68,7 @@ afterEach(() => {
 // ============ 1. hooks.json 無し ============
 
 describe("registerCodexHook — hooks.json 不在", () => {
-  it("新規作成し、3イベントに1件ずつ持つ。backupPath は null・バックアップも作らない", () => {
+  it("新規作成し、4イベントに1件ずつ持つ。backupPath は null・バックアップも作らない", () => {
     expect(existsSync(hooksFile)).toBe(false);
 
     const res = registerCodexHook(NODE, CLI);
@@ -77,8 +77,9 @@ describe("registerCodexHook — hooks.json 不在", () => {
 
     const h = readHooks();
     expect(Object.keys(h)).toEqual(["hooks"]);
-    expect(Object.keys(h.hooks)).toEqual(["Stop", "SubagentStart", "SubagentStop"]);
+    expect(Object.keys(h.hooks)).toEqual(["Stop", "UserPromptSubmit", "SubagentStart", "SubagentStop"]);
     expect(h.hooks.Stop).toHaveLength(1);
+    expect(h.hooks.UserPromptSubmit).toHaveLength(1);
 
     const hook = h.hooks.Stop[0].hooks[0];
     expect(hook.type).toBe("command");
@@ -142,6 +143,23 @@ describe("registerCodexHook — 冪等", () => {
     expect(readFileSync(hooksFile, "utf8")).toBe(contentAfterFirst);
     expect(statSync(hooksFile).mtimeMs).toBe(mtimeAfterFirst);
     expect(backups()).toHaveLength(0);
+  });
+
+  it("既存の正準3イベントへUserPromptSubmitだけを追加し、元rawのbackupを1つ作る", () => {
+    const hooks = Object.fromEntries(["Stop", "SubagentStart", "SubagentStop"].map((event) => [
+      event,
+      [{ hooks: [{ type: "command", command: codexHookCommand(NODE, CLI, event as "Stop" | "SubagentStart" | "SubagentStop"), timeout: 20 }] }],
+    ]));
+    const raw = JSON.stringify({ future: { keep: true }, hooks });
+    writeFileSync(hooksFile, raw, "utf8");
+
+    const result = registerCodexHook(NODE, CLI);
+    expect(result.status).toBe("written");
+    expect(readHooks().future).toEqual({ keep: true });
+    expect(readHooks().hooks.UserPromptSubmit[0].hooks[0].command)
+      .toBe(codexHookCommand(NODE, CLI, "UserPromptSubmit"));
+    expect(backups()).toHaveLength(1);
+    expect(readFileSync(join(tmpDir, backups()[0]), "utf8")).toBe(raw);
   });
 });
 
@@ -287,6 +305,7 @@ describe("registerCodexHook — 破損・異形は書かず manual", () => {
     // JSON エスケープに耐える部分文字列で command 情報の存在を確認する。
     expect(res.manualSnippet).toBeDefined();
     expect(res.manualSnippet).toContain("ccc-notifier");
+    expect(res.manualSnippet).toContain("__ccc-notifier-codex-hook UserPromptSubmit");
     expect(res.manualSnippet).toContain("__ccc-notifier-codex-hook SubagentStart");
 
     // ファイルは1バイトも変わらず、バックアップも作らない。
@@ -361,6 +380,9 @@ describe("removeCodexHook", () => {
 
     const after = readHooks();
     expect("Stop" in after.hooks).toBe(false); // Stop キーごと消える
+    expect("UserPromptSubmit" in after.hooks).toBe(false);
+    expect("SubagentStart" in after.hooks).toBe(false);
+    expect("SubagentStop" in after.hooks).toBe(false);
     expect(after.hooks.PermissionRequest).toBeDefined(); // 他イベントは維持
   });
 

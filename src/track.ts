@@ -10,7 +10,7 @@
 //     track 側で無限待ちの await を追加しない。
 
 import { aggregateCodexTurn } from "./codex/transcript";
-import { codexActivityProjectionKey } from "./codex/subagent-store";
+import { closeCodexRootContext } from "./codex/subagent-store";
 import { writeDashboardHtml } from "./dashboard";
 import {
   isFullDashboardDue,
@@ -97,6 +97,16 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     }
     if (!isRecord(parsed)) return;
     const input = parsed as StopHookInput;
+    const isCodex = opts?.codex === true;
+    // root context closeはpricing/FX/transcript集計より先に確定する。失敗はmain料金記録から隔離する。
+    let activityProjectionKey: string | null = null;
+    if (isCodex) {
+      try {
+        activityProjectionKey = closeCodexRootContext(parsed);
+      } catch {
+        logError("track:codex-subagent-projection", new Error("activity projection was not attached"));
+      }
+    }
     const transcriptPath = input.transcript_path;
     if (typeof transcriptPath !== "string") return;
 
@@ -105,7 +115,6 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     const cacheDir = paths().cacheDir;
     const table = await loadPriceTable(cacheDir, { offline: true });
     const fx = await getUsdJpy(cfg, cacheDir);
-    const isCodex = opts?.codex === true;
     let record!: TurnRecord;
 
     // cursor snapshotからhistory/cursor commitまでを1つのdata lockで直列化する。
@@ -173,12 +182,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       record.source = "codex";
       // valid parent turnにはactivityの到着順と無関係に、keyCheck検証済みの匿名join keyを保存する。
       // key/ledger整合性の検証失敗だけをmain記録から隔離し、未検証keyは履歴へ付けない。
-      try {
-        const projectionKey = codexActivityProjectionKey(parsed);
-        if (projectionKey !== null) record.activityProjectionKey = projectionKey;
-      } catch {
-        logError("track:codex-subagent-projection", new Error("activity projection was not attached"));
-      }
+      if (activityProjectionKey !== null) record.activityProjectionKey = activityProjectionKey;
     }
     if (breakdown.unknownModels.length > 0) {
       record.unknownModels = breakdown.unknownModels;

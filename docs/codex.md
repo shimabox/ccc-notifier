@@ -101,7 +101,9 @@ sweep は rollout を `task_complete` イベントの境界でターンに分割
 ## 制限 / Limitations
 
 - **サブエージェント/collab スレッドの usage・料金は未集計です**(将来対応予定)。公式hookで利用の有無と開始・終了は検出しますが、子のtokenや料金は推測しません。そのため履歴の総額・月予算・通知は従来どおりメインスレッド分だけです
-- SubagentStart / SubagentStop hookは利用記録だけを更新し、履歴追記・料金計算・通知・ダッシュボード再生成は行いません。親応答の記録後に開始・終了イベントが届いた場合も、次の通常ターンによるダッシュボード再生成、または手動で`report` / `dashboard`を実行すると、元のターンへ利用表示が反映されます。料金・総額・月予算・通知は変わりません。匿名join keyを持たない導入前の旧履歴には遡及反映されない場合があります
+- 実際のpayloadではchildの`turn_id`と親rootの`turn_id`が異なるため、UserPromptSubmitでroot開始境界を匿名記録し、SubagentStartを親session内のactive rootへ割り当てます。SubagentStopはStartで割当済みのagentだけを更新し、未割当Stopは別turnへの誤帰属を避けるため省略します。prompt本文、session/turn/agent ID、cwd、pathは保存しません。これら3hookは利用記録だけを更新し、履歴追記・料金計算・通知・ダッシュボード再生成は行いません
+- 4hookの一部が未信頼・無効・失敗した場合や、親Stop後に初めて届いた未知agentなど関連先が曖昧な場合は、別turnへの誤表示を避けるため利用表示を省略します。active中に割当済みの既知agentのlate Stopだけは元turnへ反映されます。次の通常ターンによる再生成、または手動`report` / `dashboard`で表示が更新されます
+- 旧v1利用記録は完全一致する既存Historyだけを引き続き表示します。すでに親/child ID不一致で結び付かなかった記録は、時刻から別turnへ推測移行しません。料金・History行数・月予算・通知額はmigrationで変わりません
 - **reasoning トークンは output トークンに含まれて課金されます**。これは ccc-notifier 側の仕様ではなく OpenAI の課金仕様そのもので、Codex の `token_count` イベントが運ぶ `output_tokens` にはもともと `reasoning_output_tokens` が含まれています
 
 ## トラブルシュート / Troubleshooting

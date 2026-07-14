@@ -114,7 +114,7 @@ describe("Codex activity lock publication failure", () => {
     expect(stagingFiles()).toEqual([]);
   });
 
-  it("障害時もSubagentStartと親Stop wireをbyte-exactかつ有界に返し、main履歴は継続する", async () => {
+  it("障害時もUserPrompt/SubagentStart/親Stop wireをbyte-exactかつ有界に返し、main履歴は継続する", async () => {
     const { runCodexPassiveHook } = await import("../src/cli");
     const stopPayload = JSON.parse(readFileSync(STOP, "utf8")) as Record<string, unknown>;
     const startPayload = {
@@ -123,6 +123,15 @@ describe("Codex activity lock publication failure", () => {
       agent_id: "private-agent",
       agent_type: "explorer",
     };
+
+    const promptAt = Date.now();
+    expect(await runCodexPassiveHook("UserPromptSubmit", JSON.stringify({
+      ...stopPayload,
+      hook_event_name: "UserPromptSubmit",
+      prompt: "PRIVATE-PROMPT-CANARY",
+    }))).toEqual(Buffer.alloc(0));
+    expect(Date.now() - promptAt).toBeLessThan(500);
+    expect(stagingFiles()).toEqual([]);
 
     const startAt = Date.now();
     expect(await runCodexPassiveHook("SubagentStart", JSON.stringify(startPayload))).toEqual(Buffer.alloc(0));
@@ -164,5 +173,32 @@ describe("Codex activity lock publication failure", () => {
     fsFault.renameDestination = join(home, "codex-subagent-activity.json");
     expect(() => activity.validateCodexSubagentPayload(payload)).toThrow("injected rename failure");
     expect(readdirSync(home).filter((name) => /^codex-subagent-activity\.json\..+\.tmp$/.test(name))).toEqual([]);
+  });
+
+  it("v1 backup/ledger rename失敗は元v1を不変に保ち、再送でmigrationを完了できる", async () => {
+    fsFault.linkMode = "none";
+    const activity = await import("../src/codex/subagent-store");
+    const keyFile = join(home, "codex-subagent-key");
+    const ledgerFile = join(home, "codex-subagent-activity.json");
+    const backupFile = join(home, "codex-subagent-activity.v1.json");
+    writeFileSync(keyFile, Buffer.alloc(32, 0x4a));
+    const rawV1 = `${JSON.stringify({ schemaVersion: 1, agents: {} })}\n`;
+    writeFileSync(ledgerFile, rawV1);
+    const prompt = { hook_event_name: "UserPromptSubmit", session_id: "session-a", turn_id: "root-a" };
+
+    fsFault.renameDestination = backupFile;
+    expect(() => activity.openCodexRootContext(prompt)).toThrow("injected rename failure");
+    expect(readFileSync(ledgerFile, "utf8")).toBe(rawV1);
+    expect(readdirSync(home).filter((name) => name.includes("activity.v1.json.") && name.endsWith(".tmp"))).toEqual([]);
+
+    fsFault.renameDestination = ledgerFile;
+    expect(() => activity.openCodexRootContext(prompt)).toThrow("injected rename failure");
+    expect(readFileSync(ledgerFile, "utf8")).toBe(rawV1);
+    expect(readFileSync(backupFile, "utf8")).toBe(rawV1);
+
+    fsFault.renameDestination = null;
+    expect(activity.openCodexRootContext(prompt)).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.parse(readFileSync(ledgerFile, "utf8")).schemaVersion).toBe(2);
+    expect(readFileSync(backupFile, "utf8")).toBe(rawV1);
   });
 });

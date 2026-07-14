@@ -9,7 +9,8 @@ import { runReport } from "../src/report";
 import { appendTurn, paths, readTurns } from "../src/store";
 import { runTrack } from "../src/track";
 import {
-  codexActivityProjectionKey,
+  openCodexRootContext,
+  readCodexSubagentActivity,
   recordCodexSubagentEvent,
   validateCodexSubagentPayload,
 } from "../src/codex/subagent-store";
@@ -19,6 +20,7 @@ const ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", im
 const STOP = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
 
 let home: string;
+let activeRootKey: string;
 
 function parentPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return { ...JSON.parse(readFileSync(STOP, "utf8")), ...overrides } as Record<string, unknown>;
@@ -39,8 +41,8 @@ function agentPayload(
 
 function observe(kind: "SubagentStart" | "SubagentStop", overrides: Record<string, unknown> = {}): string {
   const event = validateCodexSubagentPayload(agentPayload(kind, overrides))!;
-  recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
-  return event.projectionKey;
+  const state = recordCodexSubagentEvent(event, { observedAt: "2026-07-13T00:00:00.000Z" });
+  return state?.projectionKey ?? activeRootKey;
 }
 
 function makeRecord(overrides: Partial<TurnRecord> = {}): TurnRecord {
@@ -70,6 +72,10 @@ beforeEach(() => {
   process.env.CCCN_HOME = home;
   process.env.CCCN_DRY_RUN = "1";
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
+  activeRootKey = openCodexRootContext({
+    ...parentPayload(),
+    hook_event_name: "UserPromptSubmit",
+  }, { observedAt: "2026-07-13T00:00:00.000Z" })!;
 });
 
 afterEach(() => {
@@ -120,7 +126,8 @@ describe("Codex subagent activity projection", () => {
     expect(readFileSync(paths().historyFile, "utf8")).not.toContain("subagentActivity");
   });
 
-  it("parent Stop→late Start→late Stopでもhistory不変のまま元turnへ投影する", async () => {
+  it("親Stop後の既知agent late Stopはhistory不変のまま元turnへ投影する", async () => {
+    const key = observe("SubagentStart", { turn_id: "child-turn-X" });
     const rollout = join(home, "rollout.jsonl");
     copyFileSync(ROLLOUT, rollout);
     await runTrack(JSON.stringify(parentPayload({ transcript_path: rollout })), { codex: true });
@@ -129,20 +136,14 @@ describe("Codex subagent activity projection", () => {
     const notifyBefore = readFileSync(join(home, "last-notify.json"), "utf8");
     const stored = JSON.parse(historyBefore) as TurnRecord;
     expect(stored.activityProjectionKey).toMatch(/^[a-f0-9]{64}$/);
-    expect(readTurns()[0].subagentActivity).toBeUndefined();
+    expect(readTurns()[0].subagentActivity).toMatchObject({ started: 1, stopped: 0 });
     expect(readTurns()).toHaveLength(1);
-
-    const key = observe("SubagentStart");
     expect(key).toBe(stored.activityProjectionKey);
     expect(readFileSync(paths().historyFile, "utf8")).toBe(historyBefore);
     expect(readFileSync(join(home, "report.html"), "utf8")).toBe(dashboardBefore);
     expect(readFileSync(join(home, "last-notify.json"), "utf8")).toBe(notifyBefore);
-    expect(readTurns()[0].subagentActivity).toEqual({
-      started: 1, stopped: 0, agentTypes: ["explorer"], usageStatus: "unavailable",
-    });
-
-    observe("SubagentStop");
-    observe("SubagentStop");
+    observe("SubagentStop", { turn_id: "child-turn-Y" });
+    observe("SubagentStop", { turn_id: "child-turn-Y" });
     const projected = readTurns();
     expect(readFileSync(paths().historyFile, "utf8")).toBe(historyBefore);
     expect(projected).toHaveLength(1);
@@ -165,10 +166,10 @@ describe("Codex subagent activity projection", () => {
     expect(readTurns()[0].subagentActivity).toBeUndefined();
     const emptyLedger = JSON.parse(readFileSync(join(home, "codex-subagent-activity.json"), "utf8")) as {
       keyCheck?: string;
-      agents: Record<string, unknown>;
+      roots: Record<string, { agents: Record<string, unknown> }>;
     };
     expect(emptyLedger.keyCheck).toMatch(/^[a-f0-9]{64}$/);
-    expect(emptyLedger.agents).toEqual({});
+    expect(emptyLedger.roots[stored.activityProjectionKey!].agents).toEqual({});
 
     const logs: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
@@ -192,17 +193,21 @@ describe("Codex subagent activity projection", () => {
     expect(embedded.turns[0].um).toBe(stored.costUSD);
   });
 
-  it("parent-firstでも別turn・別sessionのlate activityを混同しない", async () => {
+  it("未知late eventを捨て、次rootのchild turnが異なっても正しく関連付ける", async () => {
     const rolloutA = join(home, "rollout-a.jsonl");
     copyFileSync(ROLLOUT, rolloutA);
     await runTrack(JSON.stringify(parentPayload({ transcript_path: rolloutA, turn_id: "turn-a" })), { codex: true });
     const keyA = (JSON.parse(readFileSync(paths().historyFile, "utf8")) as TurnRecord).activityProjectionKey;
 
-    const keyB = observe("SubagentStart", { turn_id: "turn-b" });
-    observe("SubagentStop", { turn_id: "turn-b" });
-    const keyOtherSession = observe("SubagentStart", { session_id: "other-session", turn_id: "turn-a" });
+    observe("SubagentStart", { agent_id: "unknown-late", turn_id: "old-child" });
+    activeRootKey = openCodexRootContext({
+      ...parentPayload({ turn_id: "turn-b" }),
+      hook_event_name: "UserPromptSubmit",
+    })!;
+    const keyB = observe("SubagentStart", { turn_id: "child-turn-X" });
+    observe("SubagentStop", { turn_id: "child-turn-Y" });
+    observe("SubagentStart", { session_id: "other-session", turn_id: "child-other" });
     expect(keyB).not.toBe(keyA);
-    expect(keyOtherSession).not.toBe(keyA);
     expect(readTurns()[0].subagentActivity).toBeUndefined();
 
     const rolloutB = join(home, "rollout-b.jsonl");
@@ -245,13 +250,15 @@ describe("Codex subagent activity projection", () => {
     expect(rows.reduce((sum, r) => sum + r.costUSD + (r.subagents?.costUSD ?? 0), 0)).toBe(0.5);
   });
 
-  it("再送はunique agent数、Start-only/Stop-onlyとsafe agentTypesを正しく投影する", () => {
+  it("再送・既知Stopを投影し、未割当Stopはactive rootにも割り当てない", () => {
     const key = observe("SubagentStart", { agent_id: "a", agent_type: "worker" });
     observe("SubagentStart", { agent_id: "a", agent_type: "worker" });
     observe("SubagentStop", { agent_id: "b", agent_type: "<script>alert(1)</script>" });
+    observe("SubagentStart", { agent_id: "c", agent_type: "<script>alert(1)</script>" });
+    observe("SubagentStop", { agent_id: "c", agent_type: "<script>alert(1)</script>" });
     appendTurn(makeRecord({ activityProjectionKey: key }));
     expect(readTurns()[0].subagentActivity).toEqual({
-      started: 1,
+      started: 2,
       stopped: 1,
       agentTypes: ["unknown", "worker"],
       usageStatus: "unavailable",
@@ -265,6 +272,38 @@ describe("Codex subagent activity projection", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].subagentActivity).toBeUndefined();
     expect(rows[0].costUSD).toBe(0.25);
+  });
+
+  it("v1完全一致Historyだけをlegacy projectionし、不一致recordへ推測再割当しない", () => {
+    const legacy = {
+      schemaVersion: 1,
+      projectionKey: "c".repeat(64),
+      agentKey: "d".repeat(64),
+      agentTypeLabel: "reviewer",
+      startObserved: true,
+      stopObserved: true,
+      firstObservedAt: "2026-07-13T00:00:00.000Z",
+      lastObservedAt: "2026-07-13T00:00:01.000Z",
+    };
+    writeFileSync(
+      join(home, "codex-subagent-activity.json"),
+      `${JSON.stringify({ schemaVersion: 1, agents: { [legacy.agentKey]: legacy } })}\n`,
+    );
+    appendTurn(makeRecord({ activityProjectionKey: legacy.projectionKey }));
+    appendTurn(makeRecord({ activityProjectionKey: "e".repeat(64), prompt: "mismatch" }));
+
+    openCodexRootContext({
+      ...parentPayload({ turn_id: "migration-root" }),
+      hook_event_name: "UserPromptSubmit",
+    });
+    const rows = readTurns();
+    expect(rows[0].subagentActivity).toEqual({
+      started: 1,
+      stopped: 1,
+      agentTypes: ["reviewer"],
+      usageStatus: "unavailable",
+    });
+    expect(rows[1].subagentActivity).toBeUndefined();
   });
 
   it("report/dashboardは利用あり・料金未集計を示し、key・ID・path・料金へ混ぜない", async () => {
@@ -355,7 +394,7 @@ describe("Codex subagent activity projection", () => {
 
     writeFileSync(keyFile, validKey);
     const thirdPayload = parentPayload({ turn_id: "turn-third" });
-    const expectedRestoredKey = codexActivityProjectionKey(thirdPayload);
+    const expectedRestoredKey = openCodexRootContext({ ...thirdPayload, hook_event_name: "UserPromptSubmit" });
     const thirdRollout = join(home, "rollout-third.jsonl");
     copyFileSync(ROLLOUT, thirdRollout);
     await runTrack(JSON.stringify({ ...thirdPayload, transcript_path: thirdRollout }), { codex: true });
@@ -365,7 +404,7 @@ describe("Codex subagent activity projection", () => {
     expect(restored).toHaveLength(3);
     expect(restored[0]).toEqual(firstRecord);
     expect(restored[2].activityProjectionKey).toBe(expectedRestoredKey);
-    expect(readFileSync(ledgerFile, "utf8")).toBe(ledgerBefore);
+    expect(readFileSync(ledgerFile, "utf8")).not.toBe(ledgerBefore);
   });
 
   it("keyCheck破損中はkey/ledgerを変更せずmainだけ記録し、台帳復旧後に再接続する", async () => {
@@ -378,6 +417,7 @@ describe("Codex subagent activity projection", () => {
     ledger.keyCheck = `${ledger.keyCheck[0] === "0" ? "1" : "0"}${ledger.keyCheck.slice(1)}`;
     const corruptLedger = `${JSON.stringify(ledger)}\n`;
     writeFileSync(ledgerFile, corruptLedger, "utf8");
+    expect(readCodexSubagentActivity(activeRootKey)).toEqual([]);
 
     const brokenRollout = join(home, "rollout-broken-check.jsonl");
     copyFileSync(ROLLOUT, brokenRollout);
@@ -390,7 +430,7 @@ describe("Codex subagent activity projection", () => {
 
     writeFileSync(ledgerFile, validLedger, "utf8");
     const restoredPayload = parentPayload({ turn_id: "turn-restored" });
-    const expectedRestoredKey = codexActivityProjectionKey(restoredPayload);
+    const expectedRestoredKey = openCodexRootContext({ ...restoredPayload, hook_event_name: "UserPromptSubmit" });
     const restoredRollout = join(home, "rollout-restored-check.jsonl");
     copyFileSync(ROLLOUT, restoredRollout);
     await runTrack(JSON.stringify({ ...restoredPayload, transcript_path: restoredRollout }), { codex: true });
@@ -400,6 +440,6 @@ describe("Codex subagent activity projection", () => {
     expect(restored).toHaveLength(2);
     expect(restored[1].activityProjectionKey).toBe(expectedRestoredKey);
     expect(readFileSync(keyFile)).toEqual(keyBefore);
-    expect(readFileSync(ledgerFile, "utf8")).toBe(validLedger);
+    expect(readFileSync(ledgerFile, "utf8")).not.toBe(validLedger);
   });
 });
