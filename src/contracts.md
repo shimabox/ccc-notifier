@@ -42,6 +42,20 @@
 - `main(argv: string[]): Promise<number>`
 - `runDoctor(): Promise<number>`
 - `runReport(argv: string[]): Promise<number>`
+- doctorの直近額はソース別で、Claudeは`Claude Code 直近セッション合計`、Codexは`Codex 最新rollout合計`
+  と表示し、両者を合算しない。Codex行は常に
+  `API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計`を明示する。
+- Codex合計は、安全に検査できた標準user/project JSON sourceにccc-notifier所有Stop handlerがある場合だけ実行する。新しい
+  `__ccc-notifier-codex-hook Stop`と厳格な旧`track --codex`だけを認め、Codex home/sessionsの存在や
+  TOML/opaque/plugin/managed sourceやsupplemental env-extra単独から設定済みと推測しない。path/timeout不一致は既存警告とし、所有判定自体は維持する。
+- Codex合計はmtime最大の**単一rollout**だけを先頭から`splitIntoCodexTurnDrafts(path, null)`で読み、全draftの
+  main bucketをモデル別にmergeしてoffline単価表で算出する。親/子rollout分類や別rollout、サブエージェント料金は加算しない。
+  深さ4、通常ファイル限定、symlink非追跡の探索はsweepと共通化し、mtime同値は絶対path辞書順で決定する。
+  directory/statの一部でも検査不能なら最新を断定せず警告して金額をskipする。
+- Codex合計診断はhistory/cursor/activity/dashboard/rolloutを変更せず、保存lock・通知・dashboard生成を行わない。
+  sessions/rollout/usage不在、読取・解析・pricing失敗、unknown modelは警告止まりで、それだけではdoctorをexit 1にしない。
+  unknown modelは`Cc`/`Cf`/`Zl`/`Zp`除去・長さ/件数制限した名前と過少計上の可能性を表示する。
+  model別集計はnull-prototype/own-property確認を使い、`__proto__`/`constructor`等をデータkeyとして安全に扱う。
 
 ## TurnRecord.models の定義
 main のモデル → sidechain のみのモデル の順、重複排除。
@@ -410,6 +424,7 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 ### src/sweep.ts
 - 既存 Claude 走査の後に Codex 走査: `codexHome()/sessions` 配下の `rollout-*.jsonl`(`YYYY/MM/DD` 3階層・
   readdir 再帰は深さ4まで)。`detectCodex()` 偽 or sessions 不在なら黙ってスキップ
+- rollout列挙はdoctorとread-only helperを共有し、通常ファイル限定・symlink非追跡・深さ上限を一致させる。
 - 各ファイル: `loadCursor` → `splitIntoCodexTurnDrafts` → `--days` フィルタ(endTs 基準・カーソルは進める)→
   TurnRecord(`source: 'codex'`, `ingest: 'sweep'`)。active guard(mtime 5分)・`--dry-run`・去重(カーソル)は共通
 - サマリーに Codex 分の件数/金額を1行追加(「Codex: N ターン $X」。0件なら出さない)

@@ -20,9 +20,11 @@ import { matchesMarker } from "./setup";
 import { codexHome, detectCodex } from "./codex/env";
 import { CODEX_HOOK_EVENTS } from "./codex/setup";
 import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
+import { findLatestCodexRollout } from "./codex/sessions";
+import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import { isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
-import type { Config, TurnRecord } from "./types";
+import type { Config, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
 type Status = "ok" | "warn" | "fail";
 
@@ -176,7 +178,7 @@ async function checkHookRegistration(): Promise<boolean> {
 // ---- 1b. Codex CLI の hook 登録確認(検出時のみ) ----
 // hook 登録セクションの直後・通知チェック(通知なしモードの早期 return を含む)より前に置く。
 // Codex 未検出・未登録は「未使用なら問題ない」ため ❌ にはせず、exit code の意味論を変えない。
-async function checkCodex(): Promise<boolean> {
+async function checkCodex(): Promise<{ ok: boolean; stopConfigured: boolean }> {
   const expectedCli = process.env.CCCN_CLI_PATH ?? process.argv[1] ?? "";
   const diagnostics = diagnoseCodexHookSources({
     codexHome: codexHome(),
@@ -189,7 +191,7 @@ async function checkCodex(): Promise<boolean> {
   // Project / supplemental source discovery must happen before detectCodex()'s user-home check.
   if (!detectCodex() && diagnostics.candidates.length === 0) {
     log("ok", "Codex CLI は未検出です(未使用なら問題ありません)");
-    return true;
+    return { ok: true, stopConfigured: false };
   }
 
   for (const source of diagnostics.candidates) {
@@ -238,7 +240,12 @@ async function checkCodex(): Promise<boolean> {
     log("ok", `Codex のセッションディレクトリはまだありません: ${sessionsDir}(セッション未作成の可能性があります)`);
   }
 
-  return true;
+  return {
+    ok: true,
+    stopConfigured: diagnostics.handlers.some(
+      (handler) => handler.event === "Stop" && handler.scope !== "env-extra",
+    ),
+  };
 }
 
 // ---- 2. Claude projects ディレクトリ + 最新 transcript のパース確認 ----
@@ -444,16 +451,16 @@ async function checkNotification(cfg: Config): Promise<boolean> {
 }
 
 // ---- 7. 直近セッションの合計 USD ----
-async function checkRecentSessionTotal(latestTranscript: string | null): Promise<boolean> {
+async function checkClaudeRecentSessionTotal(latestTranscript: string | null): Promise<boolean> {
   if (latestTranscript === null) {
-    log("warn", "直近セッション合計: transcript が見つからないため計算をスキップしました");
+    log("warn", "Claude Code 直近セッション合計: transcript が見つからないため計算をスキップしました");
     return true;
   }
 
   try {
     const aggregate = await aggregateNewTurn(latestTranscript, null);
     if (aggregate === null) {
-      log("warn", "直近セッション合計: 新規 usage が無いため計算できませんでした");
+      log("warn", "Claude Code 直近セッション合計: 新規 usage が無いため計算できませんでした");
       return true;
     }
 
@@ -463,11 +470,79 @@ async function checkRecentSessionTotal(latestTranscript: string | null): Promise
     const breakdown = computeCost(aggregate.main, aggregate.sidechain, table);
     log(
       "ok",
-      `直近セッション合計: ${formatUSD(breakdown.usd)}(Claude Code の /cost の Total cost と見比べてください)`,
+      `Claude Code 直近セッション合計: ${formatUSD(breakdown.usd)}(Claude Code の /cost の Total cost と見比べてください)`,
     );
     return true;
   } catch (err) {
-    log("warn", `直近セッション合計の計算中にエラーが発生しました: ${errMessage(err)}`);
+    log("warn", `Claude Code 直近セッション合計の計算中にエラーが発生しました: ${errMessage(err)}`);
+    return true;
+  }
+}
+
+function emptyBuckets(): TokenBuckets {
+  return { input: 0, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 };
+}
+
+function mergeUsage(target: UsageByModel, incoming: UsageByModel): void {
+  for (const [model, bucket] of Object.entries(incoming)) {
+    const merged = Object.hasOwn(target, model) ? target[model] : emptyBuckets();
+    merged.input += bucket.input;
+    merged.output += bucket.output;
+    merged.cacheWrite5m += bucket.cacheWrite5m;
+    merged.cacheWrite1h += bucket.cacheWrite1h;
+    merged.cacheRead += bucket.cacheRead;
+    target[model] = merged;
+  }
+}
+
+function safeUnknownModels(models: readonly string[]): string {
+  const safe = [...new Set(models.map((model) =>
+    model.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, 64) || "unknown"
+  ))].sort();
+  const shown = safe.slice(0, 5);
+  return `${shown.join(", ")}${safe.length > shown.length ? `, ...(+${safe.length - shown.length})` : ""}`;
+}
+
+async function checkCodexRecentSessionTotal(configured: boolean): Promise<boolean> {
+  if (!configured) return true;
+  try {
+    const sessionsRoot = join(codexHome(), "sessions");
+    if (!existsSync(sessionsRoot)) {
+      log("warn", "Codex 最新rollout合計: セッションディレクトリがないためスキップ");
+      return true;
+    }
+
+    const discovery = await findLatestCodexRollout(sessionsRoot);
+    if (discovery.unreadableDirs > 0 || discovery.unreadableFiles > 0) {
+      log("warn", "Codex 最新rollout合計: rollout探索を完全に検証できず最新を確定できないためスキップ");
+      return true;
+    }
+    if (discovery.latest === null) {
+      log("warn", "Codex 最新rollout合計: rolloutが見つからないためスキップ");
+      return true;
+    }
+
+    // The latest single rollout is read from byte zero. Returned cursors are deliberately discarded.
+    const drafts = await splitIntoCodexTurnDrafts(discovery.latest, null);
+    if (drafts === null || drafts.length === 0) {
+      log("warn", "Codex 最新rollout合計: usageがない、または有効なtoken_countを解析できません");
+      return true;
+    }
+    const usage = Object.create(null) as UsageByModel;
+    for (const draft of drafts) mergeUsage(usage, draft.agg.main);
+    const table = await loadPriceTable(paths().cacheDir, { offline: true });
+    const breakdown = computeCost(usage, {}, table);
+    if (breakdown.unknownModels.length > 0) {
+      log(
+        "warn",
+        `Codex 最新rollout合計: ${formatUSD(breakdown.usd)}(API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計。ただし単価不明モデルを含むため過少計上の可能性があります: ${safeUnknownModels(breakdown.unknownModels)})`,
+      );
+    } else {
+      log("ok", `Codex 最新rollout合計: ${formatUSD(breakdown.usd)}(API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計)`);
+    }
+    return true;
+  } catch {
+    log("warn", "Codex 最新rollout合計の計算中にエラーが発生したためスキップ");
     return true;
   }
 }
@@ -477,7 +552,12 @@ export async function runDoctor(): Promise<number> {
 
   results.push(await safeRun("settings.json", () => checkHookRegistration()));
   // hook 登録セクションの直後・通知チェックより前に Codex ブロックを置く。
-  results.push(await safeRun("codex", () => checkCodex()));
+  let codexStopConfigured = false;
+  results.push(await safeRun("codex", async () => {
+    const result = await checkCodex();
+    codexStopConfigured = result.stopConfigured;
+    return result.ok;
+  }));
 
   let latestTranscript: string | null = null;
   results.push(
@@ -494,7 +574,8 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("pricing", () => checkPricing()));
   results.push(await safeRun("fx", () => checkFx(cfg)));
   results.push(await safeRun("notify", () => checkNotification(cfg)));
-  results.push(await safeRun("recent-session", () => checkRecentSessionTotal(latestTranscript)));
+  results.push(await safeRun("claude-recent-session", () => checkClaudeRecentSessionTotal(latestTranscript)));
+  results.push(await safeRun("codex-recent-session", () => checkCodexRecentSessionTotal(codexStopConfigured)));
 
   const hasFailure = results.some((ok) => ok === false);
   return hasFailure ? 1 : 0;

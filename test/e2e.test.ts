@@ -687,6 +687,10 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(hooksJson.hooks.SubagentStart[0].hooks[0].timeout).toBe(20);
     expect(hooksJson.hooks.SubagentStop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook SubagentStop");
 
+    const doctorRolloutDir = join(sb.codexHome, "sessions", "2026", "07", "14");
+    mkdirSync(doctorRolloutDir, { recursive: true });
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_MULTITURN, join(doctorRolloutDir, "rollout-doctor.jsonl"));
+
     // --- doctor: Codex ブロックが検出+登録済み+承認注意を報告する ---
     const doctor = await runCli(["doctor"], { env: sb.env, cwd: sb.tmp });
     expect(doctor.code).toBe(0);
@@ -698,6 +702,51 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(doctor.stdout).toContain(`expected cliPath=${CLI_PATH.replace(/\\/g, "/")}`);
     expect(doctor.stdout).toContain("実体path=一致");
     expect(doctor.stdout).toContain("project/hook trustは静的診断では未確認");
+    expect(doctor.stdout).toContain("Claude Code 直近セッション合計:");
+    expect(doctor.stdout).toContain("Codex 最新rollout合計: $0.018(API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計)");
+  });
+
+  it("12a. 既存ユーザーの init --yes --codex は Codex hook だけを移行する", async () => {
+    mkdirSync(sb.codexHome, { recursive: true });
+    const configPath = join(sb.cccnHome, "config.json");
+    const lastNotifyPath = join(sb.cccnHome, "last-notify.json");
+    const hooksPath = join(sb.codexHome, "hooks.json");
+    const configRaw = '{\n  "notify": { "os": false, "slack": null },\n  "monthlyBudgetUSD": 0,\n  "unknown": true\n}';
+    const settingsRaw = readFileSync(sb.settingsPath, "utf8");
+    const lastNotifyRaw = '{"sentinel":"unchanged"}\n';
+    const hooksRaw = JSON.stringify({
+      unknown: "preserve",
+      hooks: {
+        Stop: [{ hooks: [{
+          type: "command",
+          command: `"${process.execPath}" "${CLI_PATH}" track --codex`,
+          timeout: 15,
+        }] }],
+        PermissionRequest: [{ hooks: [{ type: "command", command: "/other/hook" }] }],
+      },
+    });
+    writeFileSync(configPath, configRaw, "utf8");
+    writeFileSync(lastNotifyPath, lastNotifyRaw, "utf8");
+    writeFileSync(hooksPath, hooksRaw, "utf8");
+
+    const init = await runCli(["init", "--yes", "--codex"], { env: sb.env });
+
+    expect(init.code).toBe(0);
+    expect(init.stdout).toContain("Codex hook のみを確認・更新しました");
+    expect(init.stdout).not.toContain("settings を更新しました");
+    expect(readFileSync(configPath, "utf8")).toBe(configRaw);
+    expect(readFileSync(sb.settingsPath, "utf8")).toBe(settingsRaw);
+    expect(readFileSync(lastNotifyPath, "utf8")).toBe(lastNotifyRaw);
+    const hookBackups = readdirSync(sb.codexHome).filter((name) => name.startsWith("hooks.json.bak-"));
+    expect(hookBackups).toHaveLength(1);
+    expect(readFileSync(join(sb.codexHome, hookBackups[0]), "utf8")).toBe(hooksRaw);
+    const migrated = readJson(hooksPath);
+    expect(migrated.unknown).toBe("preserve");
+    expect(migrated.hooks.PermissionRequest[0].hooks[0].command).toBe("/other/hook");
+    expect(migrated.hooks.Stop[0].hooks[0].command).toContain("__ccc-notifier-codex-hook Stop");
+    expect(migrated.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(migrated.hooks.SubagentStart).toHaveLength(1);
+    expect(migrated.hooks.SubagentStop).toHaveLength(1);
   });
 
   it("12b. passive hook wire: UserPrompt/Startは0 bytes、SubagentStop/親Stopはexact {}+LF", async () => {

@@ -55,7 +55,7 @@ node dist/cli.js doctor        # グローバルインストール済みなら c
 
 **金額が Claude Code の `/cost` と少し違う**
 
-- `/cost` は「セッション累積」、ccc-notifier は「1ターンごと」の金額です。比較する際はターンを合計するか、`doctor` が表示する直近セッションの合計値と `/cost` の Total cost を見比べてください
+- `/cost` は「セッション累積」、ccc-notifier は「1ターンごと」の金額です。比較する際はターンを合計するか、`doctor` の **Claude Code 直近セッション合計**と `/cost` の Total cost を見比べてください。**Codex 最新rollout合計**は親/子を分類しない最新の単一rolloutだけをAPI換算した参考値で、Claude行や他rolloutとは合算されません
 - 単価表は LiteLLM から最大24時間おきに自動更新されるため、価格改定の直後は反映にタイムラグがあります
 - 通知や `report` の表示金額は見やすさのため丸めています。内部的には丸めない金額を保持しており、`report --json` で確認できます
 

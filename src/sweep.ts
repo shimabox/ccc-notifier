@@ -35,6 +35,7 @@ import type { SubagentUsage } from "./subagents";
 import { codexHome, detectCodex } from "./codex/env";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import type { CodexTurnDraft } from "./codex/transcript";
+import { listCodexRollouts } from "./codex/sessions";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
 import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 import { waitForDataLock, type DataLockHandle } from "./data-lock";
@@ -511,33 +512,6 @@ async function processTranscript(
 // 返すターン下書きを TurnRecord 化するだけで、二重計上防止の流儀(active guard・カーソル去重・dry-run)は
 // Claude 走査とそろえる。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/sweep.ts。
 
-// Codex rollout の探索深さ上限。sessions/YYYY/MM/DD の3階層で足りるが、異常に深い木でも暴走しない
-// よう深さ4までに制限する(Claude 走査が1階層に限定しているのと同じ防御方針)。
-const CODEX_MAX_DEPTH = 4;
-
-/**
- * sessions 配下を深さ CODEX_MAX_DEPTH まで再帰し、rollout-*.jsonl(通常ファイルのみ)を絶対パスで集める。
- * symlink は withFileTypes の isFile()/isDirectory() がいずれも false になるため自然に辿らない
- * (listTranscripts と同じ防御)。読めないディレクトリは黙ってスキップする。
- */
-async function listCodexRollouts(sessionsRoot: string): Promise<string[]> {
-  const found: string[] = [];
-  const walk = async (dir: string, depth: number): Promise<void> => {
-    const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => null);
-    if (entries === null) return; // 読めないディレクトリはスキップ
-    for (const e of entries) {
-      const full = join(dir, e.name);
-      if (e.isFile()) {
-        if (e.name.startsWith("rollout-") && e.name.endsWith(".jsonl")) found.push(full);
-      } else if (e.isDirectory() && depth < CODEX_MAX_DEPTH) {
-        await walk(full, depth + 1);
-      }
-    }
-  };
-  await walk(sessionsRoot, 1);
-  return found;
-}
-
 /** Codex ターン下書きを TurnRecord 化する(source:'codex'・ingest:'sweep'・サブエージェント無し)。 */
 function codexDraftToRecord(
   draft: CodexTurnDraft,
@@ -662,8 +636,8 @@ async function sweepCodex(
   const sessionsRoot = await codexSessionsRoot();
   if (sessionsRoot === null) return;
 
-  const rollouts = await listCodexRollouts(sessionsRoot);
-  for (const rolloutPath of rollouts) {
+  const discovery = await listCodexRollouts(sessionsRoot);
+  for (const rolloutPath of discovery.rollouts) {
     // 進行中セッション保護(Claude と同じ mtime ガード)。カーソルも進めず丸ごと後回しにする。
     if (!flags.includeActive && (await isRecentlyModified(rolloutPath))) {
       summary.skippedActive += 1;
