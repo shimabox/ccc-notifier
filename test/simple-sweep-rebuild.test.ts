@@ -1,11 +1,8 @@
-// sweep --rebuild の「単純に捨てて全再生成する」契約を固定する。
-//
-// この suite は堅牢版の WAL / tombstone / generation を要求しない。失敗時の回復方法は
-// 同じコマンドの再実行だけであり、clear / redact した内容も source が残っていれば復活する。
+// sweep の「既存履歴とcursorを捨て、sourceから概算を全再生成する」標準契約を固定する。
+// WAL / tombstone / backup / rollback は要求せず、失敗時は同じ sweep を再実行する。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  chmodSync,
   appendFileSync,
   copyFileSync,
   existsSync,
@@ -14,18 +11,21 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
+  promises as fsPromises,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { acquireDataLock } from "../src/data-lock";
+import type { DataLockHandle } from "../src/data-lock";
 import { runHistory } from "../src/history";
 import { builtinPriceTable } from "../src/pricing";
 import { runSweep } from "../src/sweep";
-import type { DataLockHandle } from "../src/data-lock";
+import { runTrack } from "../src/track";
 import type { TurnRecord } from "../src/types";
 
 const CLAUDE_MAIN = fileURLToPath(new URL("./fixtures/transcript-multiturn.jsonl", import.meta.url));
@@ -64,6 +64,7 @@ function canonicalSnapshot(): Record<string, string | null> {
       "config.json",
       "muted.json",
       "last-notify.json",
+      "error.log",
       "codex-subagent-activity.json",
       "cache/keep-me.bin",
     ].map((name) => [name, bytes(file(name))]),
@@ -104,7 +105,6 @@ function seedPreservedAndResetFiles(): void {
   writeFileSync(file("report.html"), "old recent dashboard");
   writeFileSync(file("report-all.html"), "old full dashboard");
   writeFileSync(cacheFile("dashboard-full-state.json"), '{"old":"dashboard-state"}\n');
-
   writeFileSync(
     file("config.json"),
     `${JSON.stringify({
@@ -119,12 +119,8 @@ function seedPreservedAndResetFiles(): void {
   );
   writeFileSync(file("muted.json"), '{"until":"2099-01-01T00:00:00.000Z"}\n');
   writeFileSync(file("last-notify.json"), "notification-sentinel\n");
-  // Ledgerは残すが、再生成した履歴への activityProjectionKey の再joinまでは要求しない。
   writeFileSync(file("codex-subagent-activity.json"), "activity-ledger-sentinel\n");
   writeFileSync(cacheFile("keep-me.bin"), "cache-sentinel\0bytes");
-
-  // pricing / FX の通常loaderによる更新と、rebuildのreset範囲は別契約。
-  // fresh cacheにして、このsuite自身をnetworkや実時間から隔離する。
   writeFileSync(
     cacheFile("pricing.json"),
     JSON.stringify({ fetchedAt: new Date().toISOString(), table: builtinPriceTable() }),
@@ -132,19 +128,42 @@ function seedPreservedAndResetFiles(): void {
   writeFileSync(cacheFile("fx.json"), JSON.stringify({ rate: 123, fetchedAt: new Date().toISOString() }));
 }
 
+/** sourceを全消費済みの有効cursor。dry-runがこれを無視することを検証する。 */
+function seedConsumedCursors(): void {
+  const dict: Record<string, unknown> = {
+    [mainPath]: {
+      offset: readFileSync(mainPath).length,
+      lastUuid: "done-main",
+      lastTs: "9999-01-01T00:00:00.000Z",
+      seenMessageKeys: [],
+    },
+    [rolloutPath]: {
+      offset: readFileSync(rolloutPath).length,
+      lastUuid: null,
+      lastTs: "9999-01-01T00:00:00.000Z",
+      seenMessageKeys: [],
+      codexTotals: { input: 17272, cached: 4992, output: 7 },
+    },
+  };
+  if (existsSync(agentPath)) {
+    dict[agentPath] = {
+      offset: readFileSync(agentPath).length,
+      lastUuid: "done-agent",
+      lastTs: "9999-01-01T00:00:00.000Z",
+      seenMessageKeys: [],
+    };
+  }
+  writeFileSync(file("cursors.json"), JSON.stringify(dict));
+}
+
 async function captureSweep(
   argv: string[],
-  deps?: {
-    lockProvider?: () => Promise<DataLockHandle | null>;
-    confirm?: (opts: { message: string; initialValue: boolean }) => Promise<unknown>;
-  },
+  deps?: { lockProvider?: () => Promise<DataLockHandle | null> },
 ): Promise<{ code: number; output: string; error: string }> {
   const out = vi.spyOn(console, "log").mockImplementation(() => {});
   const err = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
-    // Wave 1ではsourceを変更しないため、confirm seamは将来のrunSweep deps型へcastする。
-    // production既定値は @clack/prompts.confirm、テスト時だけ同じ形の関数を差し込む想定。
-    const code = await runSweep(argv, deps as unknown as Parameters<typeof runSweep>[1]);
+    const code = await runSweep(argv, deps as Parameters<typeof runSweep>[1]);
     return {
       code,
       output: out.mock.calls.flat().map(String).join("\n"),
@@ -164,9 +183,9 @@ beforeEach(() => {
     CCCN_DRY_RUN: process.env.CCCN_DRY_RUN,
     CCCN_LOCK_TIMEOUT_MS: process.env.CCCN_LOCK_TIMEOUT_MS,
   };
-  home = mkdtempSync(join(tmpdir(), "cccn-simple-rebuild-home-"));
-  projects = mkdtempSync(join(tmpdir(), "cccn-simple-rebuild-claude-"));
-  codexHome = mkdtempSync(join(tmpdir(), "cccn-simple-rebuild-codex-"));
+  home = mkdtempSync(join(tmpdir(), "cccn-simple-sweep-home-"));
+  projects = mkdtempSync(join(tmpdir(), "cccn-simple-sweep-claude-"));
+  codexHome = mkdtempSync(join(tmpdir(), "cccn-simple-sweep-codex-"));
   mainPath = join(projects, "project-a", "session-a.jsonl");
   agentPath = join(projects, "project-a", "session-a", "subagents", "agent-a.jsonl");
   rolloutPath = join(codexHome, "sessions", "2026", "07", "10", CODEX_NAME);
@@ -189,41 +208,16 @@ afterEach(() => {
   }
 });
 
-describe("sweep --rebuild CLI contract", () => {
-  it("確認をキャンセルすると全対象がbyte-stableで、警告に破壊範囲を表示する", async () => {
-    placeClaude();
-    seedPreservedAndResetFiles();
-    const before = canonicalSnapshot();
-    let confirmation = "";
-
-    const result = await captureSweep(["--rebuild"], {
-      confirm: async ({ message }) => {
-        confirmation = message;
-        return false;
-      },
-    });
-
-    expect(result.code).toBe(0);
-    expect(canonicalSnapshot()).toEqual(before);
-    expect(confirmation).toMatch(/履歴|history/i);
-    expect(confirmation).toMatch(/取り込み位置|cursor/i);
-    expect(confirmation).toMatch(/backup|バックアップ/i);
-    expect(confirmation).toMatch(/金額|cost|単価/i);
-    expect(confirmation).toMatch(/実行時点.*単価.*為替/);
-    expect(confirmation).toMatch(/全履歴/);
-    expect(confirmation).toMatch(/prompt|プロンプト/i);
-    expect(confirmation).toMatch(/元.*JSONL|source/i);
-  });
-
+describe("sweep CLI contract", () => {
   it.each([
-    ["dry-run", ["--rebuild", "--dry-run"]],
-    ["days", ["--rebuild", "--days", "7"]],
-    ["include-active", ["--rebuild", "--include-active"]],
-    ["projects", ["--rebuild", "--projects", "/tmp/other"]],
-    ["unknown option", ["--rebuild", "--unknown"]],
-    ["days missing value", ["--rebuild", "--days"]],
-    ["projects missing value", ["--rebuild", "--projects"]],
-    ["extra positional", ["--rebuild", "extra"]],
+    ["rebuild", ["--rebuild"]],
+    ["yes", ["--yes"]],
+    ["short yes", ["-y"]],
+    ["include-active", ["--include-active"]],
+    ["unknown option", ["--unknown"]],
+    ["days missing value", ["--days"]],
+    ["projects missing value", ["--projects"]],
+    ["extra positional", ["extra"]],
   ])("%sをmutation前にexit 1で拒否する", async (_label, argv) => {
     placeClaude();
     seedPreservedAndResetFiles();
@@ -236,21 +230,23 @@ describe("sweep --rebuild CLI contract", () => {
   });
 });
 
-describe("sweep --rebuild reset and regeneration", () => {
-  it("--yesはglobal lockを1回だけ使い、activeなClaude main/agent/Codexを先頭から再生成する", async () => {
+describe("sweep reset and regeneration", () => {
+  it("sweepはglobal lockを1回だけ使い、activeなClaude main/agent/Codexを先頭から全再生成する", async () => {
     placeClaude({ agent: true, active: true });
     placeCodex({ active: true });
     seedPreservedAndResetFiles();
-    const configBefore = bytes(file("config.json"));
-    const muteBefore = bytes(file("muted.json"));
-    const notifyBefore = bytes(file("last-notify.json"));
-    const activityBefore = bytes(file("codex-subagent-activity.json"));
-    const cacheSentinelBefore = bytes(cacheFile("keep-me.bin"));
+    const preserved = {
+      config: bytes(file("config.json")),
+      mute: bytes(file("muted.json")),
+      notify: bytes(file("last-notify.json")),
+      activity: bytes(file("codex-subagent-activity.json")),
+      cache: bytes(cacheFile("keep-me.bin")),
+    };
     let lockCalls = 0;
-    let recordsAtLockRelease = -1;
-    let cursorsExistedAtLockRelease = false;
+    let recordsAtRelease = -1;
+    let cursorsAtRelease = false;
 
-    const result = await captureSweep(["--rebuild", "--yes"], {
+    const result = await captureSweep([], {
       lockProvider: async () => {
         lockCalls += 1;
         const held = acquireDataLock();
@@ -259,10 +255,8 @@ describe("sweep --rebuild reset and regeneration", () => {
           token: held.token,
           heartbeat: () => held.heartbeat(),
           release: () => {
-            // reset開始から全sourceのcursor保存まで同じlockを保持することを観測する。
-            // この時点までlockが残るため、通常trackはcanonical history/cursorへ割り込めない。
-            recordsAtLockRelease = rows().length;
-            cursorsExistedAtLockRelease = existsSync(file("cursors.json"));
+            recordsAtRelease = rows().length;
+            cursorsAtRelease = existsSync(file("cursors.json"));
             held.release();
           },
         };
@@ -271,31 +265,59 @@ describe("sweep --rebuild reset and regeneration", () => {
 
     expect(result.code).toBe(0);
     expect(lockCalls).toBe(1);
-    expect(recordsAtLockRelease).toBe(3);
-    expect(cursorsExistedAtLockRelease).toBe(true);
-    const rebuilt = rows();
-    expect(rebuilt).toHaveLength(3); // Claude 2ターン + Codex 1ターン。agentはClaude turnへ添付。
-    expect(rebuilt.filter((row) => row.source === "codex")).toHaveLength(1);
-    expect(rebuilt.some((row) => row.subagents?.agentFiles === 1)).toBe(true);
-    expect(rebuilt.every((row) => row.ingest === "sweep")).toBe(true);
-    expect(rebuilt.every((row) => row.fxRate === 123)).toBe(true);
-    expect(rebuilt.every((row) => row.costUSD !== 999)).toBe(true);
+    expect(recordsAtRelease).toBe(3);
+    expect(cursorsAtRelease).toBe(true);
+    expect(rows()).toHaveLength(3);
+    expect(rows().filter((row) => row.source === "codex")).toHaveLength(1);
+    expect(rows().some((row) => row.subagents?.agentFiles === 1)).toBe(true);
+    expect(rows().every((row) => row.ingest === "sweep" && row.fxRate === 123)).toBe(true);
     expect(readFileSync(file("cursors.json"), "utf8")).toContain(mainPath);
+    expect(readFileSync(file("cursors.json"), "utf8")).toContain(agentPath);
     expect(readFileSync(file("cursors.json"), "utf8")).toContain(rolloutPath);
-
     expect(existsSync(file("report.html"))).toBe(false);
     expect(existsSync(file("report-all.html"))).toBe(false);
     expect(existsSync(cacheFile("dashboard-full-state.json"))).toBe(false);
-    expect(bytes(file("config.json"))).toBe(configBefore); // budget / Slack / OS設定を含む
-    expect(bytes(file("muted.json"))).toBe(muteBefore);
-    expect(bytes(file("last-notify.json"))).toBe(notifyBefore); // rebuild自身は通知しない
-    expect(bytes(file("codex-subagent-activity.json"))).toBe(activityBefore);
-    expect(bytes(cacheFile("keep-me.bin"))).toBe(cacheSentinelBefore);
+    expect(bytes(file("config.json"))).toBe(preserved.config);
+    expect(bytes(file("muted.json"))).toBe(preserved.mute);
+    expect(bytes(file("last-notify.json"))).toBe(preserved.notify);
+    expect(bytes(file("codex-subagent-activity.json"))).toBe(preserved.activity);
+    expect(bytes(cacheFile("keep-me.bin"))).toBe(preserved.cache);
     expect(readdirSync(home).some((name) => name.endsWith(".bak"))).toBe(false);
-    expect(`${result.output}\n${result.error}`).not.toMatch(/既に計上済み/);
   });
 
-  it("rebuildは通常sweepの200件上限を使わず、列挙した201 agentを全件取り込む", async () => {
+  it("sweep --days 0はreset後に期間内だけを保存し、引数なしsweepで全期間を戻す", async () => {
+    placeClaude();
+    seedPreservedAndResetFiles();
+
+    expect((await captureSweep(["--days", "0"])).code).toBe(0);
+    expect(rows()).toHaveLength(0);
+    expect(existsSync(file("cursors.json"))).toBe(true);
+    expect(existsSync(file("report.html"))).toBe(false);
+
+    expect((await captureSweep([])).code).toBe(0);
+    expect(rows().map((row) => row.prompt)).toEqual(["ターン1のプロンプト", "ターン2のプロンプト"]);
+  });
+
+  it("clear/redactした履歴とpromptも、引数なしsweepでsourceから復活する", async () => {
+    placeClaude({ agent: true });
+    placeCodex();
+    expect((await captureSweep([])).code).toBe(0);
+    expect(rows()).toHaveLength(3);
+
+    expect(await runHistory(["redact", "--yes"])).toBe(0);
+    expect(rows().every((row) => row.prompt === "")).toBe(true);
+    expect((await captureSweep([])).code).toBe(0);
+    expect(rows()).toHaveLength(3);
+    expect(rows().some((row) => row.prompt === "ターン1のプロンプト")).toBe(true);
+    expect(rows().some((row) => row.prompt === "1+1は？")).toBe(true);
+
+    expect(await runHistory(["clear", "--yes"])).toBe(0);
+    expect(rows()).toHaveLength(0);
+    expect((await captureSweep([])).code).toBe(0);
+    expect(rows()).toHaveLength(3);
+  });
+
+  it("sweepは201 agentを全件取り込み、全cursorを保存する", async () => {
     placeClaude();
     const dir = join(projects, "project-a", "session-a", "subagents");
     mkdirSync(dir, { recursive: true });
@@ -303,117 +325,122 @@ describe("sweep --rebuild reset and regeneration", () => {
       copyFileSync(CLAUDE_AGENT, join(dir, `agent-${String(i).padStart(3, "0")}.jsonl`));
     }
 
-    const result = await captureSweep(["--rebuild", "--yes"]);
-
-    expect(result.code).toBe(0);
-    const rebuilt = rows();
-    expect(rebuilt).toHaveLength(2);
-    expect(rebuilt[1]?.subagents?.agentFiles).toBe(201);
-    expect(rebuilt[1]?.subagents?.apiCalls).toBe(201);
-    expect(rebuilt[1]?.subagents?.costUSD).toBeGreaterThan(0);
+    expect((await captureSweep([])).code).toBe(0);
+    expect(rows()).toHaveLength(2);
+    expect(rows()[1]?.subagents?.agentFiles).toBe(201);
+    expect(rows()[1]?.subagents?.apiCalls).toBe(201);
     const cursors = JSON.parse(readFileSync(file("cursors.json"), "utf8")) as Record<string, unknown>;
-    expect(Object.keys(cursors)).toHaveLength(202); // main + agent 201件
+    expect(Object.keys(cursors)).toHaveLength(202);
     expect(cursors[join(dir, "agent-000.jsonl")]).toBeDefined();
     expect(cursors[join(dir, "agent-200.jsonl")]).toBeDefined();
   });
 
-  it("通常sweepでdays=0により進んだcursorを捨て、古い履歴を復活させる", async () => {
+  it("sweep読取後の追記は後続hookが追加分だけ回収し、既存行を倍増させない", async () => {
     placeClaude();
-    expect((await captureSweep(["--days", "0"])).code).toBe(0);
-    expect(rows()).toHaveLength(0);
-    expect(existsSync(file("cursors.json"))).toBe(true);
-
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows().map((row) => row.prompt)).toEqual(["ターン1のプロンプト", "ターン2のプロンプト"]);
-  });
-
-  it("history clear/redactはsourceに残る全履歴とpromptを保護せず、再rebuildでも倍増しない", async () => {
-    placeClaude({ agent: true });
-    placeCodex();
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows()).toHaveLength(3);
-
-    expect(await runHistory(["redact", "--yes"])).toBe(0);
-    expect(rows().every((row) => row.prompt === "")).toBe(true);
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows()).toHaveLength(3);
-    expect(rows().some((row) => row.prompt === "ターン1のプロンプト")).toBe(true);
-    expect(rows().some((row) => row.prompt === "1+1は？")).toBe(true);
-
-    expect(await runHistory(["clear", "--yes"])).toBe(0);
-    expect(rows()).toHaveLength(0);
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows()).toHaveLength(3);
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows()).toHaveLength(3);
-  });
-
-  it("rebuild snapshot後の追記は通常sweepが追加分だけ回収し、既存行を倍増させない", async () => {
-    placeClaude();
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
+    expect((await captureSweep([])).code).toBe(0);
     expect(rows()).toHaveLength(2);
 
     appendFileSync(
       mainPath,
       [
         JSON.stringify({
-          parentUuid: "m-a2",
-          isSidechain: false,
-          cwd: "/tmp/proj",
-          sessionId: "sess-M",
-          gitBranch: "main",
-          type: "user",
-          message: { role: "user", content: "rebuild後の追記" },
-          uuid: "m-u3",
+          parentUuid: "m-a2", isSidechain: false, cwd: "/tmp/proj", sessionId: "sess-M", gitBranch: "main",
+          type: "user", message: { role: "user", content: "sweep後の追記" }, uuid: "m-u3",
           timestamp: "2026-07-06T10:02:00.000Z",
         }),
         JSON.stringify({
-          parentUuid: "m-u3",
-          isSidechain: false,
-          cwd: "/tmp/proj",
-          sessionId: "sess-M",
-          gitBranch: "main",
-          type: "assistant",
-          requestId: "req_M3",
+          parentUuid: "m-u3", isSidechain: false, cwd: "/tmp/proj", sessionId: "sess-M", gitBranch: "main",
+          type: "assistant", requestId: "req_M3",
           message: {
-            id: "msg_M3",
-            role: "assistant",
-            model: "claude-sonnet-5",
+            id: "msg_M3", role: "assistant", model: "claude-sonnet-5",
             usage: {
-              input_tokens: 0,
-              cache_read_input_tokens: 0,
-              output_tokens: 100,
+              input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 100,
               cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
             },
           },
-          uuid: "m-a3",
-          timestamp: "2026-07-06T10:02:05.000Z",
+          uuid: "m-a3", timestamp: "2026-07-06T10:02:05.000Z",
         }),
       ].join("\n") + "\n",
     );
 
-    expect((await captureSweep(["--include-active"])).code).toBe(0);
+    await runTrack(JSON.stringify({
+      session_id: "sess-M", transcript_path: mainPath, cwd: "/tmp/proj", hook_event_name: "Stop",
+    }));
     expect(rows().map((row) => row.prompt)).toEqual([
       "ターン1のプロンプト",
       "ターン2のプロンプト",
-      "rebuild後の追記",
+      "sweep後の追記",
     ]);
-  });
-
-  it("Claudeのみ、Codexのみでも全再生成できる", async () => {
-    placeClaude();
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows()).toHaveLength(2);
-
-    rmSync(projects, { recursive: true, force: true });
-    placeCodex();
-    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
-    expect(rows()).toHaveLength(1);
-    expect(rows()[0]?.source).toBe("codex");
   });
 });
 
-describe("sweep --rebuild failure and retry", () => {
+describe("sweep dry-run", () => {
+  it("既存cursorを無視して先頭からpreviewし、history/cursor/dashboardを含む全状態を変更しない", async () => {
+    placeClaude({ agent: true, active: true });
+    placeCodex({ active: true });
+    seedPreservedAndResetFiles();
+    seedConsumedCursors();
+    const before = canonicalSnapshot();
+    let lockCalls = 0;
+
+    const result = await captureSweep(["--dry-run"], {
+      lockProvider: async () => {
+        lockCalls += 1;
+        return acquireDataLock();
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.output).toContain("dry-run");
+    expect(result.output).toContain("3 ターン");
+    expect(lockCalls).toBe(0);
+    expect(canonicalSnapshot()).toEqual(before);
+  });
+
+  it("--dry-run --days 0はread-onlyのまま期間外turnをpreviewから除外する", async () => {
+    placeClaude();
+    seedPreservedAndResetFiles();
+    const before = canonicalSnapshot();
+
+    const result = await captureSweep(["--dry-run", "--days", "0"]);
+
+    expect(result.code).toBe(0);
+    expect(result.output).toMatch(/(?:新規|再生成対象).*ありません/);
+    expect(canonicalSnapshot()).toEqual(before);
+  });
+
+  it("sourceのhard failureでもdry-runはerror.log等を永続化せず、stderrだけでexit 1にする", async () => {
+    placeClaude();
+    seedPreservedAndResetFiles();
+    const before = canonicalSnapshot();
+    vi.spyOn(fsPromises, "open").mockRejectedValueOnce(
+      Object.assign(new Error("injected source read failure"), { code: "EACCES" }),
+    );
+
+    const result = await captureSweep(["--dry-run"]);
+
+    expect(result.code).toBe(1);
+    expect(result.error).toMatch(/失敗|source|再実行/i);
+    expect(canonicalSnapshot()).toEqual(before);
+    expect(existsSync(file("error.log"))).toBe(false);
+  });
+
+  it("malformed configでもdry-runはerror.logを含む永続状態を変更しない", async () => {
+    placeClaude();
+    seedPreservedAndResetFiles();
+    writeFileSync(file("config.json"), "{malformed-config", "utf8");
+    const before = canonicalSnapshot();
+
+    const result = await captureSweep(["--dry-run"]);
+
+    expect(result.code).toBe(0);
+    expect(result.output).toContain("dry-run");
+    expect(canonicalSnapshot()).toEqual(before);
+    expect(existsSync(file("error.log"))).toBe(false);
+  });
+});
+
+describe("sweep failure and retry", () => {
   it("global data lockを取得できない場合はhistory/cursors/dashboardを変更しない", async () => {
     placeClaude();
     seedPreservedAndResetFiles();
@@ -422,7 +449,7 @@ describe("sweep --rebuild failure and retry", () => {
     expect(held).not.toBeNull();
     process.env.CCCN_LOCK_TIMEOUT_MS = "0";
     try {
-      const result = await captureSweep(["--rebuild", "--yes"]);
+      const result = await captureSweep([]);
       expect(result.code).toBe(1);
       expect(canonicalSnapshot()).toEqual(before);
     } finally {
@@ -436,27 +463,36 @@ describe("sweep --rebuild failure and retry", () => {
     seedPreservedAndResetFiles();
     const before = canonicalSnapshot();
 
-    const result = await captureSweep(["--rebuild", "--yes"]);
+    expect((await captureSweep([])).code).toBe(1);
+    expect(canonicalSnapshot()).toEqual(before);
+  });
+
+  it("Claude root不在かつCodex sessionsがsymlinkならreset前にexit 1で状態を維持する", async () => {
+    rmSync(projects, { recursive: true, force: true });
+    seedPreservedAndResetFiles();
+    const target = join(codexHome, "sessions-target");
+    mkdirSync(target, { recursive: true });
+    symlinkSync(target, join(codexHome, "sessions"), process.platform === "win32" ? "junction" : "dir");
+    const before = canonicalSnapshot();
+
+    const result = await captureSweep([]);
 
     expect(result.code).toBe(1);
     expect(canonicalSnapshot()).toEqual(before);
   });
 
-  it("個別sourceのread失敗は部分成功をexit 1にし、権限復旧後の再実行で最初から回復する", async () => {
+  it("個別sourceのread失敗は部分成功をexit 1にし、復旧後のsweepで最初から回復する", async () => {
     placeClaude();
-    placeCodex(); // 少なくとも一方は正常なのでreset後の個別失敗経路へ進む。
-    chmodSync(mainPath, 0o000);
-    try {
-      const first = await captureSweep(["--rebuild", "--yes"]);
-      expect(first.code).toBe(1);
-      expect(`${first.output}\n${first.error}`).toMatch(/一部|再実行|retry/i);
+    placeCodex();
+    vi.spyOn(fsPromises, "open").mockRejectedValueOnce(
+      Object.assign(new Error("injected source read failure"), { code: "EACCES" }),
+    );
 
-      chmodSync(mainPath, 0o600);
-      const second = await captureSweep(["--rebuild", "--yes"]);
-      expect(second.code).toBe(0);
-      expect(rows()).toHaveLength(3);
-    } finally {
-      chmodSync(mainPath, 0o600);
-    }
+    const first = await captureSweep([]);
+    expect(first.code).toBe(1);
+    expect(`${first.output}\n${first.error}`).toMatch(/一部|再実行|retry/i);
+
+    expect((await captureSweep([])).code).toBe(0);
+    expect(rows()).toHaveLength(3);
   });
 });
