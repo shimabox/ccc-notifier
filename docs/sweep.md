@@ -35,9 +35,11 @@ sweep全体でdata lockを一度だけ取得し、次を削除・無効化して
 
 sweepが正常完了し、`dashboard.autoRegenerate=true`なら、再生成した履歴から直近版`report.html`と全履歴版`report-all.html`をその場で生成します。両HTMLの相互リンクもすぐ利用できます。`dashboard.autoRegenerate=false`ならHTMLは生成せず、必要なときに`dashboard` / `dashboard --all`を手動実行します。
 
+実行中は、単価表・為替の準備、data lock取得待ち、走査開始、Claude transcript / Codex rolloutの処理状況、走査完了、dashboard生成開始を改行区切りで表示します。走査中の個別進捗は25件ごとのみで、25件未満の小規模sourceは走査開始・走査完了などの段階表示だけです。端末上の行を上書きしないため、TTYでもリダイレクトしたログでも同じように後から読めます。進捗行には個別sourceのpathやprompt本文を出さず、件数だけを表示します。
+
 ## dry-run
 
-`--dry-run [--days N]`は既存cursorを使わず、source先頭から「実行した場合に再生成される件数と概算額」を計算します。data lock取得、reset、履歴/cursor保存、dashboard無効化、HTML生成、設定変更は行わないread-only previewです。
+`--dry-run [--days N]`は既存cursorを使わず、source先頭から「実行した場合に再生成される件数と概算額」を計算します。data lock取得、reset、履歴/cursor保存、dashboard無効化、HTML生成、設定変更は行わないread-only previewです。単価表・為替の準備とClaude / Codexの走査状況は表示しますが、data lock取得待ちとdashboard生成開始の段階はありません。
 
 ## 注意事項
 
