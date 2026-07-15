@@ -358,9 +358,11 @@ describe("sweep reset and regeneration", () => {
     expect(rows().filter((row) => row.source === "codex")).toHaveLength(1);
     expect(rows().some((row) => row.subagents?.agentFiles === 1)).toBe(true);
     expect(rows().every((row) => row.ingest === "sweep" && row.fxRate === 123)).toBe(true);
-    expect(readFileSync(file("cursors.json"), "utf8")).toContain(mainPath);
-    expect(readFileSync(file("cursors.json"), "utf8")).toContain(agentPath);
-    expect(readFileSync(file("cursors.json"), "utf8")).toContain(rolloutPath);
+    const cursors = JSON.parse(readFileSync(file("cursors.json"), "utf8")) as Record<string, unknown>;
+    expect(Object.keys(cursors)).toEqual(expect.arrayContaining([mainPath, agentPath, rolloutPath]));
+    expect(cursors[mainPath]).toBeDefined();
+    expect(cursors[agentPath]).toBeDefined();
+    expect(cursors[rolloutPath]).toBeDefined();
     expect(existsSync(file("report.html"))).toBe(false);
     expect(existsSync(file("report-all.html"))).toBe(false);
     expect(existsSync(cacheFile("dashboard-full-state.json"))).toBe(false);

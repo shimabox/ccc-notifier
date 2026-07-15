@@ -177,22 +177,19 @@ describe("runSweep", () => {
     }
   });
 
-  it("serializes clear then sweep so newly swept records and cursors are not lost", async () => {
+  it("clear完了後のsweepはsourceから履歴2件とcursorを決定的に再生成する", async () => {
     placeFixtures({ withSA: false });
     writeFileSync(historyFile(), `${JSON.stringify({ schemaVersion: 1, ts: new Date().toISOString(), prompt: "old-secret" })}\n`, "utf8");
-    const lock = acquireDataLock();
-    expect(lock).not.toBeNull();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const clearPromise = runHistory(["clear", "--yes"]);
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    const sweepPromise = runSweep(["--projects", projectsRoot]);
-    setTimeout(() => lock!.release(), 10);
-    const [clearCode, sweepCode] = await Promise.all([clearPromise, sweepPromise]);
-    expect(clearCode).toBe(0);
-    expect(sweepCode).toBe(0);
+
+    expect(await runHistory(["clear", "--yes"])).toBe(0);
+    expect(readHistory()).toHaveLength(0);
+
+    expect(await runSweep(["--projects", projectsRoot])).toBe(0);
     expect(readHistory()).toHaveLength(2);
-    expect(existsSync(cursorsFile())).toBe(true);
+    const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
+    expect(cursors[mainPath]).toBeDefined();
   });
 
   // 1. fresh sweep: 2 レコード(GOLDEN 一致・両方 ingest:'sweep')、2件目に SA 0.033、totalUSD ≈ 0.020。
