@@ -288,6 +288,21 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(html).toContain("通算");
   });
 
+  it("週別hoverのモデル内訳だけを週内金額の降順にし、同額は既存slot順に保つ", async () => {
+    seedStandard();
+    await run(["--no-open"]);
+    const html = readHtml();
+
+    expect(html).toContain("function tooltipSlotOrder(bucket, gran)");
+    expect(html).toContain("if(gran !== 'week') return order;");
+    expect(html).toContain("var diff = (bucket.bs[b] || 0) - (bucket.bs[a] || 0);");
+    expect(html).toContain("return diff !== 0 ? diff : rank[a] - rank[b];");
+    expect(html).toContain("var tipOrder = tooltipSlotOrder(bucket, GRAN);");
+    // グラフ本体は従来のslotOrderを使い続け、tooltipだけtipOrderへ切り替える。
+    expect(html).toContain("for(var j=0;j<slotOrder.length;j++){");
+    expect(html).toContain("for(var j=0;j<tipOrder.length;j++){");
+  });
+
   it("状態(粒度・選択・検索・スクロール)を自動リロード跨ぎで保持する JS が埋め込まれている", async () => {
     seedStandard();
     await run(["--no-open"]);
