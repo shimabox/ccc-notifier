@@ -66,12 +66,16 @@ function subagentsDirOf(mainTranscriptPath: string): string {
 }
 
 /** 対象ディレクトリ内の agent-*.jsonl(通常ファイルのみ)を絶対パスで列挙する。 */
-async function listAgentFiles(dir: string, entries: Dirent[]): Promise<string[]> {
+async function listAgentFiles(
+  dir: string,
+  entries: Dirent[],
+  includeAllFiles: boolean,
+): Promise<string[]> {
   const files = entries
     .filter((e) => e.isFile() && e.name.startsWith("agent-") && e.name.endsWith(".jsonl"))
     .map((e) => join(dir, e.name));
 
-  if (files.length <= MAX_AGENT_FILES) return files;
+  if (includeAllFiles || files.length <= MAX_AGENT_FILES) return files;
 
   // 異常系ガード: 更新時刻の新しい順に MAX_AGENT_FILES 件で打ち切る。
   const withMtime: Array<{ path: string; mtime: number }> = [];
@@ -95,17 +99,19 @@ async function listAgentFiles(dir: string, entries: Dirent[]): Promise<string[]>
  */
 export async function collectSubagentUsage(
   mainTranscriptPath: string,
+  opts: { ignoreCursors?: boolean; strictRead?: boolean; includeAllFiles?: boolean } = {},
 ): Promise<SubagentUsage | null> {
   const dir = subagentsDirOf(mainTranscriptPath);
 
   let entries: Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    if (opts.strictRead && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return null; // ディレクトリ不在/読めない → 旧形式環境
   }
 
-  const files = await listAgentFiles(dir, entries);
+  const files = await listAgentFiles(dir, entries, opts.includeAllFiles === true);
 
   const perModel: UsageByModel = {};
   let apiCalls = 0;
@@ -114,7 +120,11 @@ export async function collectSubagentUsage(
 
   for (const filePath of files) {
     try {
-      const cursor = sanitizeCursor(loadCursor(filePath));
+      if (opts.strictRead) {
+        const file = await fs.open(filePath, "r");
+        await file.close();
+      }
+      const cursor = opts.ignoreCursors ? null : sanitizeCursor(loadCursor(filePath));
       const agg = await aggregateNewTurn(filePath, cursor);
       if (agg === null) continue; // このファイルに新規 usage なし
       // 全行 isSidechain だが、両側をマージして取りこぼしを防ぐ。
@@ -124,6 +134,7 @@ export async function collectSubagentUsage(
       agentFiles += 1;
       newCursors.push({ path: filePath, cursor: agg.newCursor });
     } catch (err) {
+      if (opts.strictRead) throw err;
       // 1ファイルの失敗で全体を止めない。観測のためログのみ残す。
       logError("subagents:file", err);
     }

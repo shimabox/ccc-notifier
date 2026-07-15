@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chmodSync,
+  appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -289,6 +290,29 @@ describe("sweep --rebuild reset and regeneration", () => {
     expect(bytes(file("codex-subagent-activity.json"))).toBe(activityBefore);
     expect(bytes(cacheFile("keep-me.bin"))).toBe(cacheSentinelBefore);
     expect(readdirSync(home).some((name) => name.endsWith(".bak"))).toBe(false);
+    expect(`${result.output}\n${result.error}`).not.toMatch(/既に計上済み/);
+  });
+
+  it("rebuildは通常sweepの200件上限を使わず、列挙した201 agentを全件取り込む", async () => {
+    placeClaude();
+    const dir = join(projects, "project-a", "session-a", "subagents");
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 201; i++) {
+      copyFileSync(CLAUDE_AGENT, join(dir, `agent-${String(i).padStart(3, "0")}.jsonl`));
+    }
+
+    const result = await captureSweep(["--rebuild", "--yes"]);
+
+    expect(result.code).toBe(0);
+    const rebuilt = rows();
+    expect(rebuilt).toHaveLength(2);
+    expect(rebuilt[1]?.subagents?.agentFiles).toBe(201);
+    expect(rebuilt[1]?.subagents?.apiCalls).toBe(201);
+    expect(rebuilt[1]?.subagents?.costUSD).toBeGreaterThan(0);
+    const cursors = JSON.parse(readFileSync(file("cursors.json"), "utf8")) as Record<string, unknown>;
+    expect(Object.keys(cursors)).toHaveLength(202); // main + agent 201件
+    expect(cursors[join(dir, "agent-000.jsonl")]).toBeDefined();
+    expect(cursors[join(dir, "agent-200.jsonl")]).toBeDefined();
   });
 
   it("通常sweepでdays=0により進んだcursorを捨て、古い履歴を復活させる", async () => {
@@ -320,6 +344,58 @@ describe("sweep --rebuild reset and regeneration", () => {
     expect(rows()).toHaveLength(3);
     expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
     expect(rows()).toHaveLength(3);
+  });
+
+  it("rebuild snapshot後の追記は通常sweepが追加分だけ回収し、既存行を倍増させない", async () => {
+    placeClaude();
+    expect((await captureSweep(["--rebuild", "--yes"])).code).toBe(0);
+    expect(rows()).toHaveLength(2);
+
+    appendFileSync(
+      mainPath,
+      [
+        JSON.stringify({
+          parentUuid: "m-a2",
+          isSidechain: false,
+          cwd: "/tmp/proj",
+          sessionId: "sess-M",
+          gitBranch: "main",
+          type: "user",
+          message: { role: "user", content: "rebuild後の追記" },
+          uuid: "m-u3",
+          timestamp: "2026-07-06T10:02:00.000Z",
+        }),
+        JSON.stringify({
+          parentUuid: "m-u3",
+          isSidechain: false,
+          cwd: "/tmp/proj",
+          sessionId: "sess-M",
+          gitBranch: "main",
+          type: "assistant",
+          requestId: "req_M3",
+          message: {
+            id: "msg_M3",
+            role: "assistant",
+            model: "claude-sonnet-5",
+            usage: {
+              input_tokens: 0,
+              cache_read_input_tokens: 0,
+              output_tokens: 100,
+              cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+            },
+          },
+          uuid: "m-a3",
+          timestamp: "2026-07-06T10:02:05.000Z",
+        }),
+      ].join("\n") + "\n",
+    );
+
+    expect((await captureSweep(["--include-active"])).code).toBe(0);
+    expect(rows().map((row) => row.prompt)).toEqual([
+      "ターン1のプロンプト",
+      "ターン2のプロンプト",
+      "rebuild後の追記",
+    ]);
   });
 
   it("Claudeのみ、Codexのみでも全再生成できる", async () => {

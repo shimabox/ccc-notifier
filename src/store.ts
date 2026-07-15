@@ -336,6 +336,16 @@ export function appendTurn(record: TurnRecord): void {
 }
 
 /**
+ * sweep --rebuild 用に、再生成対象だけを空に戻す。
+ * config/cache/mute/通知状態/Codex activity は意図的に触らず、backup も作らない。
+ */
+export function resetHistoryAndCursors(): void {
+  const p = paths();
+  rmSync(p.historyFile, { force: true });
+  rmSync(p.cursorsFile, { force: true });
+}
+
+/**
  * history.jsonl を読む。
  * - 不在 → 空配列
  * - 破損行はスキップして黙殺(logError しない)
