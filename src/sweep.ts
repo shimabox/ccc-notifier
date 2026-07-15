@@ -183,6 +183,14 @@ function sumBuckets(usage: UsageByModel): TokenBuckets {
   return total;
 }
 
+function addToBuckets(target: TokenBuckets, src: TokenBuckets): void {
+  target.input += src.input;
+  target.output += src.output;
+  target.cacheWrite5m += src.cacheWrite5m;
+  target.cacheWrite1h += src.cacheWrite1h;
+  target.cacheRead += src.cacheRead;
+}
+
 /** main のモデル → sidechain のみに現れるモデル の順で重複排除(contracts.md / track.ts と同一)。 */
 function collectModels(main: UsageByModel, sidechain: UsageByModel): string[] {
   const models: string[] = [];
@@ -246,12 +254,12 @@ async function readAll(path: string): Promise<Buffer | null> {
 export async function splitIntoTurnDrafts(
   transcriptPath: string,
   cursor: Cursor | null,
-): Promise<{ drafts: TurnDraft[]; newCursor: Cursor }> {
+): Promise<{ drafts: TurnDraft[]; newCursor: Cursor; messageKeys: string[] }> {
   const buffer = await readAll(transcriptPath);
   if (buffer === null) {
     // 読めない場合は何も消費しない(既存カーソルがあればそのまま、無ければゼロ)。
     const nc: Cursor = cursor ?? { offset: 0, lastUuid: null, lastTs: null, seenMessageKeys: [] };
-    return { drafts: [], newCursor: nc };
+    return { drafts: [], newCursor: nc, messageKeys: [] };
   }
   const fileSize = buffer.length;
 
@@ -404,7 +412,7 @@ export async function splitIntoTurnDrafts(
     seenMessageKeys,
   };
 
-  return { drafts, newCursor };
+  return { drafts, newCursor, messageKeys: newKeys };
 }
 
 // ============ レコード化 ============
@@ -435,16 +443,6 @@ function draftToRecord(draft: TurnDraft, ts: string, table: PriceTable, fx: FxRe
   return rec;
 }
 
-/** SA の newCursors から最大 lastTs を取る(SA だけの回収レコードの ts に使う）。 */
-function maxCursorTs(newCursors: Array<{ path: string; cursor: Cursor }>): string | null {
-  let max: string | null = null;
-  for (const nc of newCursors) {
-    const t = nc.cursor.lastTs;
-    if (t !== null && (max === null || t > max)) max = t;
-  }
-  return max;
-}
-
 function mergeUnknownModels(rec: TurnRecord, extra: string[]): void {
   if (extra.length === 0) return;
   const merged = rec.unknownModels ? [...rec.unknownModels] : [];
@@ -468,7 +466,7 @@ async function processTranscriptLocked(
     await file.close();
   }
   const cursor = opts.ignoreCursors ? null : sanitizeCursor(loadCursor(mainPath));
-  const { drafts, newCursor } = await splitIntoTurnDrafts(mainPath, cursor);
+  const { drafts, newCursor, messageKeys } = await splitIntoTurnDrafts(mainPath, cursor);
 
   // 各 draft → TurnRecord(--days より古いターンは捨てる。カーソルは進めるので再走査しない）。
   const records: TurnRecord[] = [];
@@ -488,6 +486,8 @@ async function processTranscriptLocked(
       ignoreCursors: opts.ignoreCursors,
       strictRead: opts.strictRead,
       includeAllFiles: opts.ignoreCursors,
+      excludeMessageKeys: new Set(messageKeys),
+      minTimestampMs: daysCutoff,
     });
   } catch (err) {
     if (opts.strictRead) throw err;
@@ -495,51 +495,66 @@ async function processTranscriptLocked(
     sa = null;
   }
   const saHasUsage = sa !== null && sa.apiCalls > 0;
-  const saLastTs = saHasUsage ? maxCursorTs(sa!.newCursors) : null;
-  const saIsInPeriod =
-    saHasUsage &&
-    (daysCutoff === null ||
-      (saLastTs !== null && Number.isFinite(Date.parse(saLastTs)) && Date.parse(saLastTs) >= daysCutoff));
-
-  if (saIsInPeriod) {
-    const saBreakdown = computeCost(sa!.perModel, {}, table);
-    summary.subagentsUSD += saBreakdown.usd; // SA 回収額はサマリ別枠に加算(totalUSD には混ぜない)
-    const saBlock = {
-      costUSD: saBreakdown.usd,
-      costByModel: saBreakdown.byModel,
-      tokens: sumBuckets(sa!.perModel),
-      apiCalls: sa!.apiCalls,
-      agentFiles: sa!.agentFiles,
-    };
-
-    if (records.length > 0) {
-      // この session の最後の新規ターン record に SA ブロックを添付(track と同形式）。
-      const last = records[records.length - 1];
-      last.subagents = saBlock;
-      mergeUnknownModels(last, saBreakdown.unknownModels);
-    } else {
-      // 新規ターンが無い → SA だけの回収レコードを作る。
-      const rec: TurnRecord = {
-        schemaVersion: 1,
-        ts: saLastTs ?? new Date().toISOString(),
-        sessionId: "",
-        project: "",
-        gitBranch: null,
-        models: collectModels(sa!.perModel, {}),
-        tokens: emptyBuckets(),
-        sidechainTokens: null,
-        apiCalls: 0,
-        costUSD: 0,
-        costByModel: {},
-        costJPY: 0,
-        fxRate: fx.rate,
-        fxSource: fx.source,
-        prompt: "",
-        subagents: saBlock,
-        ingest: "sweep",
+  if (saHasUsage) {
+    // Each agent file is kept as a time-bearing group. Attach it to the first
+    // parent turn that completes at/after the agent, rather than assigning the
+    // whole session to its last turn. --days filtering already happened while
+    // parsing each assistant row, so old and recent agent costs are not mixed.
+    const parentRecords = [...records];
+    for (const group of sa!.groups) {
+      const saBreakdown = computeCost(group.perModel, {}, table);
+      summary.subagentsUSD += saBreakdown.usd;
+      const saBlock: NonNullable<TurnRecord["subagents"]> = {
+        costUSD: saBreakdown.usd,
+        costByModel: { ...saBreakdown.byModel },
+        tokens: sumBuckets(group.perModel),
+        apiCalls: group.apiCalls,
+        agentFiles: 1,
       };
-      mergeUnknownModels(rec, saBreakdown.unknownModels);
-      records.push(rec);
+
+      const groupMs = group.lastTs === null ? NaN : Date.parse(group.lastTs);
+      let target = Number.isFinite(groupMs)
+        ? parentRecords.find((rec) => {
+            const recMs = Date.parse(rec.ts);
+            return Number.isFinite(recMs) && recMs >= groupMs;
+          })
+        : undefined;
+      target ??= parentRecords[parentRecords.length - 1];
+
+      if (target === undefined) {
+        target = {
+          schemaVersion: 1,
+          ts: group.lastTs ?? sa!.lastTs ?? new Date().toISOString(),
+          sessionId: sa!.sessionId,
+          project: sa!.cwd ?? "",
+          gitBranch: sa!.gitBranch,
+          models: collectModels(group.perModel, {}),
+          tokens: emptyBuckets(),
+          sidechainTokens: null,
+          apiCalls: 0,
+          costUSD: 0,
+          costByModel: {},
+          costJPY: 0,
+          fxRate: fx.rate,
+          fxSource: fx.source,
+          prompt: "",
+          ingest: "sweep",
+        };
+        records.push(target);
+      }
+
+      if (target.subagents === undefined) {
+        target.subagents = saBlock;
+      } else {
+        target.subagents.costUSD += saBlock.costUSD;
+        target.subagents.apiCalls += saBlock.apiCalls;
+        target.subagents.agentFiles += 1;
+        addToBuckets(target.subagents.tokens, saBlock.tokens);
+        for (const [model, usd] of Object.entries(saBlock.costByModel)) {
+          target.subagents.costByModel[model] = (target.subagents.costByModel[model] ?? 0) + usd;
+        }
+      }
+      mergeUnknownModels(target, saBreakdown.unknownModels);
     }
     summary.agentFiles += sa!.agentFiles;
   }
@@ -562,8 +577,9 @@ async function processTranscriptLocked(
     // メインカーソルは新規ターンを生成したときのみ進める(= track が「新規 usage あり」で進めるのと同義。
     // 先頭がプロンプトのみ(assistant 未達）の窓を消費してプロンプトを失わないため）。
     if (drafts.length > 0) saveCursor(mainPath, newCursor);
-    // SA カーソルは SA を計上したときのみ進める。
-    if (saHasUsage) {
+    // 期間外または親/別agentとの重複だけだったファイルも、意図的に消費した
+    // 位置を保存する。履歴へ加えない同じ行を後続hookで再評価させないため。
+    if (sa !== null) {
       for (const nc of sa!.newCursors) saveCursor(nc.path, nc.cursor);
     }
   }

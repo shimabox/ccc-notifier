@@ -108,7 +108,12 @@ async function readAll(path: string): Promise<Buffer | null> {
 export async function aggregateNewTurn(
   transcriptPath: string,
   cursor: Cursor | null,
-): Promise<TurnAggregate | null> {
+  opts: {
+    excludeMessageKeys?: ReadonlySet<string>;
+    minTimestampMs?: number | null;
+    returnEmpty?: boolean;
+  } = {},
+): Promise<(TurnAggregate & { messageKeys: string[] }) | null> {
   const buffer = await readAll(transcriptPath);
   if (buffer === null) return null;
   const fileSize = buffer.length;
@@ -138,6 +143,10 @@ export async function aggregateNewTurn(
   const tsFloor = cursor?.lastTs ?? null;
 
   const pending = new Map<string, PendingMsg>();
+  // Excluded/period-filtered rows must still be consumed by the caller's cursor.
+  // Otherwise a copy that was correctly ignored once can reappear as a new call
+  // on a later incremental scan.
+  const consumedKeys = new Set<string>();
   let sessionId = '';
   let cwd: string | null = null;
   let gitBranch: string | null = null;
@@ -207,6 +216,15 @@ export async function aggregateNewTurn(
           // Rescan guard #2 (seen keys): also the primary dedupe path in normal
           // mode. A key we have already accounted for is never counted again.
           if (!seenKeys.has(key)) {
+            const tsMs = ts === null ? NaN : Date.parse(ts);
+            const outsidePeriod =
+              typeof opts.minTimestampMs === 'number' &&
+              (!Number.isFinite(tsMs) || tsMs < opts.minTimestampMs);
+            if (opts.excludeMessageKeys?.has(key) || outsidePeriod) {
+              consumedKeys.add(key);
+              pending.delete(key);
+              return;
+            }
             const model = strOrNull(rawModel) ?? 'unknown';
             // Same key across duplicated rows: last write wins (identical or
             // corrected values), and it still only counts once.
@@ -231,7 +249,7 @@ export async function aggregateNewTurn(
   const newOffset = lineStart;
 
   // 6. No newly-counted assistant messages -> nothing happened this turn.
-  if (pending.size === 0) return null;
+  if (pending.size === 0 && !opts.returnEmpty) return null;
 
   const main: UsageByModel = {};
   const sidechain: UsageByModel = {};
@@ -243,7 +261,7 @@ export async function aggregateNewTurn(
   }
 
   // Ring buffer: previous keys followed by this turn's keys, newest kept.
-  const combined = [...(cursor?.seenMessageKeys ?? []), ...newKeys];
+  const combined = [...(cursor?.seenMessageKeys ?? []), ...consumedKeys, ...newKeys];
   const seenMessageKeys =
     combined.length > MAX_SEEN_KEYS ? combined.slice(combined.length - MAX_SEEN_KEYS) : combined;
 
@@ -252,6 +270,7 @@ export async function aggregateNewTurn(
     main,
     sidechain,
     apiCalls: pending.size,
+    messageKeys: newKeys,
     prompt,
     cwd,
     gitBranch,
@@ -259,8 +278,8 @@ export async function aggregateNewTurn(
     lastTs,
     newCursor: {
       offset: newOffset,
-      lastUuid,
-      lastTs,
+      lastUuid: lastUuid ?? cursor?.lastUuid ?? null,
+      lastTs: lastTs ?? cursor?.lastTs ?? null,
       seenMessageKeys,
     },
   };

@@ -240,6 +240,69 @@ describe("runSweep", () => {
     );
   });
 
+  it("1b. does not charge a parent API call copied into an agent file", async () => {
+    placeFixtures({ withSA: false });
+    mkdirSync(join(projectsRoot, "projA", "t1", "subagents"), { recursive: true });
+    const duplicateRows = readFileSync(mainPath, "utf8")
+      .split("\n")
+      .filter((line) => {
+        if (!line.trim()) return false;
+        const row = JSON.parse(line) as { message?: { id?: string } };
+        return row.message?.id === "msg_M1";
+      });
+    writeFileSync(saPath, `${duplicateRows.join("\n")}\n`, "utf8");
+
+    expect((await sweep([])).code).toBe(0);
+
+    expect(readHistory()).toHaveLength(2);
+    expect(readHistory().every((row) => row.subagents === undefined)).toBe(true);
+    const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
+    expect(cursors[saPath]).toBeDefined();
+  });
+
+  it("1c. --days filters agent API calls row-by-row instead of including an old whole file", async () => {
+    placeFixtures({ withSA: false });
+    mkdirSync(join(projectsRoot, "projA", "t1", "subagents"), { recursive: true });
+    const makeAgentRow = (id: string, timestamp: string, output: number) => ({
+      parentUuid: `parent-${id}`,
+      isSidechain: true,
+      cwd: "/tmp/proj",
+      sessionId: "sess-M",
+      gitBranch: "main",
+      type: "assistant",
+      requestId: `req-${id}`,
+      message: {
+        id: `msg-${id}`,
+        role: "assistant",
+        model: "claude-sonnet-5",
+        usage: {
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: output,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+        },
+      },
+      uuid: `uuid-${id}`,
+      timestamp,
+    });
+    writeFileSync(
+      saPath,
+      [
+        makeAgentRow("old", "2020-01-01T00:00:00.000Z", 2000),
+        makeAgentRow("recent", new Date().toISOString(), 1000),
+      ].map((row) => JSON.stringify(row)).join("\n") + "\n",
+      "utf8",
+    );
+
+    expect((await sweep(["--days", "1"])).code).toBe(0);
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].costUSD).toBe(0);
+    expect(rows[0].subagents?.costUSD).toBeCloseTo(0.015, 10);
+    expect(rows[0].subagents?.apiCalls).toBe(1);
+  });
+
   // 2. 再 sweep → cursorを捨てて同じsourceから全件を置換再生成する。
   it("2. a second sweep rebuilds the same two records without duplication", async () => {
     placeFixtures({ withSA: true });
