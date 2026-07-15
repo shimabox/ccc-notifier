@@ -163,6 +163,8 @@ function sumTotals(turns: EmbedTurn[]): number {
 
 describe("runDashboard — 標準シナリオ", () => {
   it("exit 0 で既定の直近版 report.html を生成する", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 15, 12, 0, 0, 0));
     seedStandard();
     const code = await run(["--no-open"]);
     expect(code).toBe(0);
@@ -170,7 +172,8 @@ describe("runDashboard — 標準シナリオ", () => {
     const html = readHtml();
     expect(html.startsWith("<!doctype html>")).toBe(true);
     expect(html).toContain("ccc-notifier");
-    expect(html).toContain("直近 30 日版 / Recent");
+    expect(html).toContain("履歴 3 日分 / Recent");
+    expect(html).toContain("sweep");
     expect(html).toContain('href="report-all.html"');
     expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain("全履歴版はまだ生成されていません");
     expect(readFileSync(join(tmpHome, "report-all.html"), "utf8")).toContain("ccc-notifier dashboard --all");
@@ -187,6 +190,9 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(data.turns.length).toBe(10);
     expect(sumTotals(data.turns)).toBeCloseTo(seededTotal, 6);
     expect(data.variant).toBe("full");
+    expect(readHtml()).toContain("sweep");
+    expect(readHtml()).toContain("ローカル日");
+    expect(readHtml()).toContain("dashboard --all");
     expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(true);
     expect(readFileSync(join(tmpHome, "report.html"), "utf8")).toContain("ccc-notifier dashboard");
     expect(readFileSync(join(tmpHome, "report.html"), "utf8")).not.toContain("dashboard --all");
@@ -210,7 +216,7 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(await run(["--no-open"])).toBe(0);
 
     expect(parseData(readHtml()).turns.map((turn) => turn.pr)).toEqual(["inside-config-window"]);
-    expect(readHtml()).toContain("直近 7 日版 / Recent");
+    expect(readHtml()).toContain("履歴 1 日分 / Recent");
     expect(existsSync(join(tmpHome, "cache", "dashboard-full-state.json"))).toBe(false);
   });
 
@@ -292,6 +298,52 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(html).toContain("cccn-search");
     expect(html).toContain("cccn-scroll");
     expect(html).toContain("window.scrollTo");
+  });
+});
+
+describe("runDashboard — Recentの実履歴日数ラベル", () => {
+  it("同じローカル暦日の複数turnは履歴1日分、翌日追加後の再生成は履歴2日分と表示する", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 15, 12, 0, 0, 0));
+    appendTurn(makeTurn({ ts: new Date(2026, 6, 14, 9, 0, 0, 0).toISOString() }));
+    appendTurn(makeTurn({ ts: new Date(2026, 6, 14, 18, 0, 0, 0).toISOString() }));
+
+    expect(await run(["--no-open", "--days", "30"])).toBe(0);
+    expect(readHtml()).toContain("履歴 1 日分 / Recent");
+
+    appendTurn(makeTurn({ ts: new Date(2026, 6, 15, 8, 0, 0, 0).toISOString() }));
+    expect(await run(["--no-open", "--days", "30"])).toBe(0);
+    expect(readHtml()).toContain("履歴 2 日分 / Recent");
+  });
+
+  it("埋込turnの暦日spanが設定days以上なら従来の直近N日版と表示する", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 30, 12, 0, 0, 0));
+    appendTurn(makeTurn({ ts: new Date(2026, 6, 1, 12, 0, 0, 0).toISOString() }));
+    appendTurn(makeTurn({ ts: new Date(2026, 6, 30, 12, 0, 0, 0).toISOString() }));
+
+    expect(await run(["--no-open", "--days", "30"])).toBe(0);
+
+    expect(readHtml()).toContain("直近 30 日版 / Recent");
+    expect(readHtml()).not.toContain("履歴 30 日分 / Recent");
+  });
+
+  it("DSTを跨いでも経過時間ではなくローカル暦日で3日分と数える", async () => {
+    const priorTz = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-09T16:00:00.000Z"));
+      appendTurn(makeTurn({ ts: "2026-03-07T12:00:00-05:00" }));
+      appendTurn(makeTurn({ ts: "2026-03-09T12:00:00-04:00" }));
+
+      expect(await run(["--no-open", "--days", "30"])).toBe(0);
+
+      expect(readHtml()).toContain("履歴 3 日分 / Recent");
+    } finally {
+      if (priorTz === undefined) delete process.env.TZ;
+      else process.env.TZ = priorTz;
+    }
   });
 });
 
@@ -520,6 +572,7 @@ describe("runDashboard — 空状態", () => {
     expect(code).toBe(0);
     const html = readHtml();
     expect(html).toContain("まだ履歴がありません");
+    expect(html).toContain("直近 30 日版 / Recent");
     expect(parseData(html).turns).toEqual([]);
     expect(html).not.toMatch(/src\s*=\s*["']?\s*https?:/i);
   });
@@ -532,6 +585,7 @@ describe("runDashboard — 空状態", () => {
     expect(code).toBe(0);
     const html = readHtml();
     expect(html).toContain("対象期間に履歴がありません");
+    expect(html).toContain("直近 30 日版 / Recent");
     expect(html).not.toContain("まだ履歴がありません");
     expect(parseData(html).turns).toEqual([]);
   });
@@ -694,7 +748,10 @@ describe("runDashboard — 月予算カード", () => {
     expect(data.turns).toEqual([]);
     expect(data.budgetFixed).toBe(true);
     expect(data.budgetMonth).toEqual({ usd: 0.2, jpy: 30, turns: 1 });
-    expect(html).toContain("今月・全履歴から正確に集計");
+    expect(html).toContain("保存済み履歴を全件集計");
+    expect(html).toContain("all recorded history");
+    expect(html).not.toContain("正確");
+    expect(html).not.toContain("exact current month");
   });
 
   it("保存済みの選択期間が埋め込み対象に無ければ対象期間合計へ戻す", async () => {

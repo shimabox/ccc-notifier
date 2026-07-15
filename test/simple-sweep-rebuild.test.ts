@@ -26,6 +26,7 @@ import { runHistory } from "../src/history";
 import { builtinPriceTable } from "../src/pricing";
 import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
+import * as dashboard from "../src/dashboard";
 import type { TurnRecord } from "../src/types";
 
 const CLAUDE_MAIN = fileURLToPath(new URL("./fixtures/transcript-multiturn.jsonl", import.meta.url));
@@ -77,6 +78,28 @@ function rows(): TurnRecord[] {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as TurnRecord);
+}
+
+function dashboardTurns(name: "report.html" | "report-all.html"): unknown[] {
+  const html = readFileSync(file(name), "utf8");
+  const marker = '<script id="cccn-data" type="application/json">';
+  const start = html.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const dataStart = start + marker.length;
+  const end = html.indexOf("</script>", dataStart);
+  expect(end).toBeGreaterThan(dataStart);
+  return (JSON.parse(html.slice(dataStart, end)) as { turns: unknown[] }).turns;
+}
+
+function setDashboardConfig(overrides: {
+  autoRegenerate?: boolean;
+  autoReloadSec?: number;
+  days?: number;
+}): void {
+  const configPath = file("config.json");
+  const cfg = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, any>;
+  cfg.dashboard = { ...cfg.dashboard, ...overrides };
+  writeFileSync(configPath, `${JSON.stringify(cfg)}\n`, "utf8");
 }
 
 function placeClaude(opts: { agent?: boolean; active?: boolean } = {}): void {
@@ -231,6 +254,48 @@ describe("sweep CLI contract", () => {
 });
 
 describe("sweep reset and regeneration", () => {
+  it("成功かつautoRegenerate=trueなら同じglobal lock内でrecent/full/stateを実体生成し、recentはconfig.daysを使う", async () => {
+    placeClaude();
+    seedPreservedAndResetFiles();
+    setDashboardConfig({ autoRegenerate: true, autoReloadSec: 0, days: 1 });
+    let lockCalls = 0;
+    let dashboardsReadyAtRelease = false;
+
+    const result = await captureSweep(["--days", "9999"], {
+      lockProvider: async () => {
+        lockCalls += 1;
+        const held = acquireDataLock();
+        if (held === null) return null;
+        return {
+          token: held.token,
+          heartbeat: () => held.heartbeat(),
+          release: () => {
+            dashboardsReadyAtRelease =
+              existsSync(file("report.html")) &&
+              existsSync(file("report-all.html")) &&
+              existsSync(cacheFile("dashboard-full-state.json")) &&
+              !readFileSync(file("report.html"), "utf8").includes('name="cccn-placeholder"') &&
+              !readFileSync(file("report-all.html"), "utf8").includes('name="cccn-placeholder"');
+            held.release();
+          },
+        };
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(lockCalls).toBe(1);
+    expect(dashboardsReadyAtRelease).toBe(true);
+    expect(rows()).toHaveLength(2); // sweep --days 9999 の再生成対象
+    expect(dashboardTurns("report.html")).toHaveLength(0); // config.dashboard.days=1 を使用
+    expect(dashboardTurns("report-all.html")).toHaveLength(2);
+    const state = JSON.parse(readFileSync(cacheFile("dashboard-full-state.json"), "utf8")) as {
+      localDate: string;
+      generatedAt: string;
+    };
+    expect(state.localDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(Number.isFinite(Date.parse(state.generatedAt))).toBe(true);
+  });
+
   it("sweepはglobal lockを1回だけ使い、activeなClaude main/agent/Codexを先頭から全再生成する", async () => {
     placeClaude({ agent: true, active: true });
     placeCodex({ active: true });
@@ -441,6 +506,28 @@ describe("sweep dry-run", () => {
 });
 
 describe("sweep failure and retry", () => {
+  it("dashboard writer失敗時は履歴/cursorを維持してexit 1にし、canonicalを再無効化して手動復旧を案内する", async () => {
+    placeClaude();
+    seedPreservedAndResetFiles();
+    setDashboardConfig({ autoRegenerate: true });
+    vi.spyOn(dashboard, "writeDashboardHtml").mockImplementation(() => {
+      throw new Error("injected dashboard writer failure");
+    });
+
+    const result = await captureSweep([]);
+
+    expect(result.code).toBe(1);
+    expect(rows()).toHaveLength(2);
+    const cursors = JSON.parse(readFileSync(file("cursors.json"), "utf8")) as Record<string, unknown>;
+    expect(cursors[mainPath]).toBeDefined();
+    expect(existsSync(file("report.html"))).toBe(false);
+    expect(existsSync(file("report-all.html"))).toBe(false);
+    expect(existsSync(cacheFile("dashboard-full-state.json"))).toBe(false);
+    expect(result.error).toContain("履歴は再生成済み");
+    expect(result.error).toContain("dashboard");
+    expect(result.error).toContain("dashboard --all");
+  });
+
   it("global data lockを取得できない場合はhistory/cursors/dashboardを変更しない", async () => {
     placeClaude();
     seedPreservedAndResetFiles();
@@ -491,6 +578,9 @@ describe("sweep failure and retry", () => {
     const first = await captureSweep([]);
     expect(first.code).toBe(1);
     expect(`${first.output}\n${first.error}`).toMatch(/一部|再実行|retry/i);
+    expect(existsSync(file("report.html"))).toBe(false);
+    expect(existsSync(file("report-all.html"))).toBe(false);
+    expect(existsSync(cacheFile("dashboard-full-state.json"))).toBe(false);
 
     expect((await captureSweep([])).code).toBe(0);
     expect(rows()).toHaveLength(3);
