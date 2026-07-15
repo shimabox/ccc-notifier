@@ -12,7 +12,7 @@
 | `notify.slack.sendFullPrompt` | boolean | `false` | `true` にするとプロンプト全文を Slack に送信(既定は冒頭のみ) |
 | `minNotifyUSD` | number | `0` | この金額(USD)未満のターンは通知しない。**履歴には常に記録されます** |
 | `costLabel` | `"api_equivalent"` \| `"actual"` | `"api_equivalent"` | 金額ラベルの意味づけ(詳細は [金額の意味](cost.md)) |
-| `fx.fallbackRate` | number | `150` | 為替取得に失敗した際に使う固定 USD→JPY レート |
+| `fx.fallbackRate` | number | `160` | 有効期限内・期限切れのキャッシュとオンライン取得がいずれも使えない場合の最終 USD→JPY レート |
 | `fx.cacheHours` | number | `12` | 為替レートのキャッシュ有効時間(時間単位) |
 | `includeDailyTotal` | boolean | `true` | 通知本文に「今日の累計コスト」を含めるか |
 | `monthlyBudgetUSD` | number | `0` | 月予算(USD)。`0` で無効。ダッシュボードに当月の使用率カードを表示(`budget` コマンド / `init` の `--budget` で設定。詳細は [月予算](monthly-budget.md)) |
@@ -21,6 +21,19 @@
 | `dashboard.days` | number | `30` | 自動生成と引数なしの手動 `dashboard` で作る `report.html` の対象期間(正の整数・日数)。不正値は安全に `30` へフォールバック。`report-all.html` には影響しない |
 
 補足: データ保存先(既定 `~/.ccc-notifier`)は環境変数 `CCCN_HOME` で上書きできます。
+
+## 為替レートとフォールバック / Exchange Rate Fallback
+
+通常の¥換算では、USD→JPYレートを次の順で選びます。
+
+1. `fx.cacheHours`の有効期限内にあるキャッシュ
+2. オンラインで取得した最新レート
+3. 期限切れのキャッシュ
+4. `fx.fallbackRate`
+
+したがって、`fx.fallbackRate`は通常の換算を指定レートに固定する設定ではありません。オンライン取得に失敗しても、期限切れキャッシュが残っていればそちらが先に使われます。
+
+`fx.fallbackRate`に実質的な「未設定」はありません。`init`で空欄にすると既存の保存値を維持し、初回設定時や`config.json`に項目がない場合は既定の`160`円で補完されます。既存値を既定値へ上書きはしません。なお、[月予算](monthly-budget.md)のうちUSDで設定した**予算額の¥併記**だけは例外で、表示を安定させるため常に`fx.fallbackRate`で換算します。通常のコスト換算については[金額の意味](cost.md)も参照してください。
 
 ## 通知の一時停止と再開 / Pausing & Resuming Notifications
 

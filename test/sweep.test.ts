@@ -55,7 +55,7 @@ beforeEach(() => {
   process.env.CCCN_CLAUDE_PROJECTS = projectsRoot;
   process.env.CCCN_DRY_RUN = "1"; // track の通知は last-notify.json へ
 
-  // 実ネットワークに出ない保険。単価は builtin、fx は fixed(150)にフォールバックし決定的になる。
+  // 実ネットワークに出ない保険。config/cache不在なので単価は builtin、fx は既定の fixed(160)になる。
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
 
   mainPath = join(projectsRoot, "projA", "t1.jsonl");
@@ -169,8 +169,6 @@ describe("runSweep", () => {
     try {
       const result = await sweep([]);
       expect(result.code).toBe(1);
-      expect(result.output).toContain("未完了");
-      expect(result.output).not.toContain("新規はありませんでした");
       expect(existsSync(historyFile())).toBe(false);
       expect(existsSync(cursorsFile())).toBe(false);
     } finally {
@@ -179,22 +177,19 @@ describe("runSweep", () => {
     }
   });
 
-  it("serializes clear then sweep so newly swept records and cursors are not lost", async () => {
+  it("clear完了後のsweepはsourceから履歴2件とcursorを決定的に再生成する", async () => {
     placeFixtures({ withSA: false });
     writeFileSync(historyFile(), `${JSON.stringify({ schemaVersion: 1, ts: new Date().toISOString(), prompt: "old-secret" })}\n`, "utf8");
-    const lock = acquireDataLock();
-    expect(lock).not.toBeNull();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const clearPromise = runHistory(["clear", "--yes"]);
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    const sweepPromise = runSweep(["--projects", projectsRoot]);
-    setTimeout(() => lock!.release(), 10);
-    const [clearCode, sweepCode] = await Promise.all([clearPromise, sweepPromise]);
-    expect(clearCode).toBe(0);
-    expect(sweepCode).toBe(0);
+
+    expect(await runHistory(["clear", "--yes"])).toBe(0);
+    expect(readHistory()).toHaveLength(0);
+
+    expect(await runSweep(["--projects", projectsRoot])).toBe(0);
     expect(readHistory()).toHaveLength(2);
-    expect(existsSync(cursorsFile())).toBe(true);
+    const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
+    expect(cursors[mainPath]).toBeDefined();
   });
 
   // 1. fresh sweep: 2 レコード(GOLDEN 一致・両方 ingest:'sweep')、2件目に SA 0.033、totalUSD ≈ 0.020。
@@ -214,8 +209,8 @@ describe("runSweep", () => {
     expect(t1.ts).toBe("2026-07-06T10:00:05.000Z");
     expect(t1.models).toEqual(["claude-fable-5"]);
     expect(t1.costUSD).toBeCloseTo(0.005, 10);
-    expect(t1.costJPY).toBeCloseTo(0.75, 10); // 0.005 × 150
-    expect(t1.fxRate).toBe(150);
+    expect(t1.costJPY).toBeCloseTo(0.8, 10); // 0.005 × 160
+    expect(t1.fxRate).toBe(160);
     expect(t1.ingest).toBe("sweep");
     expect(t1.sessionId).toBe("sess-M");
     expect(t1.project).toBe("/tmp/proj");
@@ -239,14 +234,14 @@ describe("runSweep", () => {
 
     // summary の totalUSD はメイン基準(0.005 + 0.015 = 0.020)。SA は含めない。
     expect(output).toContain("$0.020");
-    // summary.subagentsUSD = 0.033 は別枠の1行としてコンソールに出る(¥ は fx.rate=150 換算)。
+    // summary.subagentsUSD = 0.033 は別枠の1行としてコンソールに出る(¥ は既定 fx.rate=160 換算)。
     expect(output).toContain(
-      `うちサブエージェント: ${formatUSD(0.033)}(${formatJPY(0.033 * 150)})`,
+      `うちサブエージェント: ${formatUSD(0.033)}(${formatJPY(0.033 * 160)})`,
     );
   });
 
-  // 2. 再 sweep → 新規 0(カーソル連携)。
-  it("2. a second sweep finds nothing new", async () => {
+  // 2. 再 sweep → cursorを捨てて同じsourceから全件を置換再生成する。
+  it("2. a second sweep rebuilds the same two records without duplication", async () => {
     placeFixtures({ withSA: true });
 
     await sweep([]);
@@ -254,20 +249,20 @@ describe("runSweep", () => {
 
     const { code, output } = await sweep([]);
     expect(code).toBe(0);
-    expect(output).toContain("新規はありませんでした");
+    expect(output).toContain("2 ターン");
     expect(readHistory()).toHaveLength(2);
   });
 
-  // 3. hook→sweep: 先に track が t1 を処理 → sweep は新規 0(カーソル連携)。
-  it("3. hook then sweep: track processes t1 first, sweep finds nothing new", async () => {
+  // 3. hook→sweep: hook cursorを捨て、sourceをターン単位で全再生成する。
+  it("3. hook then sweep: sweep replaces hook history from the source beginning", async () => {
     placeFixtures({ withSA: true });
 
     await runTrack(stdinForMain());
     expect(readHistory()).toHaveLength(1); // track は窓を1レコードに集約する
 
     const { output } = await sweep([]);
-    expect(output).toContain("新規はありませんでした");
-    expect(readHistory()).toHaveLength(1); // sweep は追加しない
+    expect(output).toContain("2 ターン");
+    expect(readHistory()).toHaveLength(2);
   });
 
   // 4. sweep→hook: sweep 後に track → 履歴が増えない。
@@ -298,29 +293,29 @@ describe("runSweep", () => {
     expect(readHistory()).toHaveLength(2);
   });
 
-  // 6. --days 0 相当 → 古いターンが捨てられ、かつ再実行でも復活しない(カーソルは進む)。
-  it("6. --days 0 drops old turns and they never revive (cursor still advances)", async () => {
+  // 6. --days 0 はreset後に期間内だけを保存し、制限なしsweepで全期間を戻せる。
+  it("6. --days 0 keeps only the period and a full sweep restores old turns", async () => {
     placeFixtures({ withSA: false }); // SA 無し(SA-only レコードで history が濁らないように)
 
     const { code, output } = await sweep(["--days", "0"]);
     expect(code).toBe(0);
-    expect(output).toContain("新規はありませんでした");
+    expect(output).toMatch(/(?:新規|再生成対象).*ありません/);
     expect(readHistory()).toHaveLength(0);
     // 古いターンでもカーソルは進む(再走査しない)。
     expect(existsSync(cursorsFile())).toBe(true);
 
-    // --days 0 で再実行しても復活しない。
+    // --days 0 で再実行しても期間外なので履歴は空。
     await sweep(["--days", "0"]);
     expect(readHistory()).toHaveLength(0);
 
-    // 制限なしで再実行してもカーソルが進んでいるため復活しない。
+    // 制限なしsweepはcursorを捨てるため全期間を復活させる。
     const again = await sweep([]);
-    expect(again.output).toContain("新規はありませんでした");
-    expect(readHistory()).toHaveLength(0);
+    expect(again.output).toContain("2 ターン");
+    expect(readHistory()).toHaveLength(2);
   });
 
-  // 7. SA だけ新規(メインは処理済み)→ SA 回収レコード1件(costUSD 0 + subagents)。
-  it("7. SA-only recovery record when only subagents have new usage", async () => {
+  // 7. SAだけ追記後も、全再生成した同じ2 main turnの末尾へ全SA usageを付ける。
+  it("7. an agent-only append is included in a full rebuild without adding a stale third row", async () => {
     placeFixtures({ withSA: true });
 
     await sweep([]); // メインもSAも処理済みにする
@@ -331,67 +326,43 @@ describe("runSweep", () => {
 
     const { code, output } = await sweep([]);
     expect(code).toBe(0);
-    // summary.subagentsUSD = 0.015: SA だけの回収でも回収額がコンソールに見える
-    // (totalUSD はメイン基準 0 のため、この別枠が無いと回収額が把握できない)。
+    // 元0.033 + 追記0.015 = 0.048を全再集計する。
     expect(output).toContain(
-      `うちサブエージェント: ${formatUSD(0.015)}(${formatJPY(0.015 * 150)})`,
+      `うちサブエージェント: ${formatUSD(0.048)}(${formatJPY(0.048 * 160)})`,
     );
 
     const rows = readHistory();
-    expect(rows).toHaveLength(3);
-    const saOnly = rows[2];
-    // メインは全ゼロ・costUSD 0・apiCalls 0。
-    expect(saOnly.costUSD).toBe(0);
-    expect(saOnly.apiCalls).toBe(0);
-    expect(saOnly.tokens).toEqual({
-      input: 0,
-      output: 0,
-      cacheWrite5m: 0,
-      cacheWrite1h: 0,
-      cacheRead: 0,
-    });
-    expect(saOnly.ingest).toBe("sweep");
-    expect(saOnly.prompt).toBe("");
-    expect(saOnly.models).toEqual(["claude-sonnet-5"]);
-    // SA ブロックに差分(sonnet output 1000 → 0.015)が入る。
-    expect(saOnly.subagents).toBeDefined();
-    expect(saOnly.subagents!.costUSD).toBeCloseTo(0.015, 10);
-    expect(saOnly.subagents!.apiCalls).toBe(1);
+    expect(rows).toHaveLength(2);
+    const last = rows[1];
+    expect(last.prompt).toBe("ターン2のプロンプト");
+    expect(last.subagents).toBeDefined();
+    expect(last.subagents!.costUSD).toBeCloseTo(0.048, 10);
+    expect(last.subagents!.apiCalls).toBe(2);
   });
 
-  // 8. 進行中セッション保護: mtime が直近の transcript は既定でスキップし、カーソルも進めない。
-  //    セッション完了後(mtime が古くなった後)の再実行では取りこぼしなく取り込まれる。
-  it("8. skips a recently-modified transcript (active-session guard) and ingests it later", async () => {
+  // 8. 進行中sourceも既定でbest-effort走査する。
+  it("8. ingests a recently-modified transcript by default", async () => {
     placeFixtures({ withSA: false });
     const now = new Date();
     utimesSync(mainPath, now, now); // 「今まさに書かれている」状態を模す
 
     const first = await sweep([]);
     expect(first.code).toBe(0);
-    expect(first.output).toContain("スキップ: 1 transcript");
-    expect(first.output).toContain("--include-active");
-    expect(readHistory()).toHaveLength(0);
-    expect(existsSync(cursorsFile())).toBe(false); // カーソル未更新 = hook の通知を奪わない
-
-    // セッション完了(mtime が古くなる)後は通常どおり全ターン取り込まれる。
-    const aged = new Date(Date.now() - 10 * 60_000);
-    utimesSync(mainPath, aged, aged);
-    const second = await sweep([]);
-    expect(second.output).toContain("2 ターン");
+    expect(first.output).toContain("2 ターン");
+    expect(first.output).not.toContain("スキップ:");
     expect(readHistory()).toHaveLength(2);
   });
 
-  // 9. --include-active はガードを解除して直近更新の transcript も取り込む。
-  it("9. --include-active ingests a recently-modified transcript", async () => {
+  // 9. --include-active は廃止され、不正optionとしてmutation前に拒否する。
+  it("9. rejects the removed --include-active flag", async () => {
     placeFixtures({ withSA: false });
     const now = new Date();
     utimesSync(mainPath, now, now);
 
-    const { code, output } = await sweep(["--include-active"]);
-    expect(code).toBe(0);
-    expect(output).toContain("2 ターン");
-    expect(output).not.toContain("スキップ:");
-    expect(readHistory()).toHaveLength(2);
+    const { code } = await sweep(["--include-active"]);
+    expect(code).toBe(1);
+    expect(readHistory()).toHaveLength(0);
+    expect(existsSync(cursorsFile())).toBe(false);
   });
 });
 
@@ -443,34 +414,55 @@ function placeCodexRollout(fixtureBasename: string, fileName: string): string {
 }
 
 describe("runSweep (codex)", () => {
+  it("51 rolloutでも25件単位だけ進捗を出し、1件ごとの冗長な出力をしない", async () => {
+    for (let i = 0; i < 51; i++) {
+      placeCodexRollout(
+        "rollout-basic.jsonl",
+        `rollout-bulk-${String(i).padStart(3, "0")}.jsonl`,
+      );
+    }
+
+    const { code, output } = await sweep([]);
+
+    expect(code).toBe(0);
+    expect(output).toMatch(/走査開始.*Claude project 0.*Codex rollout 51/i);
+    const progress = output.split("\n").filter((line) =>
+      /走査進捗:|(?:Claude transcript|Codex rollout).*走査.*\d+\s*\/\s*\d+/i.test(line),
+    );
+    expect(progress).toHaveLength(2);
+    expect(progress[0]).toMatch(/25\s*\/\s*51/);
+    expect(progress[1]).toMatch(/50\s*\/\s*51/);
+    expect(progress.join("\n")).not.toMatch(/(?:1|51)\s*\/\s*51/);
+    expect(output.split("\n").length).toBeLessThan(30);
+  });
+
   it("reports a Codex lock timeout as incomplete and leaves its cursor reusable", async () => {
     const rollout = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const code = await runSweep(["--projects", projectsRoot], { lockProvider: async () => null });
     const output = log.mock.calls.flat().join(" ");
     expect(code).toBe(1);
-    expect(output).toContain("未完了");
     expect(existsSync(historyFile())).toBe(false);
     const cursors = existsSync(cursorsFile()) ? readFileSync(cursorsFile(), "utf8") : "";
     expect(cursors).not.toContain(rollout);
   });
 
-  it("commits normal Claude targets but returns 1 for a timed-out Codex target", async () => {
+  it("uses one global lock for Claude and Codex instead of locking each target", async () => {
     placeFixtures({ withSA: false });
     const rollout = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
     let calls = 0;
-    const provider = async () => {
+    const provider = async (): Promise<ReturnType<typeof acquireDataLock>> => {
       calls += 1;
-      return calls === 1 ? acquireDataLock() : null;
+      return acquireDataLock();
     };
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const code = await runSweep(["--projects", projectsRoot], { lockProvider: provider });
-    expect(code).toBe(1);
-    expect(log.mock.calls.flat().join(" ")).toContain("未完了");
-    expect(readHistory()).toHaveLength(2);
+    expect(code).toBe(0);
+    expect(calls).toBe(1);
+    expect(readHistory()).toHaveLength(3);
     const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
     expect(cursors[mainPath]).toBeDefined();
-    expect(cursors[rollout]).toBeUndefined();
+    expect(cursors[rollout]).toBeDefined();
   });
 
   // 1. multiturn を取り込む → 3 レコード(source codex / ingest sweep / モデル gpt-5.5×2 + gpt-5-codex /
@@ -480,13 +472,13 @@ describe("runSweep (codex)", () => {
 
     const { code, output } = await sweep([]);
     expect(code).toBe(0);
-    // Codex 行は「うちサブエージェント」行と同じ $(¥)書式(¥ は fx.rate=150 換算)。
+    // Codex 行は「うちサブエージェント」行と同じ $(¥)書式(¥ は既定 fx.rate=160 換算)。
     // 0.0047 + 0.0123 + 0.0010125 = 0.0180125 USD。
     expect(output).toContain(
-      `Codex: 3 ターン ${formatUSD(0.0180125)}(${formatJPY(0.0180125 * 150)})`,
+      `Codex: 3 ターン ${formatUSD(0.0180125)}(${formatJPY(0.0180125 * 160)})`,
     );
     // Codex 分は総合計にも含まれる(このテストは Codex のみなので newRecords = 3)。
-    expect(output).toContain("新規取り込み: 3 ターン");
+    expect(output).toContain("3 ターン");
 
     const rows = readHistory();
     expect(rows).toHaveLength(3);
@@ -499,7 +491,7 @@ describe("runSweep (codex)", () => {
       expect(r.gitBranch).toBeNull();
       expect(r.sidechainTokens).toBeNull();
       expect(r.subagents).toBeUndefined();
-      expect(r.fxRate).toBe(150);
+      expect(r.fxRate).toBe(160);
     }
 
     const [t1, t2, t3] = rows;
@@ -512,7 +504,7 @@ describe("runSweep (codex)", () => {
     expect(t1.tokens).toEqual({ input: 600, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 400 });
     expect(t1.costUSD).toBeCloseTo(0.0047, 10);
     expect(t1.costByModel!["gpt-5.5"]).toBeCloseTo(0.0047, 10);
-    expect(t1.costJPY).toBeCloseTo(0.0047 * 150, 10);
+    expect(t1.costJPY).toBeCloseTo(0.0047 * 160, 10);
 
     // t2: gpt-5.5 / {input:1400, cacheRead:1600, output:150}(B+C 合算・破損行はスキップ)/ cost 0.0123 / apiCalls 2。
     expect(t2.prompt).toBe("ターン2です");
@@ -550,8 +542,8 @@ describe("runSweep (codex)", () => {
     expect(readHistory()).toHaveLength(3);
   });
 
-  // 3. 2回目の sweep → 新規ゼロ(カーソル去重)。
-  it("3. a second sweep finds nothing new (cursor dedup)", async () => {
+  // 3. 2回目もcursorを捨てて同じ3件を置換再生成する。
+  it("3. a second sweep rebuilds the same codex records without duplication", async () => {
     placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
 
     await sweep([]);
@@ -559,14 +551,12 @@ describe("runSweep (codex)", () => {
 
     const { code, output } = await sweep([]);
     expect(code).toBe(0);
-    expect(output).toContain("新規はありませんでした");
-    expect(output).not.toContain("Codex:");
+    expect(output).toContain("Codex: 3 ターン");
     expect(readHistory()).toHaveLength(3);
   });
 
-  // 4. hook との相互運用: hook(aggregateCodexTurn)が既に全消費した状態を cursors.json に用意しておく →
-  //    sweep は拾わない(先に sweep しない)。
-  it("4. does not re-ingest a rollout already consumed by the hook cursor", async () => {
+  // 4. hook cursorがEOFでも、sweepはcursorを捨てて先頭から再生成する。
+  it("4. ignores a hook cursor and rebuilds the rollout from the beginning", async () => {
     const dest = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
     // aggregateCodexTurn がウィンドウ全体を消費したときの newCursor 相当を書いておく:
     //   offset = ファイル全長 / codexTotals = 最後に観測した total / lastTs = 最後のイベント時刻。
@@ -580,14 +570,13 @@ describe("runSweep (codex)", () => {
 
     const { code, output } = await sweep([]);
     expect(code).toBe(0);
-    expect(output).toContain("新規はありませんでした");
-    expect(output).not.toContain("Codex:");
-    expect(readHistory()).toHaveLength(0);
+    expect(output).toContain("Codex: 1 ターン");
+    expect(readHistory()).toHaveLength(1);
   });
 
-  // 5. --days 0 相当の古いドラフト除外(取り込まれないがカーソルは進み、2回目も取り込まれない)。
+  // 5. --days 0は期間外を保存しないが、制限なしsweepで全期間を戻せる。
   //    実行時刻に依存しないよう、multiturn の日付を過去(2020)へずらした確定的な「古い」rollout を使う。
-  it("5. --days 0 drops old codex drafts but still advances the cursor (no revival)", async () => {
+  it("5. --days 0 limits codex history and a full sweep restores it", async () => {
     const dir = join(codexHomeDir, "sessions", "2026", "07", "10");
     mkdirSync(dir, { recursive: true });
     const dest = join(dir, NAME_MULTITURN);
@@ -601,34 +590,34 @@ describe("runSweep (codex)", () => {
 
     const { code, output } = await sweep(["--days", "0"]);
     expect(code).toBe(0);
-    expect(output).toContain("新規はありませんでした");
+    expect(output).toMatch(/(?:新規|再生成対象).*ありません/);
     expect(output).not.toContain("Codex:");
     expect(readHistory()).toHaveLength(0);
     // 古いターンでもカーソルは進む(ウィンドウ全体消費)。
     expect(existsSync(cursorsFile())).toBe(true);
 
-    // 制限なしで再実行してもカーソルが進んでいるため復活しない。
+    // 制限なしsweepはcursorを捨てて先頭から復活させる。
     const again = await sweep([]);
-    expect(again.output).toContain("新規はありませんでした");
-    expect(readHistory()).toHaveLength(0);
+    expect(again.output).toContain("Codex: 3 ターン");
+    expect(readHistory()).toHaveLength(3);
   });
 
-  // 6. active guard: mtime 直近のファイルはスキップ(カーソルも進めない)。--include-active で取り込まれる。
-  it("6. skips a recently-modified rollout (active guard); --include-active ingests it", async () => {
+  // 6. active rolloutも既定で処理し、旧--include-activeは拒否する。
+  it("6. ingests a recently-modified rollout by default and rejects --include-active", async () => {
     const dest = placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);
     const now = new Date();
     utimesSync(dest, now, now); // 「今まさに書かれている」状態を模す
 
     const first = await sweep([]);
     expect(first.code).toBe(0);
-    expect(first.output).toContain("スキップ: 1 transcript"); // スキップ件数は既存表示に合算される
-    expect(first.output).not.toContain("Codex:");
-    expect(readHistory()).toHaveLength(0);
-    expect(existsSync(cursorsFile())).toBe(false); // カーソル未更新 = 後続の hook/sweep が拾える
+    expect(first.output).toContain("Codex: 3 ターン");
+    expect(first.output).not.toContain("スキップ:");
+    expect(readHistory()).toHaveLength(3);
 
-    // --include-active でガードを解除すると取り込まれる。
+    const before = readFileSync(historyFile(), "utf8");
     const second = await sweep(["--include-active"]);
-    expect(second.output).toContain("Codex: 3 ターン");
+    expect(second.code).toBe(1);
+    expect(readFileSync(historyFile(), "utf8")).toBe(before);
     expect(readHistory()).toHaveLength(3);
   });
 
@@ -650,7 +639,7 @@ describe("runSweep (codex)", () => {
 
   // 8. Claude ルート不在でも Codex が走査可能なら、警告1行を出して Codex のみ走査する(exit 0)。
   //    旧挙動は「ルート不在 → 即 return 1」だったが、Codex 専用ユーザー(~/.claude/projects を
-  //    持たない)の backfill を成立させるため、両方走査不能のときだけエラーにする意味論へ変更した
+  //    持たない)の全再生成を成立させるため、両方走査不能のときだけエラーにする意味論へ変更した
   //    (オーケストレーター認可)。
   it("8. sweeps Codex-only with a warning when the Claude projects root is missing", async () => {
     placeCodexRollout("rollout-multiturn.jsonl", NAME_MULTITURN);

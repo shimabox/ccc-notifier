@@ -638,7 +638,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
   });
 
   // ---- 11. sweep: dry-run はサマリのみ、本実行で ingest:"sweep" の履歴が入る ----
-  it('11. sweep: --dry-run prints a summary without writing, then a real run backfills ingest:"sweep" history', async () => {
+  it('11. sweep: --dry-run previews without writing, then a real run regenerates ingest:"sweep" history', async () => {
     // 走査対象 = CCCN_CLAUDE_PROJECTS(projectsDir)/proj/session.jsonl(transcript-basic フィクスチャ)。
     const dry = await runCli(["sweep", "--dry-run"], { env: sb.env });
     expect(dry.code).toBe(0);

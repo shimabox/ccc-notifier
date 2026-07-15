@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getUsdJpy } from '../src/fx';
-import type { Config } from '../src/types';
+import { DEFAULT_CONFIG, type Config } from '../src/types';
 
 function makeConfig(fxOverrides?: Partial<Config['fx']>): Config {
   return {
@@ -108,6 +108,19 @@ describe('getUsdJpy', () => {
     expect(result.source).toBe('fixed');
     expect(result.rate).toBe(152);
     expect(typeof result.fetchedAt).toBe('string');
+  });
+
+  it('5a. 既定configで両方失敗+キャッシュ無しなら160円を最終fallbackに使う', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('down'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await getUsdJpy(structuredClone(DEFAULT_CONFIG), cacheDir);
+
+    expect(result).toEqual({
+      rate: 160,
+      source: 'fixed',
+      fetchedAt: expect.any(String),
+    });
   });
 
   it('6. 1次がタイムアウト相当(AbortError)でも2次へ進む', async () => {

@@ -43,7 +43,7 @@ beforeEach(() => {
   process.env.CCCN_HOME = tmpHome;
   process.env.CCCN_DRY_RUN = "1"; // 実通知せず last-notify.json に書き出す
 
-  // 誤って実ネットワークに出ない保険。fx はフォールバックで fixed(fallbackRate=150)になる。
+  // 誤って実ネットワークに出ない保険。config/cache不在なので既定の fixed(fallbackRate=160)になる。
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
 
   transcriptPath = join(tmpHome, "transcript.jsonl");
@@ -186,12 +186,12 @@ describe("runTrack", () => {
     const rec = rows[0];
 
     expect(rec.costUSD).toBeCloseTo(0.267, 10);
-    expect(rec.costJPY).toBeCloseTo(40.05, 8);
+    expect(rec.costJPY).toBeCloseTo(42.72, 8);
     expect(rec.apiCalls).toBe(2);
     expect(rec.models).toEqual(["claude-fable-5", "claude-haiku-4-5"]);
     expect(rec.prompt).toBe("テスト用プロンプトです");
     expect(rec.fxSource).toBe("fixed");
-    expect(rec.fxRate).toBe(150);
+    expect(rec.fxRate).toBe(160);
     expect(rec.sessionId).toBe("sess-1");
     expect(rec.project).toBe("/tmp/proj");
     expect(rec.gitBranch).toBe("main");
@@ -215,7 +215,7 @@ describe("runTrack", () => {
 
     const notify = JSON.parse(readFileSync(lastNotifyFile(), "utf8"));
     expect(notify.os.title).toContain("$0.267");
-    expect(notify.os.title).toContain("¥40");
+    expect(notify.os.title).toContain("¥43");
     expect(notify.os.title).toContain("API換算");
   });
 
@@ -796,7 +796,7 @@ describe("runTrack — codex", () => {
 
     expect(rec.source).toBe("codex");
     expect(rec.models).toEqual(["gpt-5.5"]);
-    // builtin gpt-5.5(input $5/M, output $30/M, cacheRead $0.5/M)・fx はフォールバック(fixed 150)。
+    // builtin gpt-5.5(input $5/M, output $30/M, cacheRead $0.5/M)・fx は既定フォールバック(fixed 160)。
     expect(rec.costUSD).toBeCloseTo(0.064106, 6);
     expect(rec.prompt).toBe("1+1は？");
     expect(rec.subagents).toBeUndefined();
@@ -804,7 +804,7 @@ describe("runTrack — codex", () => {
     expect(rec.project).toBe("/home/user/proj-a");
     expect(rec.apiCalls).toBe(1);
     expect(rec.fxSource).toBe("fixed");
-    expect(rec.fxRate).toBe(150);
+    expect(rec.fxRate).toBe(160);
     expect(rec.tokens).toEqual({
       input: 12280,
       output: 7,

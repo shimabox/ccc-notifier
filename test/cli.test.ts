@@ -131,6 +131,7 @@ describe("main", () => {
     expect(code).toBe(0);
     expect(output).toContain("Usage");
     expect(output).toContain("dashboard [--all|--days N]");
+    expect(output).toContain("sweep [--dry-run] [--days N]");
   });
 });
 
@@ -476,7 +477,7 @@ describe("main sweep", () => {
     // sweep が実 ~/.codex を読まないよう隔離(2026-07-10)。存在しないパスで detectCodex() を偽にし、
     // 実マシンの rollout(数百件)が history に混入して件数アサーションが壊れるのを防ぐ。
     process.env.CCCN_CODEX_HOME = join(tmpHome, "no-codex");
-    // 実ネットワークに出ない保険(単価 builtin / fx fixed 150 に決定的にフォールバック)。
+    // 実ネットワークに出ない保険(単価 builtin / fx fixed 160 に決定的にフォールバック)。
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 
     mkdirSync(join(projectsRoot, "projA"), { recursive: true });
@@ -505,6 +506,11 @@ describe("main sweep", () => {
     const { code, output } = await captureLogs(() => main(["sweep", "--dry-run"]));
 
     expect(code).toBe(0);
+    expect(output).toMatch(/単価.*為替/);
+    expect(output).toMatch(/走査開始.*Claude project 1.*Codex rollout 0/i);
+    expect(output).toContain("走査完了");
+    expect(output).not.toMatch(/lock.*取得/i);
+    expect(output).not.toMatch(/(?:dashboard|ダッシュボード).*生成開始/i);
     expect(output).toContain("dry-run: 書き込みは行っていません");
     expect(output).toContain("走査:");
     expect(existsSync(join(tmpHome, "history.jsonl"))).toBe(false);
