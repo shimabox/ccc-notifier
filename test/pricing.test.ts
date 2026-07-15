@@ -284,7 +284,7 @@ describe('loadPriceTable', () => {
     };
     await fs.writeFile(
       path.join(cacheDir, 'pricing.json'),
-      JSON.stringify({ fetchedAt: staleFetchedAt, table: { 'claude-sonnet-4-6-20260101': staleSonnet } }),
+      JSON.stringify({ fetchedAt: staleFetchedAt, table: { 'anthropic/claude-sonnet-4-6-20260101': staleSonnet } }),
       'utf8',
     );
 
@@ -295,6 +295,31 @@ describe('loadPriceTable', () => {
     expect(resolvePrice('claude-sonnet-4-6-20260101', table)).toEqual(
       builtinPriceTable()['claude-sonnet-4-6'],
     );
+    expect(table['anthropic/claude-sonnet-4-6-20260101']).toBeUndefined();
+  });
+
+  it('(d1a) fresh cache alias overrides the matching builtin canonical model', async () => {
+    const freshFetchedAt = new Date().toISOString();
+    const freshAlias = {
+      input: 101,
+      output: 202,
+      cacheWrite5m: 303,
+      cacheWrite1h: 404,
+      cacheRead: 505,
+      source: 'litellm' as const,
+    };
+    await fs.writeFile(
+      path.join(cacheDir, 'pricing.json'),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'anthropic/claude-sonnet-4-6-20260101': freshAlias } }),
+      'utf8',
+    );
+
+    const table = await loadPriceTable(cacheDir, { offline: true });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(table['claude-sonnet-4-6']).toEqual(freshAlias);
+    expect(table['anthropic/claude-sonnet-4-6-20260101']).toBeUndefined();
+    expect(resolvePrice('anthropic.claude-sonnet-4-6[1m]', table)).toEqual(freshAlias);
   });
 
   it('(d1b) Sonnet 5 date-aware builtin wins even over a fresh cached price', async () => {
@@ -309,13 +334,36 @@ describe('loadPriceTable', () => {
     };
     await fs.writeFile(
       path.join(cacheDir, 'pricing.json'),
-      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'claude-sonnet-5-20260617': wrongSonnet } }),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'anthropic/claude-sonnet-5-20260617': wrongSonnet } }),
       'utf8',
     );
 
     const table = await loadPriceTable(cacheDir, { offline: true });
 
     expect(table['claude-sonnet-5']).toEqual(builtinPriceTable()['claude-sonnet-5']);
+    expect(table['anthropic/claude-sonnet-5-20260617']).toBeUndefined();
+  });
+
+  it('(d1c) fresh unknown model remains exact-match only', async () => {
+    const freshFetchedAt = new Date().toISOString();
+    const exactUnknown = {
+      input: 7,
+      output: 8,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 1,
+      source: 'litellm' as const,
+    };
+    await fs.writeFile(
+      path.join(cacheDir, 'pricing.json'),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'gpt-5.6-sol': exactUnknown } }),
+      'utf8',
+    );
+
+    const table = await loadPriceTable(cacheDir, { offline: true });
+
+    expect(resolvePrice('gpt-5.6-sol', table)).toEqual(exactUnknown);
+    expect(resolvePrice('gpt-5.6-sol-preview', table)).toBeNull();
   });
 
   it('(d2) offline:true with no cache present returns builtin only', async () => {

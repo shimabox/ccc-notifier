@@ -171,19 +171,46 @@ function isCacheFresh(fetchedAt: string): boolean {
  * - fresh cache: LiteLLM を優先して新しい単価を反映する。
  * - stale cache: 未知モデルの補完には使うが、既知モデルは builtin を優先する。
  * - Sonnet 5: 日付境界を builtin が管理するため、cache の鮮度にかかわらず builtin を優先する。
+ *
+ * provider prefix / 日付suffixなどraw keyが異なっても、normalize後に同じモデルなら
+ * builtin側のcanonical keyへ集約する。返すtableには同じ正規化IDの別名を残さず、
+ * resolvePriceの走査順で優先順位が逆転しないようにする。
  */
 function mergePriceTables(builtin: PriceTable, cached: PriceTable, fresh: boolean): PriceTable {
-  const builtinIds = new Set(Object.keys(builtin).map(normalizeModelId));
-  const safeCached: PriceTable = {};
+  const merged: PriceTable = { ...builtin };
+  const builtinKeyById = new Map<string, string>();
+  for (const rawKey of Object.keys(builtin)) {
+    const normalized = normalizeModelId(rawKey);
+    if (normalized.length > 0) builtinKeyById.set(normalized, rawKey);
+  }
+
+  // cache内だけで同じ正規化IDのaliasが複数ある場合も、最後の1件へ集約する。
+  const cachedKeyById = new Map<string, string>();
   for (const [model, modelPrice] of Object.entries(cached)) {
     const normalized = normalizeModelId(model);
+    if (normalized.length === 0) continue;
     // Sonnet 5の期間境界と、stale cacheの既知モデルは、
-    // 日付付きalias等でもbuiltinより先に解決させない。
+    // provider prefix・日付付きalias等でもbuiltinより先に解決させない。
     if (normalized === 'claude-sonnet-5') continue;
-    if (!fresh && builtinIds.has(normalized)) continue;
-    safeCached[model] = modelPrice;
+
+    const builtinKey = builtinKeyById.get(normalized);
+    if (builtinKey !== undefined) {
+      if (fresh) merged[builtinKey] = modelPrice;
+      continue;
+    }
+
+    const priorCachedKey = cachedKeyById.get(normalized);
+    if (priorCachedKey !== undefined && priorCachedKey !== model) delete merged[priorCachedKey];
+    // JSON cache由来のモデルIDをdata keyとして扱う。`__proto__`でもprototype setterを起動しない。
+    Object.defineProperty(merged, model, {
+      value: modelPrice,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    cachedKeyById.set(normalized, model);
   }
-  return fresh ? { ...builtin, ...safeCached } : { ...safeCached, ...builtin };
+  return merged;
 }
 
 function toFiniteNumber(v: unknown): number | null {

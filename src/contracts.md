@@ -10,7 +10,7 @@
 - `resolvePrice(modelId: string, table: PriceTable): ModelPrice | null`
 - `computeCost(main: UsageByModel, sidechain: UsageByModel, table: PriceTable): CostBreakdown`
 - `resolvePrice`はprovider prefix / 日付suffix / `[1m]` を正規化した後の完全一致だけを採用し、新版モデルを似た名前の古い単価へprefix一致させない。
-- Sonnet 5のbuiltinは2026-08-31まで導入価格、2026-09-01 00:00 UTC以降は通常価格。fresh cacheでもこの日付判定を上書きさせず、stale cacheは未知モデルの補完にだけ使い、既知builtinを上書きしない。
+- fresh cacheはprovider prefix・日付suffix等を除いた正規化ID単位で既知builtinを上書きする。Sonnet 5のbuiltinは2026-08-31まで導入価格、2026-09-01 00:00 UTC以降は通常価格とし、fresh cacheでもこの日付判定を上書きさせない。stale cacheは未知モデルの補完にだけ使い、既知builtinを上書きしない。
 - Stop hookは`offline:true`を維持し、単価表のネットワーク取得を行わない。通常`init`、`doctor`、`sweep`をbest-effortのcache更新点とし、既存configに対する素の`init --yes --codex`の限定移行ではcacheを変更しない。
 
 ## src/fx.ts (T3)
