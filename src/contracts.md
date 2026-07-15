@@ -5,10 +5,13 @@
   - 新規 assistant usage が 0 件なら null
 
 ## src/pricing.ts (T2)
-- `builtinPriceTable(): PriceTable`
+- `builtinPriceTable(now?: Date): PriceTable`
 - `loadPriceTable(cacheDir: string, opts?: { offline?: boolean }): Promise<PriceTable>`
 - `resolvePrice(modelId: string, table: PriceTable): ModelPrice | null`
 - `computeCost(main: UsageByModel, sidechain: UsageByModel, table: PriceTable): CostBreakdown`
+- `resolvePrice`はprovider prefix / 日付suffix / `[1m]` を正規化した後の完全一致だけを採用し、新版モデルを似た名前の古い単価へprefix一致させない。
+- Sonnet 5のbuiltinは2026-08-31まで導入価格、2026-09-01 00:00 UTC以降は通常価格。fresh cacheでもこの日付判定を上書きさせず、stale cacheは未知モデルの補完にだけ使い、既知builtinを上書きしない。
+- Stop hookは`offline:true`を維持し、単価表のネットワーク取得を行わない。通常`init`、`doctor`、`sweep`をbest-effortのcache更新点とし、既存configに対する素の`init --yes --codex`の限定移行ではcacheを変更しない。
 
 ## src/fx.ts (T3)
 - `getUsdJpy(cfg: Config, cacheDir: string): Promise<FxResult>`
@@ -386,6 +389,7 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   `gpt-5.5`(5, 30, cacheRead 0.5)/ `gpt-5.1` `gpt-5` `gpt-5-codex` `gpt-5.1-codex`(1.25, 10, 0.125)/ `o3`(2, 8, 0.5)
 - LiteLLM 取り込み: 既存 claude フィルタに加え、`litellm_provider === 'openai'` かつキーが `/^(gpt-|o3($|-)|codex-)/` に一致し
   `input_cost_per_token`+`output_cost_per_token` を持つエントリを採用。`cache_read_input_token_cost` → cacheRead、write 系 0
+- モデル単価は正規化後の完全一致のみ。例えば未登録の`gpt-5.6-sol`を`gpt-5`の単価で計算せず、unknown modelとして0円扱いにする。
 - `modelDisplayName`: `gpt-5.5-codex → GPT-5.5 Codex` / `gpt-5-codex → GPT-5 Codex` / `gpt-5.5 → GPT-5.5` /
   `o3 → o3`。一般規則: `gpt` プレフィックスを `GPT` に、`-codex` サフィックスを ` Codex` に、その他ハイフン区切りは既存 claude 系の流儀に準拠
 

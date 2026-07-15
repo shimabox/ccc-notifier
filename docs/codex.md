@@ -106,11 +106,11 @@ backupは作りません。元JSONLの消失・移動・破損行は復元でき
 
 計算方法や「概算値である」という位置づけは Claude Code と同じです。詳しくは [金額の意味](cost.md) を参照してください。ChatGPT Plus / Pro のような**定額プラン**を使っている場合、表示される金額は実際の請求額ではなく「もし従量課金 API で同じやり取りをしたらいくらか」という**参考換算値**です(通知先頭の「API換算」ラベル)。
 
-単価は Anthropic 系と同じ仕組み(内蔵表 + [LiteLLM](https://github.com/BerriAI/litellm) による自動更新)で管理されます。内蔵表には次のモデルの単価が入っています。
+単価は Anthropic 系と同じ仕組み(内蔵表 + [LiteLLM](https://github.com/BerriAI/litellm) のキャッシュ)で管理されます。通常の`init`、`doctor`、`sweep`がキャッシュを更新し、Stop hookはネットワーク取得を行いません。内蔵表には次のモデルの単価が入っています。
 
 - `gpt-5.5` / `gpt-5.1` / `gpt-5` / `gpt-5-codex` / `gpt-5.1-codex` / `o3`
 
-これ以外の新しいモデルも、LiteLLM 側にレートが公開され次第、自動更新で追従します(取得できない未知モデルは通知・`doctor` に unknown model として表示されます)。
+これ以外の新しいモデルは、LiteLLM側に完全に一致するモデルIDのレートがある場合だけ計算します。似た名前の古いモデル単価は使わず、取得できない未知モデルは通知・`doctor`に unknown model として表示します。
 
 ## 制限 / Limitations
 

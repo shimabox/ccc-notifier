@@ -132,7 +132,7 @@ function stdinForMain(): string {
   });
 }
 
-// 新しい SA 行(別 message.id / requestId)。sonnet-5 output 1000 → 0.015 USD。
+// 新しい SA 行(別 message.id / requestId)。sonnet-4-6 output 1000 → 0.015 USD。
 const NEW_SA_LINE = JSON.stringify({
   parentUuid: "sa2",
   isSidechain: true,
@@ -145,7 +145,7 @@ const NEW_SA_LINE = JSON.stringify({
     id: "msg_SA2",
     type: "message",
     role: "assistant",
-    model: "claude-sonnet-5",
+    model: "claude-sonnet-4-6",
     content: [{ type: "text", text: "追加のサブエージェント応答" }],
     usage: {
       input_tokens: 0,
@@ -222,13 +222,13 @@ describe("runSweep", () => {
     const t2 = rows[1];
     expect(t2.prompt).toBe("ターン2のプロンプト");
     expect(t2.ts).toBe("2026-07-06T10:01:05.000Z");
-    expect(t2.models).toEqual(["claude-sonnet-5"]);
+    expect(t2.models).toEqual(["claude-sonnet-4-6"]);
     expect(t2.costUSD).toBeCloseTo(0.015, 10);
-    expect(t2.costByModel!["claude-sonnet-5"]).toBeCloseTo(0.015, 10);
+    expect(t2.costByModel!["claude-sonnet-4-6"]).toBeCloseTo(0.015, 10);
     expect(t2.ingest).toBe("sweep");
     expect(t2.subagents).toBeDefined();
     expect(t2.subagents!.costUSD).toBeCloseTo(0.033, 10);
-    expect(t2.subagents!.costByModel["claude-sonnet-5"]).toBeCloseTo(0.033, 10);
+    expect(t2.subagents!.costByModel["claude-sonnet-4-6"]).toBeCloseTo(0.033, 10);
     expect(t2.subagents!.apiCalls).toBe(1);
     expect(t2.subagents!.agentFiles).toBe(1);
 
@@ -274,7 +274,7 @@ describe("runSweep", () => {
       message: {
         id: `msg-${id}`,
         role: "assistant",
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-4-6",
         usage: {
           input_tokens: 0,
           cache_read_input_tokens: 0,

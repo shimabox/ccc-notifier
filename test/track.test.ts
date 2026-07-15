@@ -600,11 +600,11 @@ describe("runTrack", () => {
 
 // ============ サブエージェント usage の取り込み ============
 // transcript の兄弟 <transcript(.jsonl除去)>/subagents/agent-*.jsonl を増分集計し、
-// record.subagents(GOLDEN: costUSD 0.033 / claude-sonnet-5 / apiCalls 1 / agentFiles 1)に記録する。
+// record.subagents(GOLDEN: costUSD 0.033 / claude-sonnet-4-6 / apiCalls 1 / agentFiles 1)に記録する。
 
 describe("runTrack — subagents", () => {
   // 1. SA を集計して record.subagents に GOLDEN 値どおり記録する(メインは不変)。
-  it("1. collects subagent usage into record.subagents (GOLDEN 0.033 / sonnet-5 / 1 call / 1 file)", async () => {
+  it("1. collects subagent usage into record.subagents (GOLDEN 0.033 / sonnet-4-6 / 1 call / 1 file)", async () => {
     placeSubagent();
 
     await runTrack(stdinFor(transcriptPath));
@@ -618,7 +618,7 @@ describe("runTrack — subagents", () => {
 
     expect(rec.subagents).toBeDefined();
     expect(rec.subagents!.costUSD).toBeCloseTo(0.033, 10);
-    expect(rec.subagents!.costByModel["claude-sonnet-5"]).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.costByModel["claude-sonnet-4-6"]).toBeCloseTo(0.033, 10);
     expect(rec.subagents!.apiCalls).toBe(1);
     expect(rec.subagents!.agentFiles).toBe(1);
     expect(rec.subagents!.tokens).toEqual({
@@ -678,7 +678,7 @@ describe("runTrack — subagents", () => {
     };
     appendFileSync(transcriptPath, "\n" + JSON.stringify(newMain) + "\n", "utf8");
 
-    // 新しい SA 行(別 message.id / requestId)。sonnet-5 output 1000 → 0.015 USD。
+    // 新しい SA 行(別 message.id / requestId)。sonnet-4-6 output 1000 → 0.015 USD。
     const newSa = {
       parentUuid: "sa2",
       isSidechain: true,
@@ -691,7 +691,7 @@ describe("runTrack — subagents", () => {
         id: "msg_SA2",
         type: "message",
         role: "assistant",
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-4-6",
         content: [{ type: "text", text: "追加のサブエージェント応答" }],
         usage: {
           input_tokens: 0,

@@ -614,19 +614,19 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const rec = rows[0];
     // メインは GOLDEN どおり(SA は混入しない)。
     expect(rec.costUSD).toBeCloseTo(0.267, 10);
-    // SA 枠(GOLDEN: 0.033 / sonnet-5 / 1 call / 1 file)。
+    // SA 枠(GOLDEN: 0.033 / sonnet-4-6 / 1 call / 1 file)。
     expect(rec.subagents).toBeDefined();
     expect(rec.subagents!.costUSD).toBeCloseTo(0.033, 10);
-    expect(rec.subagents!.costByModel["claude-sonnet-5"]).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.costByModel["claude-sonnet-4-6"]).toBeCloseTo(0.033, 10);
     expect(rec.subagents!.apiCalls).toBe(1);
     expect(rec.subagents!.agentFiles).toBe(1);
 
-    // dashboard を生成すると、SA のモデル(Sonnet 5)と「うちサブエージェント」が HTML に現れる。
+    // dashboard を生成すると、SA のモデル(Sonnet 4.6)と「うちサブエージェント」が HTML に現れる。
     const dash = await runCli(["dashboard", "--no-open"], { env: sb.env });
     expect(dash.code).toBe(0);
     expect(dash.stdout).toContain(join(sb.cccnHome, "report.html"));
     const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
-    expect(html).toContain("Sonnet 5");
+    expect(html).toContain("Sonnet 4.6");
     expect(html).toContain("うちサブエージェント");
 
     // 明示した --all だけが canonical 全履歴版と日次stateを更新する。

@@ -25,6 +25,7 @@ import type { TurnRecord } from "./types";
 import { configFilePath, paths, readConfig } from "./store";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
+import { loadPriceTable } from "./pricing";
 import { detectCodex } from "./codex/env";
 import { codexHooksFile, registerCodexHook, removeCodexHook } from "./codex/setup";
 import type { CodexHookResult } from "./codex/setup";
@@ -564,6 +565,12 @@ export async function runInit(argv: string[]): Promise<number> {
   if (installCodex) {
     codexResult = registerCodexHook(process.execPath, resolveCliPath());
   }
+
+  // 4.6. 通常 init は単価cacheの更新点でもある。Stop hookは応答を待たせないため
+  //      offline読取だけを行うので、明示的なセットアップ時にbest-effortで最新化する。
+  //      loadPriceTableは取得失敗時にcache/builtinへ倒れてthrowしない。
+  //      Codex hook限定移行は上でreturn済みのため、cacheを含む既存データへ触れない。
+  await loadPriceTable(cccn.cacheDir, { offline: false });
 
   // 5. テスト通知(CCCN_DRY_RUN 下では last-notify.json に書かれるだけ)。
   //    OS が有効なら OS 通知を、Slack を設定していれば Slack 通知も送り、その場で設定を確認できるようにする。

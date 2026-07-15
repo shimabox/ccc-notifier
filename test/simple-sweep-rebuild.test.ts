@@ -441,7 +441,7 @@ describe("sweep reset and regeneration", () => {
           parentUuid: "m-u3", isSidechain: false, cwd: "/tmp/proj", sessionId: "sess-M", gitBranch: "main",
           type: "assistant", requestId: "req_M3",
           message: {
-            id: "msg_M3", role: "assistant", model: "claude-sonnet-5",
+            id: "msg_M3", role: "assistant", model: "claude-sonnet-4-6",
             usage: {
               input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 100,
               cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
