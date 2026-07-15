@@ -477,7 +477,7 @@ describe("main sweep", () => {
     // sweep が実 ~/.codex を読まないよう隔離(2026-07-10)。存在しないパスで detectCodex() を偽にし、
     // 実マシンの rollout(数百件)が history に混入して件数アサーションが壊れるのを防ぐ。
     process.env.CCCN_CODEX_HOME = join(tmpHome, "no-codex");
-    // 実ネットワークに出ない保険(単価 builtin / fx fixed 150 に決定的にフォールバック)。
+    // 実ネットワークに出ない保険(単価 builtin / fx fixed 160 に決定的にフォールバック)。
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 
     mkdirSync(join(projectsRoot, "projA"), { recursive: true });

@@ -55,7 +55,7 @@ beforeEach(() => {
   process.env.CCCN_CLAUDE_PROJECTS = projectsRoot;
   process.env.CCCN_DRY_RUN = "1"; // track の通知は last-notify.json へ
 
-  // 実ネットワークに出ない保険。単価は builtin、fx は fixed(150)にフォールバックし決定的になる。
+  // 実ネットワークに出ない保険。config/cache不在なので単価は builtin、fx は既定の fixed(160)になる。
   vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
 
   mainPath = join(projectsRoot, "projA", "t1.jsonl");
@@ -212,8 +212,8 @@ describe("runSweep", () => {
     expect(t1.ts).toBe("2026-07-06T10:00:05.000Z");
     expect(t1.models).toEqual(["claude-fable-5"]);
     expect(t1.costUSD).toBeCloseTo(0.005, 10);
-    expect(t1.costJPY).toBeCloseTo(0.75, 10); // 0.005 × 150
-    expect(t1.fxRate).toBe(150);
+    expect(t1.costJPY).toBeCloseTo(0.8, 10); // 0.005 × 160
+    expect(t1.fxRate).toBe(160);
     expect(t1.ingest).toBe("sweep");
     expect(t1.sessionId).toBe("sess-M");
     expect(t1.project).toBe("/tmp/proj");
@@ -237,9 +237,9 @@ describe("runSweep", () => {
 
     // summary の totalUSD はメイン基準(0.005 + 0.015 = 0.020)。SA は含めない。
     expect(output).toContain("$0.020");
-    // summary.subagentsUSD = 0.033 は別枠の1行としてコンソールに出る(¥ は fx.rate=150 換算)。
+    // summary.subagentsUSD = 0.033 は別枠の1行としてコンソールに出る(¥ は既定 fx.rate=160 換算)。
     expect(output).toContain(
-      `うちサブエージェント: ${formatUSD(0.033)}(${formatJPY(0.033 * 150)})`,
+      `うちサブエージェント: ${formatUSD(0.033)}(${formatJPY(0.033 * 160)})`,
     );
   });
 
@@ -331,7 +331,7 @@ describe("runSweep", () => {
     expect(code).toBe(0);
     // 元0.033 + 追記0.015 = 0.048を全再集計する。
     expect(output).toContain(
-      `うちサブエージェント: ${formatUSD(0.048)}(${formatJPY(0.048 * 150)})`,
+      `うちサブエージェント: ${formatUSD(0.048)}(${formatJPY(0.048 * 160)})`,
     );
 
     const rows = readHistory();
@@ -453,10 +453,10 @@ describe("runSweep (codex)", () => {
 
     const { code, output } = await sweep([]);
     expect(code).toBe(0);
-    // Codex 行は「うちサブエージェント」行と同じ $(¥)書式(¥ は fx.rate=150 換算)。
+    // Codex 行は「うちサブエージェント」行と同じ $(¥)書式(¥ は既定 fx.rate=160 換算)。
     // 0.0047 + 0.0123 + 0.0010125 = 0.0180125 USD。
     expect(output).toContain(
-      `Codex: 3 ターン ${formatUSD(0.0180125)}(${formatJPY(0.0180125 * 150)})`,
+      `Codex: 3 ターン ${formatUSD(0.0180125)}(${formatJPY(0.0180125 * 160)})`,
     );
     // Codex 分は総合計にも含まれる(このテストは Codex のみなので newRecords = 3)。
     expect(output).toContain("3 ターン");
@@ -472,7 +472,7 @@ describe("runSweep (codex)", () => {
       expect(r.gitBranch).toBeNull();
       expect(r.sidechainTokens).toBeNull();
       expect(r.subagents).toBeUndefined();
-      expect(r.fxRate).toBe(150);
+      expect(r.fxRate).toBe(160);
     }
 
     const [t1, t2, t3] = rows;
@@ -485,7 +485,7 @@ describe("runSweep (codex)", () => {
     expect(t1.tokens).toEqual({ input: 600, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 400 });
     expect(t1.costUSD).toBeCloseTo(0.0047, 10);
     expect(t1.costByModel!["gpt-5.5"]).toBeCloseTo(0.0047, 10);
-    expect(t1.costJPY).toBeCloseTo(0.0047 * 150, 10);
+    expect(t1.costJPY).toBeCloseTo(0.0047 * 160, 10);
 
     // t2: gpt-5.5 / {input:1400, cacheRead:1600, output:150}(B+C 合算・破損行はスキップ)/ cost 0.0123 / apiCalls 2。
     expect(t2.prompt).toBe("ターン2です");

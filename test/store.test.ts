@@ -123,6 +123,8 @@ describe("readConfig", () => {
   it("config.json が無ければ DEFAULT_CONFIG のディープコピーを返す", () => {
     const cfg = readConfig();
 
+    expect(DEFAULT_CONFIG.fx.fallbackRate).toBe(160);
+    expect(cfg.fx.fallbackRate).toBe(160);
     expect(cfg).toEqual(DEFAULT_CONFIG);
     expect(cfg).not.toBe(DEFAULT_CONFIG);
     expect(cfg.notify).not.toBe(DEFAULT_CONFIG.notify);
@@ -169,7 +171,7 @@ describe("readConfig", () => {
 
     const cfg = readConfig();
 
-    expect(cfg.fx).toEqual({ fallbackRate: DEFAULT_CONFIG.fx.fallbackRate, cacheHours: 24 });
+    expect(cfg.fx).toEqual({ fallbackRate: 160, cacheHours: 24 });
   });
 
   it("dashboard の一部だけ指定した場合、残りはデフォルト補完される", () => {

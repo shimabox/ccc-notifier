@@ -93,7 +93,7 @@ export interface Config {
   notify: { os: boolean; slack: SlackConfig | null };
   minNotifyUSD: number;                    // 既定 0
   costLabel: 'api_equivalent' | 'actual';  // 既定 'api_equivalent'
-  fx: { fallbackRate: number; cacheHours: number }; // 既定 150 / 12
+  fx: { fallbackRate: number; cacheHours: number }; // 既定 160 / 12
   includeDailyTotal: boolean;              // 既定 true
   monthlyBudgetUSD: number;                // 月の予算(USD)。0 で無効(既定 0)。ダッシュボードで当月の使用率を表示する
   dashboard: {
@@ -107,7 +107,7 @@ export const DEFAULT_CONFIG: Config = {
   notify: { os: true, slack: null },
   minNotifyUSD: 0,
   costLabel: 'api_equivalent',
-  fx: { fallbackRate: 150, cacheHours: 12 },
+  fx: { fallbackRate: 160, cacheHours: 12 },
   includeDailyTotal: true,
   monthlyBudgetUSD: 0,
   dashboard: { autoRegenerate: true, autoReloadSec: 30, days: 30 },

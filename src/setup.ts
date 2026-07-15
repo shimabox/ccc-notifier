@@ -123,8 +123,8 @@ function makeTestRecord(): TurnRecord {
     sidechainTokens: null,
     apiCalls: 1,
     costUSD: 0.01,
-    costJPY: 1.5,
-    fxRate: 150,
+    costJPY: 1.6,
+    fxRate: 160,
     fxSource: "fixed",
     prompt: "セットアップ完了テスト",
   };
