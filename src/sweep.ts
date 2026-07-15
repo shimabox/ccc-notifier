@@ -887,7 +887,7 @@ export async function runSweep(
   if (flags.rebuild && !flags.yes) {
     const confirmed = await (deps.confirm ?? p.confirm)({
       message:
-        "履歴(history)と取り込み位置(cursor)を削除し、backupを作らず、元JSONLから現在の金額とpromptを全再生成します。" +
+        "履歴(history)と取り込み位置(cursor)を削除し、backupを作らず、元JSONLから実行時点の単価・為替で全履歴とpromptを再生成します。" +
         "元のJSONLがない履歴は戻りません。続行しますか?",
       initialValue: false,
     });

@@ -208,7 +208,9 @@ describe("sweep --rebuild CLI contract", () => {
     expect(confirmation).toMatch(/履歴|history/i);
     expect(confirmation).toMatch(/取り込み位置|cursor/i);
     expect(confirmation).toMatch(/backup|バックアップ/i);
-    expect(confirmation).toMatch(/金額|cost/i);
+    expect(confirmation).toMatch(/金額|cost|単価/i);
+    expect(confirmation).toMatch(/実行時点.*単価.*為替/);
+    expect(confirmation).toMatch(/全履歴/);
     expect(confirmation).toMatch(/prompt|プロンプト/i);
     expect(confirmation).toMatch(/元.*JSONL|source/i);
   });

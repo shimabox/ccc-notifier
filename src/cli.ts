@@ -40,6 +40,11 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Backfill uncounted history (active sessions are skipped)",
   },
   {
+    cmd: "sweep --rebuild [--yes]",
+    ja: "履歴と取り込み位置を捨て、元JSONLから概算を全再生成",
+    en: "Discard history/cursors and rebuild estimates from source JSONL",
+  },
+  {
     cmd: "history <clear|redact> [--days N] [--yes]",
     ja: "履歴を削除(clear=レコードごと / redact=プロンプトのみ。--days で古い分だけ)",
     en: "Delete history (clear=records / redact=prompts only; --days limits to older)",

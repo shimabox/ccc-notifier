@@ -116,6 +116,7 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 | `report [--days N] [--json]` | 蓄積した履歴を集計してターミナルに表示(`--days` の既定は30、不正な値も30扱い)。`--json` で機械可読な出力 |
 | `dashboard [--all\|--days N] [--no-open] [--out <path>] [--refresh <sec>\|--no-refresh]` | 履歴を可視化した HTML ダッシュボードを生成してブラウザで開く(引数なしは設定期間の直近版 `report.html`、`--all` は全履歴版 `report-all.html`。詳細は [ダッシュボード](docs/dashboard.md)) |
 | `sweep [--dry-run] [--days N] [--include-active]` | 過去の未計上分(hook 導入前や後から完了したサブエージェント分)を一括で履歴に取り込む。ローカル走査のみで **Claude API を呼ばず料金ゼロ**・二重計上なし(詳細は [過去分の取り込み](docs/sweep.md)) |
+| `sweep --rebuild [--yes]` | 履歴・取り込み位置・自動生成ダッシュボードを捨て、手元のClaude/Codex JSONLから概算を全再生成。backupなし、`--yes`で確認省略(詳細と注意事項は [全再生成](docs/sweep.md#履歴を捨てて全再生成--rebuild)) |
 | `history <clear\|redact> [--days N] [--yes]` | 履歴(`history.jsonl`)を削除。`clear` はレコードごと、`redact` はプロンプト全文だけ消去。`--days N` で「N 日より前」だけ対象(詳細は [履歴の削除](docs/dashboard.md#履歴の削除--deleting-history)) |
 | `budget [<USD>]` | 月予算(USD)の表示/設定。金額省略で現在の予算と当月の使用率を表示、`budget 400` で設定、`budget 0` で解除(詳細は [月予算](docs/monthly-budget.md)) |
 | `mute [30m\|2h\|1d]` | 通知(OS/Slack)を一時停止する。期間省略で無期限、`30m`/`2h`/`1d` で期限付き。**停止中もコスト記録とダッシュボード更新は続きます**(詳細は [設定 / mute](docs/configuration.md#通知の一時停止と再開--pausing--resuming-notifications)) |
