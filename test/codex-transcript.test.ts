@@ -299,4 +299,36 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
     expect(r.cwd).toBe("/home/user/proj-a"); // turn_context.payload.cwd 由来
     expect(r.main).toEqual({ "gpt-5.5": buckets(12280, 4992, 7) });
   });
+
+  it("11. 完了ターン後の異モデルopen tailを独立ドラフトにする", async () => {
+    const f = join(dir, "rollout-open-tail.jsonl");
+    const lines = [
+      { timestamp: "2026-07-10T15:00:00.000Z", type: "session_meta", payload: { session_id: "open-tail", cwd: "/proj/root", source: "cli" } },
+      { timestamp: "2026-07-10T15:00:01.000Z", type: "turn_context", payload: { model: "gpt-5.6-sol", cwd: "/proj/root" } },
+      { timestamp: "2026-07-10T15:00:02.000Z", type: "event_msg", payload: { type: "user_message", message: "完了ターン" } },
+      { timestamp: "2026-07-10T15:00:03.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 50 } } } },
+      { timestamp: "2026-07-10T15:00:04.000Z", type: "event_msg", payload: { type: "task_complete" } },
+      { timestamp: "2026-07-10T15:01:00.000Z", type: "turn_context", payload: { model: "gpt-5.6-luna", cwd: "/proj/child" } },
+      { timestamp: "2026-07-10T15:01:01.000Z", type: "event_msg", payload: { type: "user_message", message: "進行中ターン" } },
+      { timestamp: "2026-07-10T15:01:02.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 1600, cached_input_tokens: 700, output_tokens: 80 } } } },
+    ];
+    writeFileSync(f, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+    const drafts = await splitIntoCodexTurnDrafts(f, null);
+    const whole = await aggregateCodexTurn(f, null);
+    expect(drafts).not.toBeNull();
+    expect(whole).not.toBeNull();
+    if (drafts === null || whole === null) return;
+
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0].agg.main).toEqual({ "gpt-5.6-sol": buckets(600, 400, 50) });
+    expect(drafts[0].agg.prompt).toBe("完了ターン");
+    expect(drafts[0].agg.cwd).toBe("/proj/root");
+    expect(drafts[1].agg.main).toEqual({ "gpt-5.6-luna": buckets(300, 300, 30) });
+    expect(drafts[1].agg.prompt).toBe("進行中ターン");
+    expect(drafts[1].agg.cwd).toBe("/proj/child");
+    expect(drafts.every((draft) => draft.isSubagentRollout === false)).toBe(true);
+    expect(sumMain(drafts.map((draft) => draft.agg))).toEqual(buckets(900, 700, 80));
+    expect(drafts[1].agg.newCursor).toEqual(whole.newCursor);
+  });
 });

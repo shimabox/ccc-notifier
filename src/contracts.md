@@ -292,6 +292,7 @@ source?: 'codex';  // 無し = Claude Code。ingest と同じ流儀
 interface CodexTurnDraft {
   agg: TurnAggregate;      // ターン1件分(下記規約で構築)
   endTs: string | null;    // そのターン最後のイベント timestamp(record.ts に使う)
+  isSubagentRollout: boolean; // session_meta.payload.source.subagent を持つ child rollout か
 }
 ```
 
@@ -319,7 +320,7 @@ interface CodexTurnDraft {
 - newCursor: `offset` = 処理済み末尾、`codexTotals` = prev(最後に観測した total_token_usage。フォールバック発生時も同じ)、
   `lastTs` = 最後のイベント timestamp、`lastUuid` = null、`seenMessageKeys` = []
 - `splitIntoCodexTurnDrafts` は同じウィンドウを `task_complete` 境界で分割し、**各セグメントに同じ逐次ステップ規約**を適用
-  (prev はセグメントを跨いで持ち回る。末尾に task_complete 後の token_count が残る場合は最後のドラフトに含める)。
+  (prev はセグメントを跨いで持ち回る。末尾に task_complete 後のusageが残る場合は、進行中ターン自身のmodel/prompt/cwdを持つ独立ドラフトにする)。
   **全ドラフトの acc 合計・適用後の newCursor は、同一ウィンドウに対する aggregateCodexTurn の結果と一致**(hook ↔ sweep 相互運用)
 
 ### src/codex/setup.ts / src/codex/subagent-store.ts (Gate D 準備)
@@ -431,6 +432,8 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - rollout列挙はdoctorとread-only helperを共有し、通常ファイル限定・symlink非追跡・深さ上限を一致させる。
 - 各ファイル: cursorなしで`splitIntoCodexTurnDrafts` → `--days`フィルタ(endTs基準・cursorは読取末尾まで進める) →
   TurnRecord(`source: 'codex'`, `ingest: 'sweep'`)。進行中rolloutも常にbest-effortで走査する
+- `session_meta.payload.source.subagent`を持つchild rolloutは、Codexサブエージェント料金未集計の仕様に合わせ、料金・履歴・cursorへ入れない。
+  `source`欠損・未知形式は通常rolloutとして維持する。doctorの最新単一rollout診断は従来どおり親/子未分類。
 - サマリーに Codex 分の件数/金額を1行追加(「Codex: N ターン $X」。0件なら出さない)
 
 ### src/dashboard.ts

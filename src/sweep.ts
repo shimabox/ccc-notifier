@@ -646,6 +646,9 @@ async function processCodexRolloutLocked(
   const drafts = await splitIntoCodexTurnDrafts(rolloutPath, cursor);
   // null = 読めない or 新規 usage なし。カーソルも進めない(進行中セッションを後で hook / 次回 sweep が拾う)。
   if (drafts === null || drafts.length === 0) return;
+  // Codex child rolloutは利用記録だけを扱い、料金は未集計という公開仕様に合わせる。
+  // source欠損・未知形式はrootとして維持し、将来形式の通常rolloutを誤って捨てない。
+  if (drafts[0].isSubagentRollout) return;
 
   // 各 draft → TurnRecord(--days より古いターンは捨てる。カーソルは最終ドラフトまで進めるので再走査しない)。
   const records: TurnRecord[] = [];

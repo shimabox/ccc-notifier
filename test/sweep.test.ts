@@ -477,6 +477,33 @@ function placeCodexRollout(fixtureBasename: string, fileName: string): string {
 }
 
 describe("runSweep (codex)", () => {
+  it("child rolloutを料金・履歴・cursorから除外し、rootと未知sourceは維持する", async () => {
+    const root = placeCodexRollout("rollout-basic.jsonl", "rollout-root.jsonl");
+    const child = placeCodexRollout("rollout-basic.jsonl", "rollout-child.jsonl");
+    const unknown = placeCodexRollout("rollout-basic.jsonl", "rollout-unknown.jsonl");
+
+    const childRaw = readFileSync(child, "utf8").replace(
+      '"source":"cli"',
+      '"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1","depth":1}}}',
+    );
+    writeFileSync(child, childRaw, "utf8");
+    const unknownRaw = readFileSync(unknown, "utf8").replace(
+      '"source":"cli"',
+      '"source":{"future_runtime":{"version":2}}',
+    );
+    writeFileSync(unknown, unknownRaw, "utf8");
+
+    const { code, output } = await sweep([]);
+
+    expect(code).toBe(0);
+    expect(output).toContain("Codex: 2 ターン");
+    expect(readHistory()).toHaveLength(2);
+    const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
+    expect(cursors[root]).toBeDefined();
+    expect(cursors[unknown]).toBeDefined();
+    expect(cursors[child]).toBeUndefined();
+  });
+
   it("51 rolloutでも25件単位だけ進捗を出し、1件ごとの冗長な出力をしない", async () => {
     for (let i = 0; i < 51; i++) {
       placeCodexRollout(

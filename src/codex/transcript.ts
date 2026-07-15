@@ -23,6 +23,7 @@ type CodexTotals = NonNullable<Cursor["codexTotals"]>;
 export interface CodexTurnDraft {
   agg: TurnAggregate; // ターン1件分(aggregateCodexTurn と同じ規約で構築)
   endTs: string | null; // そのターン最後のイベント timestamp(record の ts に使う)
+  isSubagentRollout: boolean; // session_meta.payload.source.subagent を持つ child rollout か
 }
 
 // ============ 小ヘルパー(src/transcript.ts と同一規則をローカルに複製) ============
@@ -144,6 +145,7 @@ interface WindowScan {
   prompt: string | null; // ウィンドウ内最後の user_message.message
   cwd: string | null; // 最後の turn_context.cwd → session_meta.cwd
   sessionId: string; // session_meta.session_id → ファイル名の uuid 部 → ""
+  isSubagentRollout: boolean; // child rollout は sweep の料金履歴へ入れないため呼び出し側へ伝える
   firstTs: string | null;
   lastTs: string | null;
   newOffset: number; // 処理済み末尾バイト(書きかけ行の行頭で止まる)
@@ -192,6 +194,7 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
   let windowTurnCtxCwd: string | null = null;
   let sessionMetaCwd: string | null = null;
   let sessionMetaSid: string | null = null;
+  let isSubagentRollout = false;
   let firstTs: string | null = null;
   let lastTs: string | null = null;
 
@@ -245,6 +248,8 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
       if (sid !== null) sessionMetaSid = sid;
       const c = strOrNull(payload.cwd);
       if (c !== null) sessionMetaCwd = c;
+      const source = payload.source;
+      if (isRecord(source) && Object.hasOwn(source, "subagent")) isSubagentRollout = true;
       return;
     }
     if (type === "turn_context") {
@@ -325,6 +330,7 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
     prompt: windowPrompt,
     cwd: windowTurnCtxCwd ?? sessionMetaCwd,
     sessionId: sessionMetaSid ?? sessionIdFromFilename(rolloutPath),
+    isSubagentRollout,
     firstTs,
     lastTs,
     newOffset,
@@ -386,24 +392,17 @@ export async function splitIntoCodexTurnDrafts(
   // usage を持つ確定セグメントだけがターンになる(ゼロのセグメントは境界ごと読み捨て)。
   const picked = scan.segments.filter((s) => !isZeroTotals(s.acc));
 
-  // 末尾(最後の task_complete 以降)に usage が残った場合:
-  //  - 確定ターンがあれば最後のドラフトに合算する(契約)。endTs も残りの最終イベントまで延ばす。
-  //  - 1つも無ければ(task_complete がまだ書かれていない進行中/中断セッション)残り全体を
-  //    1ターンとして返す。捨てると acc 合計が aggregateCodexTurn と食い違ってしまうため。
+  // 末尾(最後の task_complete 以降)に usage が残った場合は独立したドラフトにする。
+  // 直前の完了ターンへ混ぜると、進行中の次ターンでモデルが変わったときに前モデルの単価で
+  // 計算されるため。独立させても acc 合計と最終 cursor の不変条件は維持できる。
   if (scan.open !== null && !isZeroTotals(scan.open.acc)) {
-    const last = picked[picked.length - 1];
-    if (last !== undefined) {
-      addTotals(last.acc, scan.open.acc);
-      last.apiCalls += scan.open.apiCalls;
-      if (scan.open.endTs !== null) last.endTs = scan.open.endTs;
-    } else {
-      picked.push(scan.open);
-    }
+    picked.push(scan.open);
   }
   // scan.acc が非ゼロならその usage は必ずいずれかのセグメントにあるので、ここで picked は非空。
 
   const lastIndex = picked.length - 1;
   return picked.map((s, i) => ({
+    isSubagentRollout: scan.isSubagentRollout,
     agg: {
       sessionId: scan.sessionId, // session_meta はファイル先頭にしか無いので全ドラフト共通
       main: { [s.model ?? "unknown"]: totalsToBuckets(s.acc) },
