@@ -814,11 +814,10 @@ const APP_JS = `<script>
     lastRenderedGran = GRAN;
   }
 
-  // 週別hoverだけは、その週の内訳を金額の大きい順に読む。積み上げ順・色は
+  // hover内訳は、選択中の日/週/月における金額の大きい順に読む。積み上げ順・色は
   // slotOrderのまま固定し、同額もslotOrderで決定的に並べる。
-  function tooltipSlotOrder(bucket, gran){
+  function tooltipSlotOrder(bucket){
     var order = slotOrder.slice();
-    if(gran !== 'week') return order;
     var rank = {}; for(var i=0;i<slotOrder.length;i++){ rank[slotOrder[i]] = i; }
     order.sort(function(a, b){
       var diff = (bucket.bs[b] || 0) - (bucket.bs[a] || 0);
@@ -833,7 +832,7 @@ const APP_JS = `<script>
     var h = document.createElement('div'); h.className = 'tip-title';
     h.textContent = periodText(bucket.key, GRAN) + '  合計 ' + formatUSD(bucket.total) + '  ·  ' + bucket.turns + ' ターン';
     tip.appendChild(h);
-    var tipOrder = tooltipSlotOrder(bucket, GRAN);
+    var tipOrder = tooltipSlotOrder(bucket);
     for(var j=0;j<tipOrder.length;j++){
       var slot = tipOrder[j];
       var v = bucket.bs[slot] || 0;

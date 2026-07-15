@@ -288,16 +288,35 @@ describe("runDashboard — 標準シナリオ", () => {
     expect(html).toContain("通算");
   });
 
-  it("週別hoverのモデル内訳だけを週内金額の降順にし、同額は既存slot順に保つ", async () => {
+  it.each([
+    { granularity: "日別", bs: { "1": 0.1, "2": 0.3, "3": 0.2 }, expected: ["2", "3", "1"] },
+    { granularity: "週別", bs: { "1": 0.3, "2": 0.1, "3": 0.2 }, expected: ["1", "3", "2"] },
+    // 2と3は同額。既存slot順の2→3を維持する。
+    { granularity: "月別", bs: { "1": 0.1, "2": 0.3, "3": 0.3 }, expected: ["2", "3", "1"] },
+  ])("$granularity hoverのモデル内訳を期間内金額の降順にする", async ({ bs, expected }) => {
     seedStandard();
     await run(["--no-open"]);
     const html = readHtml();
 
-    expect(html).toContain("function tooltipSlotOrder(bucket, gran)");
-    expect(html).toContain("if(gran !== 'week') return order;");
-    expect(html).toContain("var diff = (bucket.bs[b] || 0) - (bucket.bs[a] || 0);");
-    expect(html).toContain("return diff !== 0 ? diff : rank[a] - rank[b];");
-    expect(html).toContain("var tipOrder = tooltipSlotOrder(bucket, GRAN);");
+    const start = html.indexOf("function tooltipSlotOrder(bucket){");
+    const end = html.indexOf("\n\n  function showTip", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const helperSource = html.slice(start, end);
+    const makeSorter = new Function(
+      "slotOrder",
+      `${helperSource}\nreturn tooltipSlotOrder;`,
+    ) as (slotOrder: string[]) => (bucket: { bs: Record<string, number> }) => string[];
+    const sortTooltipSlots = makeSorter(["1", "2", "3"]);
+    expect(sortTooltipSlots({ bs })).toEqual(expected);
+    expect(html).toContain("var tipOrder = tooltipSlotOrder(bucket);");
+  });
+
+  it("tooltipの並べ替えはグラフ本体の積み上げslot順を変更しない", async () => {
+    seedStandard();
+    await run(["--no-open"]);
+    const html = readHtml();
+
     // グラフ本体は従来のslotOrderを使い続け、tooltipだけtipOrderへ切り替える。
     expect(html).toContain("for(var j=0;j<slotOrder.length;j++){");
     expect(html).toContain("for(var j=0;j<tipOrder.length;j++){");
