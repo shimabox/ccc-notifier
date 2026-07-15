@@ -198,6 +198,15 @@ async function captureSweep(
   }
 }
 
+function expectProgressInOrder(output: string, patterns: RegExp[]): void {
+  let cursor = -1;
+  for (const pattern of patterns) {
+    const match = pattern.exec(output.slice(cursor + 1));
+    expect(match, `進捗が見つかりません: ${pattern}\n${output}`).not.toBeNull();
+    cursor += 1 + match!.index;
+  }
+}
+
 beforeEach(() => {
   priorEnv = {
     CCCN_HOME: process.env.CCCN_HOME,
@@ -249,6 +258,9 @@ describe("sweep CLI contract", () => {
     const result = await captureSweep(argv);
 
     expect(result.code).toBe(1);
+    expect(`${result.output}\n${result.error}`).not.toMatch(
+      /単価.*為替|走査開始|走査完了|(?:dashboard|ダッシュボード).*生成開始|lock.*取得/i,
+    );
     expect(canonicalSnapshot()).toEqual(before);
   });
 });
@@ -283,6 +295,16 @@ describe("sweep reset and regeneration", () => {
     });
 
     expect(result.code).toBe(0);
+    expectProgressInOrder(result.output, [
+      /単価.*為替/,
+      /lock.*取得/i,
+      /走査開始.*Claude project 1.*Codex rollout 0/i,
+      /走査完了/,
+      /(?:dashboard|ダッシュボード).*生成開始/i,
+    ]);
+    expect(result.output).not.toMatch(
+      /走査進捗:|(?:Claude transcript|Codex rollout).*走査.*\d+\s*\/\s*\d+/i,
+    );
     expect(lockCalls).toBe(1);
     expect(dashboardsReadyAtRelease).toBe(true);
     expect(rows()).toHaveLength(2); // sweep --days 9999 の再生成対象
@@ -458,6 +480,16 @@ describe("sweep dry-run", () => {
     expect(result.code).toBe(0);
     expect(result.output).toContain("dry-run");
     expect(result.output).toContain("3 ターン");
+    expectProgressInOrder(result.output, [
+      /単価.*為替/,
+      /走査開始.*Claude project 1.*Codex rollout 1/i,
+      /走査完了/,
+    ]);
+    expect(result.output).not.toMatch(/lock.*取得/i);
+    expect(result.output).not.toMatch(/(?:dashboard|ダッシュボード).*生成開始/i);
+    expect(result.output).not.toMatch(
+      /走査進捗:|(?:Claude transcript|Codex rollout).*走査.*\d+\s*\/\s*\d+/i,
+    );
     expect(lockCalls).toBe(0);
     expect(canonicalSnapshot()).toEqual(before);
   });
@@ -517,6 +549,7 @@ describe("sweep failure and retry", () => {
     const result = await captureSweep([]);
 
     expect(result.code).toBe(1);
+    expect(result.output).toMatch(/(?:dashboard|ダッシュボード).*生成開始/i);
     expect(rows()).toHaveLength(2);
     const cursors = JSON.parse(readFileSync(file("cursors.json"), "utf8")) as Record<string, unknown>;
     expect(cursors[mainPath]).toBeDefined();
@@ -577,6 +610,7 @@ describe("sweep failure and retry", () => {
 
     const first = await captureSweep([]);
     expect(first.code).toBe(1);
+    expect(first.output).toMatch(/走査完了:.*失敗 [1-9]\d*/);
     expect(`${first.output}\n${first.error}`).toMatch(/一部|再実行|retry/i);
     expect(existsSync(file("report.html"))).toBe(false);
     expect(existsSync(file("report-all.html"))).toBe(false);

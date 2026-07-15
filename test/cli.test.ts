@@ -506,6 +506,11 @@ describe("main sweep", () => {
     const { code, output } = await captureLogs(() => main(["sweep", "--dry-run"]));
 
     expect(code).toBe(0);
+    expect(output).toMatch(/単価.*為替/);
+    expect(output).toMatch(/走査開始.*Claude project 1.*Codex rollout 0/i);
+    expect(output).toContain("走査完了");
+    expect(output).not.toMatch(/lock.*取得/i);
+    expect(output).not.toMatch(/(?:dashboard|ダッシュボード).*生成開始/i);
     expect(output).toContain("dry-run: 書き込みは行っていません");
     expect(output).toContain("走査:");
     expect(existsSync(join(tmpHome, "history.jsonl"))).toBe(false);

@@ -417,6 +417,28 @@ function placeCodexRollout(fixtureBasename: string, fileName: string): string {
 }
 
 describe("runSweep (codex)", () => {
+  it("51 rolloutでも25件単位だけ進捗を出し、1件ごとの冗長な出力をしない", async () => {
+    for (let i = 0; i < 51; i++) {
+      placeCodexRollout(
+        "rollout-basic.jsonl",
+        `rollout-bulk-${String(i).padStart(3, "0")}.jsonl`,
+      );
+    }
+
+    const { code, output } = await sweep([]);
+
+    expect(code).toBe(0);
+    expect(output).toMatch(/走査開始.*Claude project 0.*Codex rollout 51/i);
+    const progress = output.split("\n").filter((line) =>
+      /走査進捗:|(?:Claude transcript|Codex rollout).*走査.*\d+\s*\/\s*\d+/i.test(line),
+    );
+    expect(progress).toHaveLength(2);
+    expect(progress[0]).toMatch(/25\s*\/\s*51/);
+    expect(progress[1]).toMatch(/50\s*\/\s*51/);
+    expect(progress.join("\n")).not.toMatch(/(?:1|51)\s*\/\s*51/);
+    expect(output.split("\n").length).toBeLessThan(30);
+  });
+
   it("reports a Codex lock timeout as incomplete and leaves its cursor reusable", async () => {
     const rollout = placeCodexRollout("rollout-basic.jsonl", NAME_BASIC);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
