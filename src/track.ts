@@ -234,7 +234,8 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //      影響しない。todayUSD は append 後に集計するため当該ターンを含む。どちらも throw しない契約。
     //    - report.html 再生成: cfg.dashboard.autoRegenerate のときのみ。埋め込み対象は
     //      cfg.dashboard.days(既定30日)に制限し、HTML 構築・書き込み・ブラウザ描画の負荷を抑える。
-    //      履歴の read/parse は当月予算の正確性を保つため全履歴が対象(O(全履歴))。
+    //      履歴の read/parse は、保存済み履歴の当月分を集計対象から落とさないため
+    //      全履歴が対象(O(全履歴))。
     //      履歴が更新された以上、
     //      通知の有無(しきい値)とは独立に実行する。失敗は logError に留め、通知を止めない。
     const tasks: Promise<unknown>[] = [];

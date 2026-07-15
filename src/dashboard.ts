@@ -167,6 +167,15 @@ function dateKeyOf(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/** ローカル暦日key同士をUTC日へ写し、DSTに影響されないinclusive日数を返す。 */
+function inclusiveLocalDateSpan(min: Date, max: Date): number | null {
+  const toUtcDay = (d: Date): number => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+  const minDay = toUtcDay(min);
+  const maxDay = toUtcDay(max);
+  if (!Number.isFinite(minDay) || !Number.isFinite(maxDay) || maxDay < minDay) return null;
+  return Math.floor((maxDay - minDay) / 86_400_000) + 1;
+}
+
 /** ローカルの "YYYY-MM-DD HH:mm"。表示用。 */
 function fmtLocalDateTime(iso: string): string {
   const d = new Date(iso);
@@ -949,12 +958,13 @@ const APP_JS = `<script>
     sub.textContent = ' ' + mk + (mk === curMonth ? '(今月)' : '');
     h.appendChild(sub);
     budgetEl.appendChild(h);
-    // 期間限定版は埋め込まない全履歴から当月を集計した固定値。
+    // 期間限定版は、保存済み履歴の当月分を集計対象から落とさないため
+    // 埋め込まない全履歴から固定値を作る。
     // 全履歴版のみ従来どおり選択月へ連動する。いずれもソースフィルタ非連動。
     if(BUDGET_FIXED || HAS_CODEX){
       var srcNote = document.createElement('p'); srcNote.className = 'note';
       srcNote.textContent = BUDGET_FIXED
-        ? '今月・全履歴から正確に集計(全ソース合算) / exact current month from full history'
+        ? '今月・保存済み履歴を全件集計(全ソース合算) / current month from all recorded history'
         : '全ソース合算 / all sources';
       budgetEl.appendChild(srcNote);
     }
@@ -1210,12 +1220,13 @@ function budgetCard(
   const level = pct >= 100 ? "over" : pct >= 70 ? "warn" : "ok";
   const budgetJpy = budgetUSD * fallbackRate;
   // 全履歴版ではブラウザ側が選択中の月に合わせて差し替える。
-  // 期間限定版は全履歴から正確に集計した当月の固定値を保つ。
+  // 期間限定版は、保存済み履歴の当月分を集計対象から落とさないため
+  // 全履歴から固定値を作る。
   return (
     `<section class="card" id="cccn-budget">` +
     `<h2>月予算 / Monthly budget<span class="stat-sub"> 今月(暦月)</span></h2>` +
     (fixedCurrentMonth
-      ? `<p class="note">今月・全履歴から正確に集計(全ソース合算) / exact current month from full history</p>`
+      ? `<p class="note">今月・保存済み履歴を全件集計(全ソース合算) / current month from all recorded history</p>`
       : hasCodex
         ? `<p class="note">全ソース合算 / all sources</p>`
         : "") +
@@ -1252,7 +1263,7 @@ function renderDashboard(
   const version = readVersion();
   const generatedAtIso = opts.generatedAt ?? new Date().toISOString();
   const generatedAt = fmtLocalDateTime(generatedAtIso);
-  const period = opts.days === null ? "全期間" : `直近 ${opts.days} 日間`;
+  let period = opts.days === null ? "全期間" : `直近 ${opts.days} 日間`;
   const limited = opts.days !== null;
   const variant = opts.variant ?? "custom";
   const totalLabel = limited ? "対象期間合計" : "通算";
@@ -1281,16 +1292,26 @@ function renderDashboard(
   // 日付レンジ(表示用)。
   let minMs = Infinity;
   let maxMs = -Infinity;
-  for (const t of turnsEmbed) {
-    if (t.t > 0) {
-      if (t.t < minMs) minMs = t.t;
-      if (t.t > maxMs) maxMs = t.t;
-    }
+  for (const turn of turns) {
+    const ms = Date.parse(turn.ts);
+    if (!Number.isFinite(ms)) continue;
+    if (ms < minMs) minMs = ms;
+    if (ms > maxMs) maxMs = ms;
   }
   const rangeText =
     Number.isFinite(minMs) && Number.isFinite(maxMs)
       ? `${dateKeyOf(new Date(minMs))} 〜 ${dateKeyOf(new Date(maxMs))}`
       : "—";
+  const embeddedDaySpan =
+    Number.isFinite(minMs) && Number.isFinite(maxMs)
+      ? inclusiveLocalDateSpan(new Date(minMs), new Date(maxMs))
+      : null;
+  const shortRecentHistory =
+    opts.days !== null && embeddedDaySpan !== null && embeddedDaySpan < opts.days;
+  if (shortRecentHistory) period = `履歴 ${embeddedDaySpan} 日分`;
+  const recentVariantLabel = shortRecentHistory
+    ? `履歴 ${embeddedDaySpan} 日分 / Recent`
+    : `直近 ${opts.days} 日版 / Recent`;
 
   const embed = {
     version,
@@ -1313,13 +1334,13 @@ function renderDashboard(
   const autoUpdateFoot =
     reloadSec > 0
       ? variant === "full"
-        ? `<div class="foot">約 ${reloadSec} 秒ごとにファイルを再読込(全履歴版の生成はローカル日ごと、または手動 dashboard --all)</div>`
-        : `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は ${updateTrigger})</div>`
+        ? `<div class="foot">約 ${reloadSec} 秒ごとにファイルを再読込(全履歴版の生成は正常な sweep 完了時、ローカル日ごと、または手動 dashboard --all)</div>`
+        : `<div class="foot">約 ${reloadSec} 秒ごとに自動更新(最新化は ${updateTrigger}、または正常な sweep 完了時)</div>`
       : "";
 
   const variantNav =
     variant === "recent"
-      ? `<div class="sub"><strong>直近 ${opts.days} 日版 / Recent</strong> · ${
+      ? `<div class="sub"><strong>${recentVariantLabel}</strong> · ${
           opts.peerAvailable
             ? `<a href="report-all.html">全履歴版へ / Full history</a>`
             : `<span aria-disabled="true">全履歴版は未生成です（dashboard --all で生成） / Full history not generated</span>`
@@ -1330,7 +1351,7 @@ function renderDashboard(
               ? `<a href="report.html">直近版へ / Recent</a>`
               : `<span aria-disabled="true">直近版は未生成です（dashboard で生成） / Recent not generated</span>`
           }</div>` +
-          `<div class="sub muted">最終生成 ${esc(generatedAt)}。ローカル日の最初の正常なターン時、または手動の dashboard --all で更新されます。</div>`
+          `<div class="sub muted">最終生成 ${esc(generatedAt)}。正常な sweep 完了時、ローカル日の最初の正常なターン時、または手動の dashboard --all で更新されます。</div>`
         : "";
 
   const head =
@@ -1551,7 +1572,8 @@ export function writeDashboardHtml(opts: {
         : "custom");
   ensurePeerPlaceholder(variant);
   // history.jsonl は1回だけ全件 read/parse する。自動版の詳細ターンはこの
-  // 配列から期間で絞り、当月予算は同じ全件配列から正確に集計する。
+  // 配列から期間で絞り、当月予算は保存済み履歴の当月分を集計対象から
+  // 落とさないため、同じ全件配列から集計する。
   const allTurns = opts.allTurns ?? readTurns();
   const turns = days === null ? allTurns : filterTurnsByDays(allTurns, days);
   const fullHistory =

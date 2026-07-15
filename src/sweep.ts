@@ -26,6 +26,7 @@ import {
   paths,
   readConfig,
   readConfigReadOnly,
+  readTurns,
   resetHistoryAndCursors,
   sanitizeCursor,
   saveCursor,
@@ -40,7 +41,12 @@ import type { CodexRolloutDiscovery } from "./codex/sessions";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
 import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 import { waitForDataLock, type DataLockHandle } from "./data-lock";
-import { invalidateCanonicalDashboards } from "./dashboard-state";
+import { writeDashboardHtml } from "./dashboard";
+import {
+  invalidateCanonicalDashboards,
+  makeFullDashboardState,
+  writeFullDashboardStateAtomic,
+} from "./dashboard-state";
 
 type SweepLockProvider = () => Promise<DataLockHandle | null>;
 
@@ -884,11 +890,47 @@ export async function runSweep(
     console.error("全再生成のdata lockを取得できませんでした。後でもう一度お試しください");
     return 1;
   }
+  let dashboardFailure = false;
   try {
     invalidateCanonicalDashboards();
     resetHistoryAndCursors();
     await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary);
-    invalidateCanonicalDashboards();
+    try {
+      // scan前の古いHTMLだけでなく、writerが作り得るplaceholderも一度消してから同じsnapshotで再生成する。
+      invalidateCanonicalDashboards();
+      if (summary.sourceFailures === 0 && cfg.dashboard.autoRegenerate) {
+        const generatedAt = new Date();
+        const generatedAtIso = generatedAt.toISOString();
+        const allTurns = readTurns();
+        writeDashboardHtml({
+          days: cfg.dashboard.days,
+          outPath: paths().recentDashboardFile,
+          autoReloadSec: cfg.dashboard.autoReloadSec,
+          allTurns,
+          variant: "recent",
+          generatedAt: generatedAtIso,
+        });
+        writeDashboardHtml({
+          days: null,
+          outPath: paths().fullDashboardFile,
+          autoReloadSec: cfg.dashboard.autoReloadSec,
+          allTurns,
+          variant: "full",
+          generatedAt: generatedAtIso,
+        });
+        // full HTMLのatomic writeが成功した後だけ日次stateを進める。
+        writeFullDashboardStateAtomic(makeFullDashboardState(generatedAt));
+      }
+    } catch (err) {
+      dashboardFailure = true;
+      logError("sweep:dashboard", err);
+      // 片方だけの成功やwriterのplaceholderをcanonicalとして残さない。
+      try {
+        invalidateCanonicalDashboards();
+      } catch (invalidateErr) {
+        logError("sweep:dashboard-invalidate", invalidateErr);
+      }
+    }
   } catch (err) {
     reportSourceFailure(summary, false, "sweep", err);
   } finally {
@@ -900,6 +942,12 @@ export async function runSweep(
   if (summary.sourceFailures > 0) {
     console.error(
       `一部再生成です(${summary.sourceFailures}件失敗)。同じ ccc-notifier sweep を再実行してください / partial regeneration; retry`,
+    );
+    return 1;
+  }
+  if (dashboardFailure) {
+    console.error(
+      "履歴は再生成済みですが、ダッシュボードを生成できませんでした。ccc-notifier dashboard と ccc-notifier dashboard --all を手動実行してください",
     );
     return 1;
   }
