@@ -52,6 +52,60 @@ npx ccc-notifier@latest doctor
 
 Codex連携を選んだ場合は、Codexを再起動し、表示されるhookの確認画面で承認してください。詳しくは[Codex CLI対応](docs/codex.md)を参照してください。
 
+<details>
+<summary><strong>まず直近1週間の履歴で試す（全履歴・完全削除まで）</strong></summary>
+
+上のセットアップが終わったら、まず直近7日分の件数と概算を事前確認します。この操作では何も変更しません。
+
+```bash
+npx ccc-notifier@latest sweep --dry-run --days 7
+```
+
+次の操作は、保存済み履歴をいったん消し、直近7日分だけを作り直します。履歴のバックアップは作りません。
+
+```bash
+npx ccc-notifier@latest sweep --days 7
+```
+
+作成した7日分の履歴をダッシュボードで確認します。
+
+```bash
+npx ccc-notifier@latest dashboard --days 7
+```
+
+### 続けて使う場合
+
+まず、全履歴を作り直した場合の件数と概算を事前確認します。
+
+```bash
+npx ccc-notifier@latest sweep --dry-run
+```
+
+問題なければ、7日版の履歴をいったん消し、残っているデータから全履歴を作り直します。
+
+```bash
+npx ccc-notifier@latest sweep
+```
+
+継続利用しやすいようにグローバルインストールし、連携先をグローバル版へ更新します。
+
+```bash
+npm install -g ccc-notifier
+ccc-notifier init
+```
+
+### 使わない場合
+
+この時点ではグローバル版を入れていないため、npxでccc-notifierのhook・設定・履歴・キャッシュを削除します。
+
+```bash
+npx ccc-notifier@latest uninstall --yes --purge
+```
+
+安全のため作成した`settings.json.bak-*`などのバックアップは残ります。不要なら内容を確認してから手動で削除してください。
+
+</details>
+
 ## 気に入ったらグローバルインストール
 
 ```bash
