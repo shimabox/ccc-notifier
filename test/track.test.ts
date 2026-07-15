@@ -600,11 +600,11 @@ describe("runTrack", () => {
 
 // ============ サブエージェント usage の取り込み ============
 // transcript の兄弟 <transcript(.jsonl除去)>/subagents/agent-*.jsonl を増分集計し、
-// record.subagents(GOLDEN: costUSD 0.033 / claude-sonnet-5 / apiCalls 1 / agentFiles 1)に記録する。
+// record.subagents(GOLDEN: costUSD 0.033 / claude-sonnet-4-6 / apiCalls 1 / agentFiles 1)に記録する。
 
 describe("runTrack — subagents", () => {
   // 1. SA を集計して record.subagents に GOLDEN 値どおり記録する(メインは不変)。
-  it("1. collects subagent usage into record.subagents (GOLDEN 0.033 / sonnet-5 / 1 call / 1 file)", async () => {
+  it("1. collects subagent usage into record.subagents (GOLDEN 0.033 / sonnet-4-6 / 1 call / 1 file)", async () => {
     placeSubagent();
 
     await runTrack(stdinFor(transcriptPath));
@@ -618,7 +618,7 @@ describe("runTrack — subagents", () => {
 
     expect(rec.subagents).toBeDefined();
     expect(rec.subagents!.costUSD).toBeCloseTo(0.033, 10);
-    expect(rec.subagents!.costByModel["claude-sonnet-5"]).toBeCloseTo(0.033, 10);
+    expect(rec.subagents!.costByModel["claude-sonnet-4-6"]).toBeCloseTo(0.033, 10);
     expect(rec.subagents!.apiCalls).toBe(1);
     expect(rec.subagents!.agentFiles).toBe(1);
     expect(rec.subagents!.tokens).toEqual({
@@ -678,7 +678,7 @@ describe("runTrack — subagents", () => {
     };
     appendFileSync(transcriptPath, "\n" + JSON.stringify(newMain) + "\n", "utf8");
 
-    // 新しい SA 行(別 message.id / requestId)。sonnet-5 output 1000 → 0.015 USD。
+    // 新しい SA 行(別 message.id / requestId)。sonnet-4-6 output 1000 → 0.015 USD。
     const newSa = {
       parentUuid: "sa2",
       isSidechain: true,
@@ -691,7 +691,7 @@ describe("runTrack — subagents", () => {
         id: "msg_SA2",
         type: "message",
         role: "assistant",
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-4-6",
         content: [{ type: "text", text: "追加のサブエージェント応答" }],
         usage: {
           input_tokens: 0,
@@ -717,6 +717,62 @@ describe("runTrack — subagents", () => {
     expect(added.subagents!.costUSD).toBeCloseTo(0.015, 10);
     expect(added.subagents!.apiCalls).toBe(1);
     expect(added.subagents!.agentFiles).toBe(1);
+  });
+
+  it("3b. does not charge an API call copied from the parent transcript into an agent file", async () => {
+    const dir = subagentsDir();
+    mkdirSync(dir, { recursive: true });
+    const duplicatePath = join(dir, "agent-parent-copy.jsonl");
+    const duplicateRows = readFileSync(transcriptPath, "utf8")
+      .split("\n")
+      .filter((line) => {
+        if (!line.trim()) return false;
+        try {
+          const row = JSON.parse(line) as { message?: { id?: string } };
+          return row.message?.id === "msg_A";
+        } catch {
+          return false;
+        }
+      });
+    writeFileSync(duplicatePath, `${duplicateRows.join("\n")}\n`, "utf8");
+
+    await runTrack(stdinFor(transcriptPath));
+
+    expect(readHistory()).toHaveLength(1);
+    expect(readHistory()[0].subagents).toBeUndefined();
+    const cursors = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+    expect(cursors[duplicatePath]).toBeDefined();
+  });
+
+  it("3c. de-duplicates the same API call copied into two agent files", async () => {
+    placeSubagent("agent-a.jsonl");
+    placeSubagent("agent-b.jsonl");
+
+    await runTrack(stdinFor(transcriptPath));
+
+    const sa = readHistory()[0].subagents!;
+    expect(sa.costUSD).toBeCloseTo(0.033, 10);
+    expect(sa.apiCalls).toBe(1);
+    expect(sa.agentFiles).toBe(1);
+  });
+
+  it("3d. records an agent-only late completion even when the parent has no new usage", async () => {
+    const stdin = stdinFor(transcriptPath);
+    await runTrack(stdin);
+    rmSync(lastNotifyFile(), { force: true });
+    const saPath = placeSubagent();
+
+    await runTrack(stdin);
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].costUSD).toBe(0);
+    expect(rows[1].apiCalls).toBe(0);
+    expect(rows[1].subagents?.costUSD).toBeCloseTo(0.033, 10);
+    expect(rows[1].subagents?.apiCalls).toBe(1);
+    expect(existsSync(lastNotifyFile())).toBe(false);
+    const cursors = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+    expect(cursors[saPath]).toBeDefined();
   });
 
   // 4. subagents ディレクトリが無ければ record.subagents は undefined。

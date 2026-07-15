@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -23,6 +23,7 @@ let tmpDir: string;
 let settingsFile: string;
 let homeDir: string;
 let cliPath: string;
+let fetchMock: ReturnType<typeof vi.fn>;
 
 // 識別マーカー "ccc-notifier" を含む CLI パス(生成 command に marker が載る前提)。
 function cliUnder(dir: string, name = "cli.js"): string {
@@ -75,6 +76,9 @@ beforeEach(() => {
   process.env.CCCN_HOME = homeDir;
   process.env.CCCN_CLI_PATH = cliPath;
   process.env.CCCN_DRY_RUN = "1";
+  // 通常 init は単価cacheをbest-effort更新する。テストは実ネットワークへ出さない。
+  fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
+  vi.stubGlobal("fetch", fetchMock);
   // uninstall(removeCodexHook)が実 ~/.codex/hooks.json に触れないよう隔離(2026-07-10)。
   // 存在しないパスに固定する(Codex 系テストは自前 beforeEach の一時 dir で上書きする)。
   process.env.CCCN_CODEX_HOME = join(tmpDir, "no-codex");
@@ -86,6 +90,7 @@ afterEach(() => {
   delete process.env.CCCN_CLI_PATH;
   delete process.env.CCCN_DRY_RUN;
   delete process.env.CCCN_CODEX_HOME;
+  vi.unstubAllGlobals();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -256,6 +261,33 @@ describe("runInit — config.json への反映", () => {
     expect(
       await runInit(["--yes", "--slack-only", "--os-only", "--slack-webhook", "https://hooks.slack.com/services/XXX"]),
     ).toBe(1);
+  });
+});
+
+describe("runInit — 単価cache更新", () => {
+  it("通常initで単価をbest-effort更新する", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        "claude-init-model": {
+          input_cost_per_token: 0.000003,
+          output_cost_per_token: 0.000015,
+          litellm_provider: "anthropic",
+        },
+      }),
+    });
+
+    expect(await runInit(["--yes", "--os-only"])).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const cache = JSON.parse(readFileSync(join(homeDir, "cache", "pricing.json"), "utf8"));
+    expect(cache.table["claude-init-model"].input).toBe(3);
+  });
+
+  it("単価取得失敗でもinitは成功する", async () => {
+    expect(await runInit(["--yes", "--os-only"])).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(homeDir, "cache", "pricing.json"))).toBe(false);
   });
 });
 
@@ -571,6 +603,7 @@ describe("runInit / runUninstall — Codex 対応", () => {
     const { code, out } = await captureIO(() => runInit(["--yes", "--codex"]));
 
     expect(code).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(snapshotTree(homeDir)).toEqual(homeTreeBefore);
     expect(readFileSync(join(homeDir, "config.json"), "utf8")).toBe(configRaw);
     expect(readFileSync(settingsFile, "utf8")).toBe(settingsRaw);

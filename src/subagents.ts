@@ -33,6 +33,18 @@ export interface SubagentUsage {
   apiCalls: number;
   agentFiles: number;
   newCursors: Array<{ path: string; cursor: Cursor }>;
+  groups: SubagentUsageGroup[];
+  sessionId: string;
+  cwd: string | null;
+  gitBranch: string | null;
+  lastTs: string | null;
+}
+
+export interface SubagentUsageGroup {
+  perModel: UsageByModel;
+  apiCalls: number;
+  firstTs: string | null;
+  lastTs: string | null;
 }
 
 function emptyBuckets(): TokenBuckets {
@@ -52,6 +64,15 @@ function addToModel(target: UsageByModel, model: string, b: TokenBuckets): void 
 /** src の全モデルを target にマージ(加算)する。 */
 function mergeUsage(target: UsageByModel, src: UsageByModel): void {
   for (const [model, b] of Object.entries(src)) addToModel(target, model, b);
+}
+
+function sameCursor(a: Cursor | null, b: Cursor): boolean {
+  return a !== null &&
+    a.offset === b.offset &&
+    a.lastUuid === b.lastUuid &&
+    a.lastTs === b.lastTs &&
+    a.seenMessageKeys.length === b.seenMessageKeys.length &&
+    a.seenMessageKeys.every((key, i) => key === b.seenMessageKeys[i]);
 }
 
 /**
@@ -99,7 +120,13 @@ async function listAgentFiles(
  */
 export async function collectSubagentUsage(
   mainTranscriptPath: string,
-  opts: { ignoreCursors?: boolean; strictRead?: boolean; includeAllFiles?: boolean } = {},
+  opts: {
+    ignoreCursors?: boolean;
+    strictRead?: boolean;
+    includeAllFiles?: boolean;
+    excludeMessageKeys?: ReadonlySet<string>;
+    minTimestampMs?: number | null;
+  } = {},
 ): Promise<SubagentUsage | null> {
   const dir = subagentsDirOf(mainTranscriptPath);
 
@@ -117,6 +144,22 @@ export async function collectSubagentUsage(
   let apiCalls = 0;
   let agentFiles = 0;
   const newCursors: Array<{ path: string; cursor: Cursor }> = [];
+  const groups: SubagentUsageGroup[] = [];
+  let sessionId = "";
+  let cwd: string | null = null;
+  let gitBranch: string | null = null;
+  let lastTs: string | null = null;
+
+  // Start with the parent window and every already-consumed agent cursor. This
+  // prevents a call copied into another agent file on a later turn from being
+  // charged again. The cursor ring is intentionally bounded by transcript.ts.
+  const excluded = new Set(opts.excludeMessageKeys ?? []);
+  if (!opts.ignoreCursors) {
+    for (const filePath of files) {
+      const prior = sanitizeCursor(loadCursor(filePath));
+      for (const key of prior?.seenMessageKeys ?? []) excluded.add(key);
+    }
+  }
 
   for (const filePath of files) {
     try {
@@ -125,14 +168,35 @@ export async function collectSubagentUsage(
         await file.close();
       }
       const cursor = opts.ignoreCursors ? null : sanitizeCursor(loadCursor(filePath));
-      const agg = await aggregateNewTurn(filePath, cursor);
+      const agg = await aggregateNewTurn(filePath, cursor, {
+        excludeMessageKeys: excluded,
+        minTimestampMs: opts.minTimestampMs,
+        returnEmpty: true,
+      });
       if (agg === null) continue; // このファイルに新規 usage なし
+      if (!sameCursor(cursor, agg.newCursor)) {
+        newCursors.push({ path: filePath, cursor: agg.newCursor });
+      }
+      for (const key of agg.messageKeys) excluded.add(key);
+      if (agg.apiCalls === 0) continue;
       // 全行 isSidechain だが、両側をマージして取りこぼしを防ぐ。
       mergeUsage(perModel, agg.main);
       mergeUsage(perModel, agg.sidechain);
       apiCalls += agg.apiCalls;
       agentFiles += 1;
-      newCursors.push({ path: filePath, cursor: agg.newCursor });
+      const groupUsage: UsageByModel = {};
+      mergeUsage(groupUsage, agg.main);
+      mergeUsage(groupUsage, agg.sidechain);
+      groups.push({
+        perModel: groupUsage,
+        apiCalls: agg.apiCalls,
+        firstTs: agg.firstTs,
+        lastTs: agg.lastTs,
+      });
+      if (agg.sessionId) sessionId = agg.sessionId;
+      if (agg.cwd !== null) cwd = agg.cwd;
+      if (agg.gitBranch !== null) gitBranch = agg.gitBranch;
+      if (agg.lastTs !== null && (lastTs === null || agg.lastTs > lastTs)) lastTs = agg.lastTs;
     } catch (err) {
       if (opts.strictRead) throw err;
       // 1ファイルの失敗で全体を止めない。観測のためログのみ残す。
@@ -140,5 +204,5 @@ export async function collectSubagentUsage(
     }
   }
 
-  return { perModel, apiCalls, agentFiles, newCursors };
+  return { perModel, apiCalls, agentFiles, newCursors, groups, sessionId, cwd, gitBranch, lastTs };
 }

@@ -23,11 +23,11 @@
 `<transcript(.jsonl除去)>/subagents/agent-*.jsonl` に置かれる1エージェント分の JSONL。
 2行あるが同一 `message.id "msg_SA1"` + `requestId "req_SA1"` のため 1 件に重複排除される。
 
-- 単価($/100万トークン): claude-sonnet-5 = input 3 / output 15 / cacheWrite5m 3.75 / cacheWrite1h 6 / cacheRead 0.30
+- 単価($/100万トークン): claude-sonnet-4-6 = input 3 / output 15 / cacheWrite5m 3.75 / cacheWrite1h 6 / cacheRead 0.30
 - SA usage 合算: { input:1000, output:2000, cacheWrite5m:0, cacheWrite1h:0, cacheRead:0 }
-- **SA コスト = 1000×3/1e6 + 2000×15/1e6 = 0.003 + 0.030 = 0.033 USD**(claude-sonnet-5)
+- **SA コスト = 1000×3/1e6 + 2000×15/1e6 = 0.003 + 0.030 = 0.033 USD**(claude-sonnet-4-6)
 - **apiCalls = 1**(msg_SA1 は2行あるが1件に重複排除)
-- record.subagents = `{ costUSD: 0.033, costByModel: { "claude-sonnet-5": 0.033 }, tokens: {input:1000,output:2000,...0}, apiCalls: 1, agentFiles: 1 }`
+- record.subagents = `{ costUSD: 0.033, costByModel: { "claude-sonnet-4-6": 0.033 }, tokens: {input:1000,output:2000,...0}, apiCalls: 1, agentFiles: 1 }`
 - メイン(transcript-basic.jsonl)と合わせた**総額 = 0.267 + 0.033 = 0.300 USD**
 - 固定レート150円時の SA 分 JPY = 0.033 × 150 = 4.95(表示は ¥5)、総額 JPY = 40.05 + 4.95 = 45.0(表示は ¥45)
 - **通知金額はメインのみ(0.267)** — SA は通知に混入しない(通知は一切変えない)
@@ -39,11 +39,11 @@
 
 - ターン1: prompt "ターン1のプロンプト" / assistant `msg_M1`+`req_M1` claude-fable-5 output 100 →
   100×50/1e6 = **0.005 USD** / ts = 2026-07-06T10:00:05.000Z(= lastTs)
-- ターン2: prompt "ターン2のプロンプト" / assistant `msg_M2`+`req_M2` claude-sonnet-5 output 1000 →
+- ターン2: prompt "ターン2のプロンプト" / assistant `msg_M2`+`req_M2` claude-sonnet-4-6 output 1000 →
   1000×15/1e6 = **0.015 USD** / ts = 2026-07-06T10:01:05.000Z
 - **sweep 合計 = 0.005 + 0.015 = 0.020 USD**(summary.totalUSD)。両レコードとも `ingest: "sweep"`。
 - subagent-basic.jsonl を併用(`<main>/subagents/agent-x.jsonl`)した場合、**最終ターン(ターン2)の record に
-  SA 0.033**(claude-sonnet-5 / apiCalls 1 / agentFiles 1)が `subagents` ブロックとして添付される。
+  SA 0.033**(claude-sonnet-4-6 / apiCalls 1 / agentFiles 1)が `subagents` ブロックとして添付される。
   SA は summary.totalUSD(0.020)には**含めない**(GOLDEN のメイン基準)。SA 回収額は
   **summary.subagentsUSD = 0.033** として別枠で集計され、コンソールに
   「うちサブエージェント: $0.033(¥5)」(固定レート150円時)と1行表示される。

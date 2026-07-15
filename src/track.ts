@@ -116,6 +116,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     const table = await loadPriceTable(cacheDir, { offline: true });
     const fx = await getUsdJpy(cfg, cacheDir);
     let record!: TurnRecord;
+    let hasMainUsage = false;
 
     // cursor snapshotからhistory/cursor commitまでを1つのdata lockで直列化する。
     const commitLock = await waitForDataLock(1000);
@@ -126,16 +127,17 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     try {
       const cursor = sanitizeCursor(loadCursor(transcriptPath));
 
-    // 3. 新規ターンの集計。新規 usage が無ければ何もせず終了する
-    //    (カーソルも保存しない: 次回まとめて処理される設計)。
+    // 3. 新規ターンの集計。Claude はメイン usage が無くても、遅れて完了した
+    //    サブエージェント差分を回収するため、この時点では return しない。
     //    Codex 経路(opts.codex)は rollout(累積カウンタの逐次差分)を集計する。
     let agg = isCodex
       ? await aggregateCodexTurn(transcriptPath, cursor)
       : await aggregateNewTurn(transcriptPath, cursor);
-    if (agg === null) return;
+    if (isCodex && agg === null) return;
+    hasMainUsage = agg !== null;
 
     // 3a. Codex はモデルを hook payload 優先で決める(rollout 由来のキーを payload.model に組み替える)。
-    if (isCodex) {
+    if (isCodex && agg !== null) {
       agg = withCodexModel(agg, input.model);
     }
 
@@ -144,38 +146,53 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     let sa: SubagentUsage | null = null;
     if (!isCodex) {
       try {
-        sa = await collectSubagentUsage(transcriptPath);
+        const excluded = new Set(cursor?.seenMessageKeys ?? []);
+        if (agg !== null && "messageKeys" in agg) {
+          for (const key of (agg as TurnAggregate & { messageKeys: string[] }).messageKeys) excluded.add(key);
+        }
+        sa = await collectSubagentUsage(transcriptPath, { excludeMessageKeys: excluded });
       } catch (err) {
         logError("track:subagents", err);
         sa = null;
       }
     }
+    if (agg === null && (sa === null || sa.apiCalls === 0)) {
+      // A newly discovered file may contain only a copy of already-counted main
+      // calls. Persist its consumed cursor without creating a zero-value row.
+      for (const nc of sa?.newCursors ?? []) saveCursor(nc.path, nc.cursor);
+      return;
+    }
+
+    // SA-only completion is a normal Claude history record with zero main cost.
+    // This keeps notifications main-only while making the late usage visible now.
+    const main = agg?.main ?? {};
+    const sidechain = agg?.sidechain ?? {};
 
     // 4. lock外で準備済みの単価でコスト算出。
-    const breakdown = computeCost(agg.main, agg.sidechain, table);
+    const breakdown = computeCost(main, sidechain, table);
 
     // 6. TurnRecord を構築する。
     const sessionId =
-      agg.sessionId || (typeof input.session_id === "string" ? input.session_id : "") || "";
-    const project = agg.cwd ?? (typeof input.cwd === "string" ? input.cwd : undefined) ?? "";
-    const sidechainHasModels = Object.keys(agg.sidechain).length > 0;
+      agg?.sessionId || sa?.sessionId || (typeof input.session_id === "string" ? input.session_id : "") || "";
+    const project = agg?.cwd ?? sa?.cwd ?? (typeof input.cwd === "string" ? input.cwd : undefined) ?? "";
+    const sidechainHasModels = Object.keys(sidechain).length > 0;
 
     record = {
       schemaVersion: 1,
-      ts: agg.lastTs ?? new Date().toISOString(),
+      ts: agg?.lastTs ?? sa?.lastTs ?? new Date().toISOString(),
       sessionId,
       project,
-      gitBranch: agg.gitBranch,
-      models: collectModels(agg.main, agg.sidechain),
-      tokens: sumBuckets(agg.main),
-      sidechainTokens: sidechainHasModels ? sumBuckets(agg.sidechain) : null,
-      apiCalls: agg.apiCalls,
+      gitBranch: agg?.gitBranch ?? sa?.gitBranch ?? null,
+      models: hasMainUsage ? collectModels(main, sidechain) : collectModels(sa?.perModel ?? {}, {}),
+      tokens: sumBuckets(main),
+      sidechainTokens: sidechainHasModels ? sumBuckets(sidechain) : null,
+      apiCalls: agg?.apiCalls ?? 0,
       costUSD: breakdown.usd,
       costByModel: breakdown.byModel, // モデル別 USD(main+sidechain 合算、丸めない)
       costJPY: breakdown.usd * fx.rate, // 丸めない(表示時に丸める)
       fxRate: fx.rate,
       fxSource: fx.source,
-      prompt: agg.prompt ?? "",
+      prompt: agg?.prompt ?? "",
     };
     // Codex 由来の記録には source を付ける(ダッシュボード/レポートのソース識別用。Claude は付けない)。
     if (isCodex) {
@@ -216,7 +233,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //    SA のカーソルはメインより後に保存する(途中クラッシュで SA 分が再集計されても、
     //    次回 seenMessageKeys で重複排除される側に倒す)。
     appendTurn(record);
-    saveCursor(transcriptPath, agg.newCursor);
+    if (agg !== null) saveCursor(transcriptPath, agg.newCursor);
     if (sa !== null) {
       for (const nc of sa.newCursors) {
         saveCursor(nc.path, nc.cursor);
@@ -240,7 +257,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //      通知の有無(しきい値)とは独立に実行する。失敗は logError に留め、通知を止めない。
     const tasks: Promise<unknown>[] = [];
 
-    if ((cfg.notify.os || cfg.notify.slack !== null) && record.costUSD >= cfg.minNotifyUSD && !isMuted()) {
+    if (hasMainUsage && (cfg.notify.os || cfg.notify.slack !== null) && record.costUSD >= cfg.minNotifyUSD && !isMuted()) {
       const todayUSD = cfg.includeDailyTotal ? todayTotalUSD() : undefined;
       tasks.push(notifyOS(record, cfg, todayUSD));
       tasks.push(notifySlack(record, cfg, todayUSD));

@@ -406,7 +406,7 @@ describe("sweep reset and regeneration", () => {
     expect(rows()).toHaveLength(3);
   });
 
-  it("sweepは201 agentを全件取り込み、全cursorを保存する", async () => {
+  it("sweepは201 agentを全件走査し、同じAPI呼び出しは1回だけ数えて全cursorを保存する", async () => {
     placeClaude();
     const dir = join(projects, "project-a", "session-a", "subagents");
     mkdirSync(dir, { recursive: true });
@@ -416,8 +416,8 @@ describe("sweep reset and regeneration", () => {
 
     expect((await captureSweep([])).code).toBe(0);
     expect(rows()).toHaveLength(2);
-    expect(rows()[1]?.subagents?.agentFiles).toBe(201);
-    expect(rows()[1]?.subagents?.apiCalls).toBe(201);
+    expect(rows()[1]?.subagents?.agentFiles).toBe(1);
+    expect(rows()[1]?.subagents?.apiCalls).toBe(1);
     const cursors = JSON.parse(readFileSync(file("cursors.json"), "utf8")) as Record<string, unknown>;
     expect(Object.keys(cursors)).toHaveLength(202);
     expect(cursors[join(dir, "agent-000.jsonl")]).toBeDefined();
@@ -441,7 +441,7 @@ describe("sweep reset and regeneration", () => {
           parentUuid: "m-u3", isSidechain: false, cwd: "/tmp/proj", sessionId: "sess-M", gitBranch: "main",
           type: "assistant", requestId: "req_M3",
           message: {
-            id: "msg_M3", role: "assistant", model: "claude-sonnet-5",
+            id: "msg_M3", role: "assistant", model: "claude-sonnet-4-6",
             usage: {
               input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 100,
               cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },

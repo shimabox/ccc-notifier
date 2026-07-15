@@ -34,6 +34,7 @@ beforeEach(() => {
   process.env.CCCN_CODEX_HOME = join(tmpDir, "codex");
   process.env.CCCN_CLI_PATH = join(tmpDir, "node_modules", "ccc-notifier", "dist", "cli.js");
   process.env.CCCN_DRY_RUN = "1";
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
   vi.clearAllMocks();
 });
 
@@ -43,6 +44,7 @@ afterEach(() => {
   delete process.env.CCCN_CODEX_HOME;
   delete process.env.CCCN_CLI_PATH;
   delete process.env.CCCN_DRY_RUN;
+  vi.unstubAllGlobals();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

@@ -6,6 +6,7 @@ const LITELLM_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 const LITELLM_FETCH_TIMEOUT_MS = 3000;
 const CACHE_FRESH_MS = 24 * 60 * 60 * 1000;
+const SONNET_5_STANDARD_PRICE_START_MS = Date.UTC(2026, 8, 1);
 
 function price(
   input: number,
@@ -18,8 +19,13 @@ function price(
   return { input, output, cacheWrite5m, cacheWrite1h, cacheRead, source };
 }
 
-/** Anthropic 公式レートに基づく組み込み単価表(単位: USD / 100万トークン)。 */
-export function builtinPriceTable(): PriceTable {
+/** Anthropic / OpenAI の公開単価に基づく組み込み単価表(単位: USD / 100万トークン)。 */
+export function builtinPriceTable(now: Date = new Date()): PriceTable {
+  // Sonnet 5 は 2026-08-31 まで導入価格。2026-09-01 00:00 UTC から通常価格。
+  // cache write/read は公式の 5m=1.25x / 1h=2x / read=0.1x を適用する。
+  const sonnet5 = now.getTime() < SONNET_5_STANDARD_PRICE_START_MS
+    ? price(2, 10, 2.5, 4, 0.2, 'builtin')
+    : price(3, 15, 3.75, 6, 0.3, 'builtin');
   return {
     'claude-fable-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
     'claude-mythos-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
@@ -33,7 +39,7 @@ export function builtinPriceTable(): PriceTable {
     'claude-opus-4': price(15, 75, 18.75, 30, 1.5, 'builtin'), // 旧 claude-opus-4-20250514 の受け皿
     'claude-3-opus': price(15, 75, 18.75, 30, 1.5, 'builtin'),
 
-    'claude-sonnet-5': price(3, 15, 3.75, 6, 0.3, 'builtin'),
+    'claude-sonnet-5': sonnet5,
     'claude-sonnet-4-6': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-sonnet-4-5': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-sonnet-4': price(3, 15, 3.75, 6, 0.3, 'builtin'),
@@ -67,22 +73,19 @@ function normalizeModelId(modelId: string): string {
   return s.trim();
 }
 
-/** normalize 後、テーブルキーとの最長プレフィックス一致でモデル単価を解決する。一致なしは null。 */
+/**
+ * normalize 後の完全一致でモデル単価を解決する。一致なしは null。
+ *
+ * 日付suffix等の既知の表記差は吸収するが、任意suffixのprefix一致は行わない。
+ * これにより、例えば未登録の gpt-5.6-sol を古い gpt-5 の単価で誤計算しない。
+ */
 export function resolvePrice(modelId: string, table: PriceTable): ModelPrice | null {
   const target = normalizeModelId(modelId);
-  let bestKeyLen = -1;
-  let bestPrice: ModelPrice | null = null;
-
   for (const rawKey of Object.keys(table)) {
     const key = normalizeModelId(rawKey);
-    if (key.length === 0 || !target.startsWith(key)) continue;
-    if (key.length > bestKeyLen) {
-      bestKeyLen = key.length;
-      bestPrice = table[rawKey];
-    }
+    if (key.length > 0 && target === key) return { ...table[rawKey] };
   }
-
-  return bestPrice ? { ...bestPrice } : null;
+  return null;
 }
 
 /** main / sidechain の UsageByModel からコストを算出する(表示用の丸めはしない)。 */
@@ -161,6 +164,53 @@ function isCacheFresh(fetchedAt: string): boolean {
   const t = Date.parse(fetchedAt);
   if (Number.isNaN(t)) return false;
   return Date.now() - t <= CACHE_FRESH_MS;
+}
+
+/**
+ * cache と builtin のマージ。
+ * - fresh cache: LiteLLM を優先して新しい単価を反映する。
+ * - stale cache: 未知モデルの補完には使うが、既知モデルは builtin を優先する。
+ * - Sonnet 5: 日付境界を builtin が管理するため、cache の鮮度にかかわらず builtin を優先する。
+ *
+ * provider prefix / 日付suffixなどraw keyが異なっても、normalize後に同じモデルなら
+ * builtin側のcanonical keyへ集約する。返すtableには同じ正規化IDの別名を残さず、
+ * resolvePriceの走査順で優先順位が逆転しないようにする。
+ */
+function mergePriceTables(builtin: PriceTable, cached: PriceTable, fresh: boolean): PriceTable {
+  const merged: PriceTable = { ...builtin };
+  const builtinKeyById = new Map<string, string>();
+  for (const rawKey of Object.keys(builtin)) {
+    const normalized = normalizeModelId(rawKey);
+    if (normalized.length > 0) builtinKeyById.set(normalized, rawKey);
+  }
+
+  // cache内だけで同じ正規化IDのaliasが複数ある場合も、最後の1件へ集約する。
+  const cachedKeyById = new Map<string, string>();
+  for (const [model, modelPrice] of Object.entries(cached)) {
+    const normalized = normalizeModelId(model);
+    if (normalized.length === 0) continue;
+    // Sonnet 5の期間境界と、stale cacheの既知モデルは、
+    // provider prefix・日付付きalias等でもbuiltinより先に解決させない。
+    if (normalized === 'claude-sonnet-5') continue;
+
+    const builtinKey = builtinKeyById.get(normalized);
+    if (builtinKey !== undefined) {
+      if (fresh) merged[builtinKey] = modelPrice;
+      continue;
+    }
+
+    const priorCachedKey = cachedKeyById.get(normalized);
+    if (priorCachedKey !== undefined && priorCachedKey !== model) delete merged[priorCachedKey];
+    // JSON cache由来のモデルIDをdata keyとして扱う。`__proto__`でもprototype setterを起動しない。
+    Object.defineProperty(merged, model, {
+      value: modelPrice,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    cachedKeyById.set(normalized, model);
+  }
+  return merged;
 }
 
 function toFiniteNumber(v: unknown): number | null {
@@ -269,18 +319,18 @@ export async function loadPriceTable(
   const cached = await readPriceCache(cacheDir);
 
   if (cached !== null && isCacheFresh(cached.fetchedAt)) {
-    return { ...builtin, ...cached.table };
+    return mergePriceTables(builtin, cached.table, true);
   }
 
   if (opts?.offline === true) {
-    return cached !== null ? { ...builtin, ...cached.table } : builtin;
+    return cached !== null ? mergePriceTables(builtin, cached.table, false) : builtin;
   }
 
   try {
     const remoteTable = await fetchLiteLLMPriceTable();
     await writePriceCache(cacheDir, remoteTable);
-    return { ...builtin, ...remoteTable };
+    return mergePriceTables(builtin, remoteTable, true);
   } catch {
-    return cached !== null ? { ...builtin, ...cached.table } : builtin;
+    return cached !== null ? mergePriceTables(builtin, cached.table, false) : builtin;
   }
 }

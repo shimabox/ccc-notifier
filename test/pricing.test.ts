@@ -47,7 +47,7 @@ describe('resolvePrice: normalization', () => {
   });
 });
 
-describe('resolvePrice: longest-prefix match', () => {
+describe('resolvePrice: normalized exact match specificity', () => {
   const table = builtinPriceTable();
 
   it('claude-opus-4-8-20260101 resolves to claude-opus-4-8 (5/25), not claude-opus-4 (15/75)', () => {
@@ -60,6 +60,30 @@ describe('resolvePrice: longest-prefix match', () => {
     const p = resolvePrice('claude-opus-4-20250514', table);
     expect(p?.input).toBe(15);
     expect(p?.output).toBe(75);
+  });
+});
+
+describe('builtin Claude Sonnet 5 promotional pricing', () => {
+  it('uses the introductory price through 2026-08-31 UTC', () => {
+    expect(builtinPriceTable(new Date('2026-08-31T23:59:59.999Z'))['claude-sonnet-5']).toEqual({
+      input: 2,
+      output: 10,
+      cacheWrite5m: 2.5,
+      cacheWrite1h: 4,
+      cacheRead: 0.2,
+      source: 'builtin',
+    });
+  });
+
+  it('switches to the standard price at 2026-09-01 00:00 UTC', () => {
+    expect(builtinPriceTable(new Date('2026-09-01T00:00:00.000Z'))['claude-sonnet-5']).toEqual({
+      input: 3,
+      output: 15,
+      cacheWrite5m: 3.75,
+      cacheWrite1h: 6,
+      cacheRead: 0.3,
+      source: 'builtin',
+    });
   });
 });
 
@@ -248,6 +272,100 @@ describe('loadPriceTable', () => {
     expect(table['claude-fable-5']).toEqual(builtinPriceTable()['claude-fable-5']);
   });
 
+  it('(d1) stale cache cannot keep overriding a known builtin model', async () => {
+    const staleFetchedAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const staleSonnet = {
+      input: 999,
+      output: 999,
+      cacheWrite5m: 999,
+      cacheWrite1h: 999,
+      cacheRead: 999,
+      source: 'litellm' as const,
+    };
+    await fs.writeFile(
+      path.join(cacheDir, 'pricing.json'),
+      JSON.stringify({ fetchedAt: staleFetchedAt, table: { 'anthropic/claude-sonnet-4-6-20260101': staleSonnet } }),
+      'utf8',
+    );
+
+    const table = await loadPriceTable(cacheDir, { offline: true });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(table['claude-sonnet-4-6']).toEqual(builtinPriceTable()['claude-sonnet-4-6']);
+    expect(resolvePrice('claude-sonnet-4-6-20260101', table)).toEqual(
+      builtinPriceTable()['claude-sonnet-4-6'],
+    );
+    expect(table['anthropic/claude-sonnet-4-6-20260101']).toBeUndefined();
+  });
+
+  it('(d1a) fresh cache alias overrides the matching builtin canonical model', async () => {
+    const freshFetchedAt = new Date().toISOString();
+    const freshAlias = {
+      input: 101,
+      output: 202,
+      cacheWrite5m: 303,
+      cacheWrite1h: 404,
+      cacheRead: 505,
+      source: 'litellm' as const,
+    };
+    await fs.writeFile(
+      path.join(cacheDir, 'pricing.json'),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'anthropic/claude-sonnet-4-6-20260101': freshAlias } }),
+      'utf8',
+    );
+
+    const table = await loadPriceTable(cacheDir, { offline: true });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(table['claude-sonnet-4-6']).toEqual(freshAlias);
+    expect(table['anthropic/claude-sonnet-4-6-20260101']).toBeUndefined();
+    expect(resolvePrice('anthropic.claude-sonnet-4-6[1m]', table)).toEqual(freshAlias);
+  });
+
+  it('(d1b) Sonnet 5 date-aware builtin wins even over a fresh cached price', async () => {
+    const freshFetchedAt = new Date().toISOString();
+    const wrongSonnet = {
+      input: 999,
+      output: 999,
+      cacheWrite5m: 999,
+      cacheWrite1h: 999,
+      cacheRead: 999,
+      source: 'litellm' as const,
+    };
+    await fs.writeFile(
+      path.join(cacheDir, 'pricing.json'),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'anthropic/claude-sonnet-5-20260617': wrongSonnet } }),
+      'utf8',
+    );
+
+    const table = await loadPriceTable(cacheDir, { offline: true });
+
+    expect(table['claude-sonnet-5']).toEqual(builtinPriceTable()['claude-sonnet-5']);
+    expect(table['anthropic/claude-sonnet-5-20260617']).toBeUndefined();
+  });
+
+  it('(d1c) fresh unknown model remains exact-match only', async () => {
+    const freshFetchedAt = new Date().toISOString();
+    const exactUnknown = {
+      input: 7,
+      output: 8,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheRead: 1,
+      source: 'litellm' as const,
+    };
+    await fs.writeFile(
+      path.join(cacheDir, 'pricing.json'),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'gpt-5.6-sol': exactUnknown } }),
+      'utf8',
+    );
+
+    const table = await loadPriceTable(cacheDir, { offline: true });
+
+    expect(resolvePrice('gpt-5.6-sol', table)).toEqual(exactUnknown);
+    expect(resolvePrice('gpt-5.6-sol-preview', table)).toBeNull();
+  });
+
   it('(d2) offline:true with no cache present returns builtin only', async () => {
     const table = await loadPriceTable(cacheDir, { offline: true });
 
@@ -337,17 +455,35 @@ describe('builtin OpenAI (Codex CLI) pricing', () => {
   });
 });
 
-describe('resolvePrice: OpenAI (Codex) longest-prefix match', () => {
+describe('resolvePrice: OpenAI (Codex) safe exact match', () => {
   const table = builtinPriceTable();
 
-  it('gpt-5.5-codex-mini and gpt-5.5-xyz both fall back to the gpt-5.5 entry (no dedicated gpt-5.5-codex entry exists)', () => {
-    const base = table['gpt-5.5'];
-    expect(resolvePrice('gpt-5.5-codex-mini', table)).toEqual(base);
-    expect(resolvePrice('gpt-5.5-xyz', table)).toEqual(base);
+  it('does not price a newer or arbitrary-suffixed model as an older gpt-5 model', () => {
+    expect(resolvePrice('gpt-5.6-sol', table)).toBeNull();
+    expect(resolvePrice('gpt-5.5-codex-mini', table)).toBeNull();
+    expect(resolvePrice('gpt-5.5-xyz', table)).toBeNull();
   });
 
-  it('o3-mini resolves to the o3 entry via prefix match', () => {
-    expect(resolvePrice('o3-mini', table)).toEqual(table['o3']);
+  it('keeps exact registered OpenAI models and rejects an unregistered o3 variant', () => {
+    expect(resolvePrice('gpt-5', table)).toEqual(table['gpt-5']);
+    expect(resolvePrice('gpt-5.1', table)).toEqual(table['gpt-5.1']);
+    expect(resolvePrice('gpt-5-codex', table)).toEqual(table['gpt-5-codex']);
+    expect(resolvePrice('o3-mini', table)).toBeNull();
+  });
+
+  it('resolves a new model only when the table contains that exact model', () => {
+    const exact = { ...table, 'gpt-5.6-sol': table['gpt-5.5'] };
+    expect(resolvePrice('gpt-5.6-sol', exact)).toEqual(table['gpt-5.5']);
+  });
+
+  it('does not accept arbitrary Claude suffixes after preserving known normalization', () => {
+    expect(resolvePrice('anthropic/claude-sonnet-5-20260617', table)).toEqual(
+      table['claude-sonnet-5'],
+    );
+    expect(resolvePrice('anthropic.claude-sonnet-5[1m]', table)).toEqual(
+      table['claude-sonnet-5'],
+    );
+    expect(resolvePrice('claude-sonnet-5evil', table)).toBeNull();
   });
 });
 
@@ -437,7 +573,7 @@ describe('loadPriceTable: litellm OpenAI (Codex CLI) entries', () => {
     expect(table['gpt-no-output']).toBeUndefined();
   });
 
-  it('(d) adopts openai o3 (overriding builtin) and o3-mini resolves to it by prefix', async () => {
+  it('(d) adopts openai o3 (overriding builtin) without applying it to o3-mini', async () => {
     fetchMock.mockResolvedValue(
       fakeResponse({
         'o3': {
@@ -459,7 +595,6 @@ describe('loadPriceTable: litellm OpenAI (Codex CLI) entries', () => {
     expect(o3.cacheWrite5m).toBe(0);
     expect(o3.cacheWrite1h).toBe(0);
 
-    // litellm の o3 が builtin の o3 を上書きし、o3-mini はプレフィックス一致でそれを解決する
-    expect(resolvePrice('o3-mini', table)).toEqual(o3);
+    expect(resolvePrice('o3-mini', table)).toBeNull();
   });
 });
