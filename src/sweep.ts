@@ -1,17 +1,15 @@
-// src/sweep.ts — 過去分の一括回収(backfill)。
+// src/sweep.ts — 手元のClaude/Codex JSONLから履歴を全再生成する。
 //
 // 契約: src/contracts.md の "src/sweep.ts(2026-07-07 追加)" 参照。
 //
 // hook(track)のタイミングに依存せず、~/.claude/projects 配下の全 transcript(メイン +
-// subagents/)を走査し、カーソルで「まだ計上していない分」を **ターン単位に復元** して履歴へ
-// 取り込む。パース規約は transcript.ts の aggregateNewTurn を1ミリも違えず踏襲する
+// subagents/)とCodex rolloutを先頭から走査し、**ターン単位に復元**して履歴へ取り込む。
+// パース規約は transcript.ts の aggregateNewTurn を1ミリも違えず踏襲する
 // (extractBucket / promptCandidate を再利用し、開始位置・改行終端・破損行スキップ・rescan ガード・
 //  去重・コンテキスト採取の各規則をコードレベルで同一にする)。
 //
-// 二重計上しない理由: メイン/SA いずれもカーソル(処理済みオフセット + tsFloor)と message.id +
-// requestId の去重で、hook が既に読んだ分は自動スキップされる。splitIntoTurnDrafts の newCursor は
-// 同一ウィンドウに対する aggregateNewTurn の newCursor と互換なので、hook ↔ sweep の相互運用でも
-// 取りこぼし/二重計上が起きない。
+// 通常実行は既存履歴とカーソルをresetして全件を書き直し、dry-runは同じ先頭走査をread-onlyで行う。
+// 生成したnewCursorはhookと互換なので、sweep後に追記された末尾は後続hookが回収できる。
 
 import { readFile } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
@@ -27,21 +25,22 @@ import {
   logError,
   paths,
   readConfig,
+  readConfigReadOnly,
   resetHistoryAndCursors,
   sanitizeCursor,
   saveCursor,
 } from "./store";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
-import { codexHome, detectCodex } from "./codex/env";
+import { codexHome } from "./codex/env";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import type { CodexTurnDraft } from "./codex/transcript";
 import { listCodexRollouts } from "./codex/sessions";
+import type { CodexRolloutDiscovery } from "./codex/sessions";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
 import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 import { waitForDataLock, type DataLockHandle } from "./data-lock";
 import { invalidateCanonicalDashboards } from "./dashboard-state";
-import * as p from "@clack/prompts";
 
 type SweepLockProvider = () => Promise<DataLockHandle | null>;
 
@@ -50,14 +49,6 @@ const NEWLINE = 0x0a; // '\n'
 const MAX_SEEN_KEYS = 500;
 const SYNTHETIC_MODEL = "<synthetic>";
 const DAY_MS = 86_400_000;
-
-// 進行中セッション保護: mtime がこの時間以内の transcript は既定でスキップする(--include-active で解除)。
-// 理由: 応答完了と同時に sweep が走ると、hook(track)より先にそのターンを読み切ってカーソルを
-// 進めてしまい、track が「新規なし」で即 return → そのターンだけ通知・再生成が消える競合が起きる。
-// 進行中のセッションは応答のたびに mtime が更新されるため、「直近更新なし」を完了済みの近似とする。
-// スキップした分は次回 sweep か通常の hook が拾うので取りこぼしにはならない。
-const ACTIVE_GUARD_MIN = 5;
-const ACTIVE_GUARD_MS = ACTIVE_GUARD_MIN * 60_000;
 
 export interface SweepSummary {
   projects: number;
@@ -68,11 +59,9 @@ export interface SweepSummary {
   totalJPY: number;
   subagentsUSD: number; // SA 回収額(別枠)。totalUSD / byModel はメイン基準のまま(SA を含めない)
   byModel: Record<string, number>;
-  skippedActive: number; // 進行中セッション保護でスキップした transcript 数(黙って落とさず必ず表示する)。Codex 分も合算する
   codexRecords: number; // Codex 由来の取り込みターン数(サマリの Codex 行用)。newRecords / totalUSD / byModel にも含める
   codexUSD: number; // Codex 由来の取り込み額(同上・Codex 行の別枠表示用)
   dryRun: boolean;
-  lockTimeouts: number;
   sourceFailures: number;
 }
 
@@ -438,8 +427,13 @@ async function processTranscriptLocked(
     sa = null;
   }
   const saHasUsage = sa !== null && sa.apiCalls > 0;
+  const saLastTs = saHasUsage ? maxCursorTs(sa!.newCursors) : null;
+  const saIsInPeriod =
+    saHasUsage &&
+    (daysCutoff === null ||
+      (saLastTs !== null && Number.isFinite(Date.parse(saLastTs)) && Date.parse(saLastTs) >= daysCutoff));
 
-  if (saHasUsage) {
+  if (saIsInPeriod) {
     const saBreakdown = computeCost(sa!.perModel, {}, table);
     summary.subagentsUSD += saBreakdown.usd; // SA 回収額はサマリ別枠に加算(totalUSD には混ぜない)
     const saBlock = {
@@ -459,7 +453,7 @@ async function processTranscriptLocked(
       // 新規ターンが無い → SA だけの回収レコードを作る。
       const rec: TurnRecord = {
         schemaVersion: 1,
-        ts: maxCursorTs(sa!.newCursors) ?? new Date().toISOString(),
+        ts: saLastTs ?? new Date().toISOString(),
         sessionId: "",
         project: "",
         gitBranch: null,
@@ -507,35 +501,13 @@ async function processTranscriptLocked(
   }
 }
 
-async function processTranscript(
-  mainPath: string,
-  table: PriceTable,
-  fx: FxResult,
-  daysCutoff: number | null,
-  dryRun: boolean,
-  summary: SweepSummary,
-  lockProvider: SweepLockProvider,
-): Promise<void> {
-  const lock = dryRun ? null : await lockProvider();
-  if (!dryRun && lock === null) {
-    logError("sweep:data-lock", new Error(`data lock timeout: ${mainPath}`));
-    summary.lockTimeouts += 1;
-    return;
-  }
-  try {
-    await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary);
-  } finally {
-    lock?.release();
-  }
-}
-
 // ============ Codex(rollout)の処理 ============
 //
 // Codex CLI(OpenAI)は ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl にセッションログを書く。
 // Claude と違い assistant 行ごとの usage は無く、event_msg/token_count が運ぶ累積カウンタの
 // 逐次ステップ差分で集計する(詳細は src/codex/transcript.ts)。ここでは splitIntoCodexTurnDrafts が
-// 返すターン下書きを TurnRecord 化するだけで、二重計上防止の流儀(active guard・カーソル去重・dry-run)は
-// Claude 走査とそろえる。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/sweep.ts。
+// 返すターン下書きをTurnRecord化する。sweepでは常にcursorなしで先頭から読み、生成したcursorは
+// 後続hookとの互換性を保つ。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/sweep.ts。
 
 /** Codex ターン下書きを TurnRecord 化する(source:'codex'・ingest:'sweep'・サブエージェント無し)。 */
 function codexDraftToRecord(
@@ -570,8 +542,8 @@ function codexDraftToRecord(
 }
 
 /**
- * 1 つの rollout ファイルを処理する。カーソルで未計上分をターン単位に復元し、--days で古いターンを
- * 捨てつつ(カーソルは進める)TurnRecord 化する。二重計上は codexTotals の差分方式 + カーソルで防ぐ。
+ * 1つのrolloutファイルをターン単位に復元し、--daysで古いターンを捨てつつTurnRecord化する。
+ * sweepからはcursorなしで呼び、保存するnewCursorは後続hookが末尾追記だけを回収するために使う。
  */
 async function processCodexRolloutLocked(
   rolloutPath: string,
@@ -624,73 +596,36 @@ async function processCodexRolloutLocked(
   }
 }
 
-async function processCodexRollout(
-  rolloutPath: string,
-  table: PriceTable,
-  fx: FxResult,
-  daysCutoff: number | null,
-  dryRun: boolean,
-  summary: SweepSummary,
-  lockProvider: SweepLockProvider,
-): Promise<void> {
-  const lock = dryRun ? null : await lockProvider();
-  if (!dryRun && lock === null) {
-    logError("sweep:data-lock", new Error(`data lock timeout: ${rolloutPath}`));
-    summary.lockTimeouts += 1;
-    return;
-  }
+interface CodexSweepSource {
+  discovery: CodexRolloutDiscovery;
+}
+
+function isMissingPathError(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
+/** Codex sourceのnon-symlink/readable探索結果をpreflightと実走査で共有する。 */
+async function discoverCodexSweepSource(): Promise<CodexSweepSource | null> {
+  const home = codexHome();
+  let homeStat;
   try {
-    await processCodexRolloutLocked(rolloutPath, table, fx, daysCutoff, dryRun, summary);
-  } finally {
-    lock?.release();
+    homeStat = await fsp.lstat(home);
+  } catch (err) {
+    if (isMissingPathError(err)) return null;
+    return { discovery: { rollouts: [], unreadableDirs: 1 } };
   }
-}
-
-/**
- * Codex 走査の可否判定を兼ねた sessions ルートの解決。
- * detectCodex() 偽 or codexHome()/sessions がディレクトリでなければ null(= 走査不能)。
- * runSweep の「Claude ルート不在でも Codex が走査可能なら続行する」判定と sweepCodex が共有する。
- */
-async function codexSessionsRoot(): Promise<string | null> {
-  if (!detectCodex()) return null;
-  const sessionsRoot = join(codexHome(), "sessions");
-  const isDir = await fsp
-    .stat(sessionsRoot)
-    .then((st) => st.isDirectory())
-    .catch(() => false);
-  return isDir ? sessionsRoot : null;
-}
-
-/**
- * Codex 走査。detectCodex() 偽 or codexHome()/sessions 不在なら黙ってスキップ(サマリにも出さない
- * = Codex 未使用ユーザーには無出力)。進行中セッション保護(active guard)は Claude と共通で、
- * スキップ件数は既存の skippedActive に合算する。
- */
-async function sweepCodex(
-  summary: SweepSummary,
-  table: PriceTable,
-  fx: FxResult,
-  daysCutoff: number | null,
-  flags: SweepFlags,
-  lockProvider: SweepLockProvider,
-): Promise<void> {
-  const sessionsRoot = await codexSessionsRoot();
-  if (sessionsRoot === null) return;
-
-  const discovery = await listCodexRollouts(sessionsRoot);
-  for (const rolloutPath of discovery.rollouts) {
-    // 進行中セッション保護(Claude と同じ mtime ガード)。カーソルも進めず丸ごと後回しにする。
-    if (!flags.includeActive && (await isRecentlyModified(rolloutPath))) {
-      summary.skippedActive += 1;
-      continue;
-    }
-    try {
-      await processCodexRollout(rolloutPath, table, fx, daysCutoff, flags.dryRun, summary, lockProvider);
-    } catch (err) {
-      // 1 ファイルの失敗で全体を止めない(Claude 走査と同じ)。
-      logError("sweep:codex", err);
-    }
+  if (!homeStat.isDirectory()) {
+    return { discovery: { rollouts: [], unreadableDirs: 1 } };
   }
+
+  const sessionsRoot = join(home, "sessions");
+  try {
+    await fsp.lstat(sessionsRoot);
+  } catch (err) {
+    if (isMissingPathError(err)) return null;
+    return { discovery: { rollouts: [], unreadableDirs: 1 } };
+  }
+  return { discovery: await listCodexRollouts(sessionsRoot) };
 }
 
 // ============ 走査 ============
@@ -704,9 +639,6 @@ interface SweepFlags {
   dryRun: boolean;
   days: number | null;
   projects: string | null;
-  includeActive: boolean; // 進行中セッション保護(mtime ガード)を無効化して全 transcript を対象にする
-  rebuild: boolean;
-  yes: boolean;
 }
 
 function parseSweepFlags(argv: string[]): { flags: SweepFlags } | { error: string } {
@@ -714,20 +646,11 @@ function parseSweepFlags(argv: string[]): { flags: SweepFlags } | { error: strin
     dryRun: false,
     days: null,
     projects: null,
-    includeActive: false,
-    rebuild: false,
-    yes: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") {
       flags.dryRun = true;
-    } else if (a === "--include-active") {
-      flags.includeActive = true;
-    } else if (a === "--rebuild") {
-      flags.rebuild = true;
-    } else if (a === "--yes" || a === "-y") {
-      flags.yes = true;
     } else if (a === "--days" || a.startsWith("--days=")) {
       const v = a.includes("=") ? a.slice("--days=".length) : argv[++i];
       if (v === undefined || v.length === 0) return { error: "--days には値が必要です" };
@@ -742,10 +665,6 @@ function parseSweepFlags(argv: string[]): { flags: SweepFlags } | { error: strin
       return { error: `不明なoptionまたは余分な引数です: ${a}` };
     }
   }
-  if (flags.yes && !flags.rebuild) return { error: "--yes/-y は --rebuild と一緒に指定してください" };
-  if (flags.rebuild && (flags.dryRun || flags.days !== null || flags.includeActive || flags.projects !== null)) {
-    return { error: "--rebuild は --dry-run/--days/--include-active/--projects と併用できません" };
-  }
   return { flags };
 }
 
@@ -759,33 +678,7 @@ async function listProjectDirs(root: string): Promise<string[] | null> {
   }
 }
 
-/**
- * 進行中セッション保護: transcript の mtime が ACTIVE_GUARD_MS 以内なら true。
- * stat 失敗は false(= 従来どおり処理へ進め、read 時の防御に任せる)。
- * 保護は「スキップ」側の追加ガードなので、判定不能時に処理を止めない側へ倒す。
- */
-async function isRecentlyModified(path: string): Promise<boolean> {
-  try {
-    const st = await fsp.stat(path);
-    return Date.now() - st.mtimeMs < ACTIVE_GUARD_MS;
-  } catch {
-    return false;
-  }
-}
-
-/** プロジェクトディレクトリ直下の *.jsonl(1階層のみ・通常ファイル)を絶対パスで列挙する。 */
-async function listTranscripts(projectDir: string): Promise<string[]> {
-  try {
-    const entries = await fsp.readdir(projectDir, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isFile() && e.name.endsWith(".jsonl"))
-      .map((e) => join(projectDir, e.name));
-  } catch {
-    return []; // 読めないプロジェクトはスキップ
-  }
-}
-
-/** rebuild用。走査失敗を「対象なし」と混同しない。 */
+/** 走査失敗を「対象なし」と混同しない。 */
 async function listTranscriptsStrict(projectDir: string): Promise<string[] | null> {
   try {
     const entries = await fsp.readdir(projectDir, { withFileTypes: true });
@@ -797,34 +690,21 @@ async function listTranscriptsStrict(projectDir: string): Promise<string[] | nul
   }
 }
 
-function printSweepSummary(summary: SweepSummary, fx: FxResult, opts: { rebuild?: boolean } = {}): void {
+function printSweepSummary(summary: SweepSummary, fx: FxResult): void {
   if (summary.dryRun) {
     console.log("(dry-run: 書き込みは行っていません)");
   }
   console.log(
     `走査: プロジェクト ${summary.projects} / transcript ${summary.transcripts} / サブエージェントファイル ${summary.agentFiles}`,
   );
-  if (summary.skippedActive > 0) {
-    console.log(
-      `スキップ: ${summary.skippedActive} transcript(直近${ACTIVE_GUARD_MIN}分以内に更新 = 進行中セッションの可能性)。` +
-        `セッション完了後に再実行するか、完了済みと分かっている場合は --include-active で取り込めます`,
-    );
-  }
-
-  if (summary.lockTimeouts > 0) {
-    console.log(
-      `未完了: ${summary.lockTimeouts} 件はdata lockを取得できず未処理です。カーソルは進めていないため再実行してください`,
-    );
-  }
-
-  if (summary.newRecords === 0 && summary.lockTimeouts === 0) {
-    console.log("新規はありませんでした");
+  if (summary.newRecords === 0) {
+    console.log("再生成対象はありませんでした");
   } else {
     console.log(
-      `新規取り込み: ${summary.newRecords} ターン、合計 ${formatUSD(summary.totalUSD)}(${formatJPY(summary.totalJPY)})`,
+      `再生成: ${summary.newRecords} ターン、合計 ${formatUSD(summary.totalUSD)}(${formatJPY(summary.totalJPY)})`,
     );
     // SA 回収額(別枠)。合計(メイン基準)には含まれないため、回収の主役が SA のケース
-    // (hook 導入前セッションの backfill 等)でも回収額が見えるようにする。
+    // (hook導入前セッションの全再生成等)でも回収額が見えるようにする。
     if (summary.subagentsUSD > 0) {
       console.log(
         `  うちサブエージェント: ${formatUSD(summary.subagentsUSD)}(${formatJPY(summary.subagentsUSD * fx.rate)})`,
@@ -850,55 +730,116 @@ function printSweepSummary(summary: SweepSummary, fx: FxResult, opts: { rebuild?
     }
   }
 
-  if (summary.lockTimeouts === 0 && !opts.rebuild) {
-    console.log("既に計上済みの分はスキップされました(二重計上なし)");
-  }
   console.log(`円換算レート: 1USD = ${fx.rate}JPY(source=${fx.source})`);
+}
+
+function reportSourceFailure(
+  summary: SweepSummary,
+  dryRun: boolean,
+  scope: string,
+  err: unknown,
+  count = 1,
+): void {
+  summary.sourceFailures += count;
+  if (dryRun) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`${scope}: ${message}`);
+    return;
+  }
+  logError(scope, err);
+}
+
+/**
+ * Claude main/agentとCodex rolloutを、保存済みcursorに依存せず先頭から走査する。
+ * 呼び出し元が通常実行ではdata lockを保持し、dry-runでは書き込みを無効化する。
+ */
+async function scanAllSources(
+  projectDirs: string[] | null,
+  codexSource: CodexSweepSource | null,
+  table: PriceTable,
+  fx: FxResult,
+  daysCutoff: number | null,
+  dryRun: boolean,
+  summary: SweepSummary,
+): Promise<void> {
+  for (const projectDir of projectDirs ?? []) {
+    const transcripts = await listTranscriptsStrict(projectDir);
+    if (transcripts === null) {
+      reportSourceFailure(
+        summary,
+        dryRun,
+        "sweep:discovery",
+        new Error(`cannot read project: ${projectDir}`),
+      );
+      continue;
+    }
+    for (const mainPath of transcripts) {
+      summary.transcripts += 1;
+      try {
+        await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, {
+          ignoreCursors: true,
+          strictRead: true,
+        });
+      } catch (err) {
+        reportSourceFailure(summary, dryRun, "sweep:transcript", err);
+      }
+    }
+  }
+
+  if (codexSource === null) return;
+  const { discovery } = codexSource;
+  if (discovery.unreadableDirs > 0) {
+    reportSourceFailure(
+      summary,
+      dryRun,
+      "sweep:codex-discovery",
+      new Error(`${discovery.unreadableDirs} directories could not be read`),
+      discovery.unreadableDirs,
+    );
+  }
+  for (const rolloutPath of discovery.rollouts) {
+    try {
+      await processCodexRolloutLocked(rolloutPath, table, fx, daysCutoff, dryRun, summary, {
+        ignoreCursors: true,
+        strictRead: true,
+      });
+    } catch (err) {
+      reportSourceFailure(summary, dryRun, "sweep:codex", err);
+    }
+  }
 }
 
 export async function runSweep(
   argv: string[],
-  deps: {
-    lockProvider?: SweepLockProvider;
-    confirm?: (opts: { message: string; initialValue: boolean }) => Promise<unknown>;
-  } = {},
+  deps: { lockProvider?: SweepLockProvider } = {},
 ): Promise<number> {
   const parsed = parseSweepFlags(argv);
   if ("error" in parsed) {
-    console.error(`${parsed.error}\n使い方 / Usage: ccc-notifier sweep [--dry-run] [--days N] [--include-active]\n` +
-      "                 ccc-notifier sweep --rebuild [--yes]");
+    console.error(`${parsed.error}\n使い方 / Usage: ccc-notifier sweep [--dry-run] [--days N] [--projects DIR]`);
     return 1;
   }
   const flags = parsed.flags;
   const root = projectsRoot(flags.projects);
 
   // Claude ルート不在でも、Codex 側が走査可能なら警告1行を出して Codex 走査だけ続行する
-  // (Codex 専用ユーザーの backfill を成立させるため)。両方走査不能なときだけ従来どおりエラー終了。
+  // (Codex 専用ユーザーの全再生成を成立させるため)。両方走査不能ならreset前にエラー終了。
   const projectDirs = await listProjectDirs(root);
-  const codexRoot = await codexSessionsRoot();
+  const codexSource = await discoverCodexSweepSource();
   if (projectDirs === null) {
-    if (codexRoot === null) {
+    if (codexSource === null || codexSource.discovery.unreadableDirs > 0) {
       console.log(`走査ルートが見つかりません: ${root}`);
       return 1;
     }
     console.log(`Claude の走査ルートが見つかりません: ${root}(Codex のみ走査します)`);
   }
 
-  if (flags.rebuild && !flags.yes) {
-    const confirmed = await (deps.confirm ?? p.confirm)({
-      message:
-        "履歴(history)と取り込み位置(cursor)を削除し、backupを作らず、元JSONLから実行時点の単価・為替で全履歴とpromptを再生成します。" +
-        "元のJSONLがない履歴は戻りません。続行しますか?",
-      initialValue: false,
-    });
-    if (p.isCancel(confirmed) || !confirmed) {
-      p.cancel("キャンセルしました");
-      return 0;
-    }
-  }
-
   // 実行時に一度だけ: 設定 / 単価表(オンライン可・失敗時は内蔵へフォールバック) / 為替。
-  const cfg = readConfig();
+  const cfg = flags.dryRun
+    ? readConfigReadOnly((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`sweep:config: ${message}(既定値で続行します)`);
+      })
+    : readConfig();
   const cacheDir = paths().cacheDir;
   const table = await loadPriceTable(cacheDir, { offline: false });
   const fx = await getUsdJpy(cfg, cacheDir);
@@ -912,105 +853,56 @@ export async function runSweep(
     totalJPY: 0,
     subagentsUSD: 0,
     byModel: {},
-    skippedActive: 0,
     codexRecords: 0,
     codexUSD: 0,
     dryRun: flags.dryRun,
-    lockTimeouts: 0,
     sourceFailures: 0,
   };
 
   const daysCutoff = flags.days !== null ? Date.now() - flags.days * DAY_MS : null;
   const lockProvider = deps.lockProvider ?? (() => waitForDataLock());
 
-  if (flags.rebuild) {
-    const lock = await lockProvider();
-    if (lock === null) {
-      console.error("全再生成のdata lockを取得できませんでした。後でもう一度お試しください");
-      return 1;
-    }
+  if (flags.dryRun) {
     try {
-      invalidateCanonicalDashboards();
-      resetHistoryAndCursors();
-
-      for (const projectDir of projectDirs ?? []) {
-        const transcripts = await listTranscriptsStrict(projectDir);
-        if (transcripts === null) {
-          summary.sourceFailures += 1;
-          logError("sweep:rebuild-discovery", new Error(`cannot read project: ${projectDir}`));
-          continue;
-        }
-        for (const mainPath of transcripts) {
-          summary.transcripts += 1;
-          try {
-            await processTranscriptLocked(mainPath, table, fx, null, false, summary, {
-              ignoreCursors: true,
-              strictRead: true,
-            });
-          } catch (err) {
-            summary.sourceFailures += 1;
-            logError("sweep:rebuild-transcript", err);
-          }
-        }
-      }
-
-      if (codexRoot !== null) {
-        const discovery = await listCodexRollouts(codexRoot);
-        summary.sourceFailures += discovery.unreadableDirs;
-        for (const rolloutPath of discovery.rollouts) {
-          try {
-            await processCodexRolloutLocked(rolloutPath, table, fx, null, false, summary, {
-              ignoreCursors: true,
-              strictRead: true,
-            });
-          } catch (err) {
-            summary.sourceFailures += 1;
-            logError("sweep:rebuild-codex", err);
-          }
-        }
-      }
-      invalidateCanonicalDashboards();
+      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary);
     } catch (err) {
-      summary.sourceFailures += 1;
-      logError("sweep:rebuild", err);
-    } finally {
-      lock.release();
+      reportSourceFailure(summary, true, "sweep:dry-run", err);
     }
-
     summary.totalJPY = summary.totalUSD * fx.rate;
-    printSweepSummary(summary, fx, { rebuild: true });
+    printSweepSummary(summary, fx);
     if (summary.sourceFailures > 0) {
       console.error(
-        `一部再生成です(${summary.sourceFailures}件失敗)。同じ ccc-notifier sweep --rebuild を再実行してください / partial rebuild; retry`,
+        `一部を走査できませんでした(${summary.sourceFailures}件失敗)。sourceを確認して同じ ccc-notifier sweep --dry-run を再実行してください`,
       );
       return 1;
     }
-    console.log("履歴と取り込み位置を元JSONLから全再生成しました");
     return 0;
   }
 
-  for (const projectDir of projectDirs ?? []) {
-    const transcripts = await listTranscripts(projectDir);
-    for (const mainPath of transcripts) {
-      summary.transcripts += 1;
-      // 進行中セッション保護(冒頭の ACTIVE_GUARD_MS コメント参照)。カーソルも進めず丸ごと後回しにする。
-      if (!flags.includeActive && (await isRecentlyModified(mainPath))) {
-        summary.skippedActive += 1;
-        continue;
-      }
-      try {
-        await processTranscript(mainPath, table, fx, daysCutoff, flags.dryRun, summary, lockProvider);
-      } catch (err) {
-        // 1 transcript の失敗で全体を止めない。
-        logError("sweep:transcript", err);
-      }
-    }
+  const lock = await lockProvider();
+  if (lock === null) {
+    console.error("全再生成のdata lockを取得できませんでした。後でもう一度お試しください");
+    return 1;
   }
-
-  // Claude 走査の後に Codex 走査(未導入・sessions 不在なら黙ってスキップ)。
-  await sweepCodex(summary, table, fx, daysCutoff, flags, lockProvider);
+  try {
+    invalidateCanonicalDashboards();
+    resetHistoryAndCursors();
+    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary);
+    invalidateCanonicalDashboards();
+  } catch (err) {
+    reportSourceFailure(summary, false, "sweep", err);
+  } finally {
+    lock.release();
+  }
 
   summary.totalJPY = summary.totalUSD * fx.rate;
   printSweepSummary(summary, fx);
-  return summary.lockTimeouts > 0 ? 1 : 0;
+  if (summary.sourceFailures > 0) {
+    console.error(
+      `一部再生成です(${summary.sourceFailures}件失敗)。同じ ccc-notifier sweep を再実行してください / partial regeneration; retry`,
+    );
+    return 1;
+  }
+  console.log("履歴と取り込み位置を元JSONLから全再生成しました");
+  return 0;
 }

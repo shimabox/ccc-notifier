@@ -173,6 +173,30 @@ export function readConfig(): Config {
   return mergeConfig(parsed);
 }
 
+/**
+ * dry-run等、診断ログを含む永続ファイルを変更できない経路向けのconfig reader。
+ * 読み込み/parse失敗は呼び出し元へ通知し、通常readConfigと同じDEFAULT_CONFIGへ倒す。
+ */
+export function readConfigReadOnly(onError?: (err: unknown) => void): Config {
+  const file = configFilePath();
+  if (!existsSync(file)) return structuredClone(DEFAULT_CONFIG);
+
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (err) {
+    onError?.(err);
+    return structuredClone(DEFAULT_CONFIG);
+  }
+
+  try {
+    return mergeConfig(JSON.parse(raw) as unknown);
+  } catch (err) {
+    onError?.(err);
+    return structuredClone(DEFAULT_CONFIG);
+  }
+}
+
 // ---- 通知ミュート(muted.json) ----
 //
 // `cccn mute` / `cccn unmute` が管理する通知の一時停止状態。抑止するのは OS/Slack 通知のみで、
@@ -336,7 +360,7 @@ export function appendTurn(record: TurnRecord): void {
 }
 
 /**
- * sweep --rebuild 用に、再生成対象だけを空に戻す。
+ * sweepの全再生成用に、再生成対象だけを空に戻す。
  * config/cache/mute/通知状態/Codex activity は意図的に触らず、backup も作らない。
  */
 export function resetHistoryAndCursors(): void {
