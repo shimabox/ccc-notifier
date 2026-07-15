@@ -19,7 +19,7 @@ in 1.2k(cache 40%)/ out 480 · 📁 my-app · 今日: $1.85
 ## 特徴 / Features
 
 - **ターン毎に自動通知** — Claude Code / Codex CLI の応答が完了するたび(Stop hook)に、そのターンのコストを自動でプッシュ通知します。自分から `/cost` を見に行く必要はありません
-- **$ と ¥ を併記** — USD と JPY の両方を毎回表示します(為替レートは自動取得 + キャッシュ + 固定フォールバックの三段構え)
+- **$ と ¥ を併記** — USD と JPY の両方を毎回表示します(為替レートは有効期限内のキャッシュ → オンライン取得 → 期限切れキャッシュ → 固定フォールバックの順で選択)
 - **プロンプト全文をローカルに履歴保存** — `~/.ccc-notifier/history.jsonl` にそのターンのプロンプト全文を保存します(外部には送信されません)
 - **HTMLダッシュボード** — `dashboard` コマンドで、サマリー・コスト推移(**日 / 週 / 月**で切替、横スクロールで過去まで)・モデル別/プロジェクト別内訳・検索できるターン履歴を1枚の HTML(完全自己完結・ライト/ダーク対応)に書き出してブラウザで開きます。棒をクリックするとその期間が選択され、内訳・履歴が連動(「通算」で全期間)。Codex CLI を併用していれば **Claude / Codex** のソースフィルタも使えます
 - **月予算(monthly budget)** — 月に使える金額(USD)を設定すると、ダッシュボードに**当月の使用額 / 予算・使用率(%)** をプログレスバーで表示します(`init` の対話、または `ccc-notifier budget <金額>` で設定。Claude Code と Codex CLI の合算です)
@@ -76,7 +76,7 @@ node dist/cli.js init
 
    - 通知チャネル(OS通知のみ / Slackのみ / OS通知+Slack / 通知なし(記録・ダッシュボードのみ))
    - コスト表示ラベル(API換算 / 実額)
-   - USD/JPY のフォールバック為替レート(既定 150円)
+   - USD/JPY のフォールバック為替レート(通常の換算レートを固定する設定ではなく、キャッシュもオンライン取得も使えない場合の最終手段。空欄なら既存の保存値を維持し、初回は既定 160円)
    - 月の予算(USD、既定 $400。`0` で無効。ダッシュボードに当月の使用率を表示。詳細は [月予算](docs/monthly-budget.md))
    - (Codex CLI 検出時)Codex にもコスト通知を入れるか(既定 Yes。詳細は [Codex CLI 対応](docs/codex.md))
 
@@ -100,7 +100,7 @@ CI などから非対話で `init` したい場合は次のフラグが使えま
 | `--slack-only` | Slack のみにする(OS 通知を無効化)。`--slack-webhook` と併用が必須 |
 | `--no-notify` | 通知なし(記録・ダッシュボードのみ)。`--os-only` / `--slack-only` / `--slack-webhook` とは併用不可(例: `npx ccc-notifier init --yes --no-notify`。詳細は [設定](docs/configuration.md#通知なしモード記録ダッシュボードのみ--dashboard-only-mode)) |
 | `--label <api_equivalent\|actual>` | コスト表示ラベルを指定 |
-| `--rate <number>` | USD/JPY フォールバックレートを指定 |
+| `--rate <number>` | USD/JPY の最終フォールバックレートを指定(通常はキャッシュ・オンライン取得を優先) |
 | `--budget <USD>` | 月予算(USD)を指定(0 で無効)。未指定なら既定 **$400**(既存設定があれば維持) |
 | `--codex` | Codex CLI にも Stop hook を導入する。既存設定がある環境で素の `init --yes --codex` を実行した場合はCodex hookだけを安全に更新する(`~/.codex` 未検出でも強制導入。詳細は [Codex CLI 対応](docs/codex.md)) |
 | `--no-codex` | Codex hook を導入しない(検出しても触らない)。`--codex` とは併用不可 |
