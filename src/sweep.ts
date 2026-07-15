@@ -513,13 +513,17 @@ async function processTranscriptLocked(
       };
 
       const groupMs = group.lastTs === null ? NaN : Date.parse(group.lastTs);
-      let target = Number.isFinite(groupMs)
-        ? parentRecords.find((rec) => {
-            const recMs = Date.parse(rec.ts);
-            return Number.isFinite(recMs) && recMs >= groupMs;
-          })
-        : undefined;
-      target ??= parentRecords[parentRecords.length - 1];
+      let target: TurnRecord | undefined;
+      if (Number.isFinite(groupMs)) {
+        target = parentRecords.find((rec) => {
+          const recMs = Date.parse(rec.ts);
+          return Number.isFinite(recMs) && recMs >= groupMs;
+        });
+      } else {
+        // 時刻不明の場合だけ従来どおり最後の親へ寄せる。時刻が分かり、
+        // それ以後の親が無い場合は誤った日/月へ載せずSA-onlyにする。
+        target = parentRecords[parentRecords.length - 1];
+      }
 
       if (target === undefined) {
         target = {

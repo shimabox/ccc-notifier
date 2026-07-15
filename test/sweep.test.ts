@@ -303,6 +303,38 @@ describe("runSweep", () => {
     expect(rows[0].subagents?.apiCalls).toBe(1);
   });
 
+  it.each([
+    {
+      boundary: "日境界",
+      agentTs: "2026-07-07T00:00:10.000Z",
+      rewriteMain: (raw: string) => raw,
+    },
+    {
+      boundary: "月境界",
+      agentTs: "2026-08-01T00:00:10.000Z",
+      rewriteMain: (raw: string) => raw
+        .replaceAll("2026-07-06T10:00", "2026-07-31T23:50")
+        .replaceAll("2026-07-06T10:01", "2026-07-31T23:51"),
+    },
+  ])("1d. $boundary 後に完了したagentを過去の親へ付けずSA-onlyにする", async ({ agentTs, rewriteMain }) => {
+    placeFixtures({ withSA: true });
+    writeFileSync(mainPath, rewriteMain(readFileSync(mainPath, "utf8")), "utf8");
+    const agent = readFileSync(saPath, "utf8").replace(/"timestamp":"[^"]+"/g, `"timestamp":"${agentTs}"`);
+    writeFileSync(saPath, agent, "utf8");
+
+    expect((await sweep([])).code).toBe(0);
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(3);
+    expect(rows.slice(0, 2).every((row) => row.subagents === undefined)).toBe(true);
+    const saOnly = rows[2];
+    expect(saOnly.ts).toBe(agentTs);
+    expect(saOnly.costUSD).toBe(0);
+    expect(saOnly.prompt).toBe("");
+    expect(saOnly.subagents?.costUSD).toBeCloseTo(0.033, 10);
+    expect(saOnly.subagents?.apiCalls).toBe(1);
+  });
+
   // 2. 再 sweep → cursorを捨てて同じsourceから全件を置換再生成する。
   it("2. a second sweep rebuilds the same two records without duplication", async () => {
     placeFixtures({ withSA: true });
@@ -377,8 +409,8 @@ describe("runSweep", () => {
     expect(readHistory()).toHaveLength(2);
   });
 
-  // 7. SAだけ追記後も、全再生成した同じ2 main turnの末尾へ全SA usageを付ける。
-  it("7. an agent-only append is included in a full rebuild without adding a stale third row", async () => {
+  // 7. SAだけ追記され、その完了後に親turnが無ければSA-only行へ全usageを付ける。
+  it("7. an agent-only append after the last parent is rebuilt as an SA-only row", async () => {
     placeFixtures({ withSA: true });
 
     await sweep([]); // メインもSAも処理済みにする
@@ -395,9 +427,12 @@ describe("runSweep", () => {
     );
 
     const rows = readHistory();
-    expect(rows).toHaveLength(2);
-    const last = rows[1];
-    expect(last.prompt).toBe("ターン2のプロンプト");
+    expect(rows).toHaveLength(3);
+    expect(rows[1].prompt).toBe("ターン2のプロンプト");
+    expect(rows[1].subagents).toBeUndefined();
+    const last = rows[2];
+    expect(last.prompt).toBe("");
+    expect(last.costUSD).toBe(0);
     expect(last.subagents).toBeDefined();
     expect(last.subagents!.costUSD).toBeCloseTo(0.048, 10);
     expect(last.subagents!.apiCalls).toBe(2);
