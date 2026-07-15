@@ -55,6 +55,68 @@ const NEWLINE = 0x0a; // '\n'
 const MAX_SEEN_KEYS = 500;
 const SYNTHETIC_MODEL = "<synthetic>";
 const DAY_MS = 86_400_000;
+const SWEEP_PROGRESS_INTERVAL = 25;
+
+type SweepProgressEvent =
+  | { type: "preparing"; dryRun: boolean }
+  | { type: "lock" }
+  | { type: "scan-start"; claudeProjects: number; codexRollouts: number }
+  | {
+      type: "source-progress";
+      source: "claude" | "codex";
+      completed: number;
+      total: number;
+    }
+  | {
+      type: "scan-complete";
+      claudeTranscripts: number;
+      codexRollouts: number;
+      records: number;
+      failures: number;
+    }
+  | { type: "dashboard-start" };
+
+type SweepProgressReporter = (event: SweepProgressEvent) => void;
+
+/**
+ * 長いsweepが停止して見えないよう、改行区切りの簡素な進捗だけを表示する。
+ * source名やpathは受け取らず、件数以外の利用データを出力しない。
+ */
+function createSweepProgressReporter(): SweepProgressReporter {
+  const lastSourceCount: Partial<Record<"claude" | "codex", number>> = {};
+  return (event): void => {
+    if (event.type === "preparing") {
+      console.log(`準備: 単価表・為替を読み込みます${event.dryRun ? " (dry-run)" : ""}`);
+      return;
+    }
+    if (event.type === "lock") {
+      console.log("lock: 取得を待っています");
+      return;
+    }
+    if (event.type === "scan-start") {
+      console.log(
+        `走査開始: Claude project ${event.claudeProjects} / Codex rollout ${event.codexRollouts}`,
+      );
+      return;
+    }
+    if (event.type === "source-progress") {
+      if (event.completed <= 0 || event.total <= 0) return;
+      if (event.completed % SWEEP_PROGRESS_INTERVAL !== 0) return;
+      if (lastSourceCount[event.source] === event.completed) return;
+      lastSourceCount[event.source] = event.completed;
+      const label = event.source === "claude" ? "Claude transcript" : "Codex rollout";
+      console.log(`走査進捗: ${label} ${event.completed}/${event.total}`);
+      return;
+    }
+    if (event.type === "scan-complete") {
+      console.log(
+        `走査完了: Claude transcript ${event.claudeTranscripts} / Codex rollout ${event.codexRollouts} / 対象 ${event.records} ターン / 失敗 ${event.failures}`,
+      );
+      return;
+    }
+    console.log("dashboard: 生成開始");
+  };
+}
 
 export interface SweepSummary {
   projects: number;
@@ -767,7 +829,17 @@ async function scanAllSources(
   daysCutoff: number | null,
   dryRun: boolean,
   summary: SweepSummary,
+  progress: SweepProgressReporter,
 ): Promise<void> {
+  const codexRollouts = codexSource?.discovery.rollouts.length ?? 0;
+  progress({
+    type: "scan-start",
+    claudeProjects: projectDirs?.length ?? 0,
+    codexRollouts,
+  });
+
+  // 件数だけを先に確定し、各ファイルの名前を出さずN/Mで進捗を示す。
+  const transcriptPaths: string[] = [];
   for (const projectDir of projectDirs ?? []) {
     const transcripts = await listTranscriptsStrict(projectDir);
     if (transcripts === null) {
@@ -779,40 +851,63 @@ async function scanAllSources(
       );
       continue;
     }
-    for (const mainPath of transcripts) {
-      summary.transcripts += 1;
-      try {
-        await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, {
-          ignoreCursors: true,
-          strictRead: true,
-        });
-      } catch (err) {
-        reportSourceFailure(summary, dryRun, "sweep:transcript", err);
-      }
-    }
+    transcriptPaths.push(...transcripts);
   }
-
-  if (codexSource === null) return;
-  const { discovery } = codexSource;
-  if (discovery.unreadableDirs > 0) {
-    reportSourceFailure(
-      summary,
-      dryRun,
-      "sweep:codex-discovery",
-      new Error(`${discovery.unreadableDirs} directories could not be read`),
-      discovery.unreadableDirs,
-    );
-  }
-  for (const rolloutPath of discovery.rollouts) {
+  for (const mainPath of transcriptPaths) {
+    summary.transcripts += 1;
     try {
-      await processCodexRolloutLocked(rolloutPath, table, fx, daysCutoff, dryRun, summary, {
+      await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, {
         ignoreCursors: true,
         strictRead: true,
       });
     } catch (err) {
-      reportSourceFailure(summary, dryRun, "sweep:codex", err);
+      reportSourceFailure(summary, dryRun, "sweep:transcript", err);
+    }
+    progress({
+      type: "source-progress",
+      source: "claude",
+      completed: summary.transcripts,
+      total: transcriptPaths.length,
+    });
+  }
+
+  let completedCodexRollouts = 0;
+  if (codexSource !== null) {
+    const { discovery } = codexSource;
+    if (discovery.unreadableDirs > 0) {
+      reportSourceFailure(
+        summary,
+        dryRun,
+        "sweep:codex-discovery",
+        new Error(`${discovery.unreadableDirs} directories could not be read`),
+        discovery.unreadableDirs,
+      );
+    }
+    for (const rolloutPath of discovery.rollouts) {
+      try {
+        await processCodexRolloutLocked(rolloutPath, table, fx, daysCutoff, dryRun, summary, {
+          ignoreCursors: true,
+          strictRead: true,
+        });
+      } catch (err) {
+        reportSourceFailure(summary, dryRun, "sweep:codex", err);
+      }
+      completedCodexRollouts += 1;
+      progress({
+        type: "source-progress",
+        source: "codex",
+        completed: completedCodexRollouts,
+        total: codexRollouts,
+      });
     }
   }
+  progress({
+    type: "scan-complete",
+    claudeTranscripts: summary.transcripts,
+    codexRollouts: completedCodexRollouts,
+    records: summary.newRecords,
+    failures: summary.sourceFailures,
+  });
 }
 
 export async function runSweep(
@@ -825,6 +920,7 @@ export async function runSweep(
     return 1;
   }
   const flags = parsed.flags;
+  const progress = createSweepProgressReporter();
   const root = projectsRoot(flags.projects);
 
   // Claude ルート不在でも、Codex 側が走査可能なら警告1行を出して Codex 走査だけ続行する
@@ -840,6 +936,7 @@ export async function runSweep(
   }
 
   // 実行時に一度だけ: 設定 / 単価表(オンライン可・失敗時は内蔵へフォールバック) / 為替。
+  progress({ type: "preparing", dryRun: flags.dryRun });
   const cfg = flags.dryRun
     ? readConfigReadOnly((err) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -870,7 +967,7 @@ export async function runSweep(
 
   if (flags.dryRun) {
     try {
-      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary);
+      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary, progress);
     } catch (err) {
       reportSourceFailure(summary, true, "sweep:dry-run", err);
     }
@@ -885,6 +982,7 @@ export async function runSweep(
     return 0;
   }
 
+  progress({ type: "lock" });
   const lock = await lockProvider();
   if (lock === null) {
     console.error("全再生成のdata lockを取得できませんでした。後でもう一度お試しください");
@@ -894,11 +992,12 @@ export async function runSweep(
   try {
     invalidateCanonicalDashboards();
     resetHistoryAndCursors();
-    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary);
+    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary, progress);
     try {
       // scan前の古いHTMLだけでなく、writerが作り得るplaceholderも一度消してから同じsnapshotで再生成する。
       invalidateCanonicalDashboards();
       if (summary.sourceFailures === 0 && cfg.dashboard.autoRegenerate) {
+        progress({ type: "dashboard-start" });
         const generatedAt = new Date();
         const generatedAtIso = generatedAt.toISOString();
         const allTurns = readTurns();
