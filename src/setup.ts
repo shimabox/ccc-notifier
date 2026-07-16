@@ -42,6 +42,12 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** 確認プロンプト表示用に Webhook URL の末尾シークレット部を伏せる。 */
+export function maskWebhookUrl(url: string): string {
+  if (url.length <= 40) return url;
+  return `${url.slice(0, 34)}…${url.slice(-4)}`;
+}
+
 /** 対象 settings パスを呼び出しのたびに評価して返す(モジュールロード時に固定しない)。 */
 function settingsPath(): string {
   return process.env.CCCN_CLAUDE_SETTINGS || join(homedir(), ".claude", "settings.json");
@@ -455,20 +461,38 @@ export async function runInit(argv: string[]): Promise<number> {
     }
 
     if (channel === "both" || channel === "slack") {
-      const webhook = await p.text({
-        message: "Slack Incoming Webhook URL",
-        placeholder: "https://hooks.slack.com/services/...",
-        validate: (v) =>
-          !v || !v.startsWith("https://") ? "https:// で始まる URL を入力してください" : undefined,
-      });
-      if (p.isCancel(webhook)) {
-        p.cancel("キャンセルしました");
-        return 1;
+      // 再 init では設定済みの Webhook URL を毎回入力させず、まず再利用するか確認する。
+      const existingSlack = cfg.notify.slack;
+      let webhookUrl: string | undefined;
+      if (existingSlack?.webhookUrl) {
+        const reuse = await p.confirm({
+          message: `設定済みの Slack Webhook URL(${maskWebhookUrl(existingSlack.webhookUrl)})をそのまま使いますか?`,
+          initialValue: true,
+        });
+        if (p.isCancel(reuse)) {
+          p.cancel("キャンセルしました");
+          return 1;
+        }
+        if (reuse) webhookUrl = existingSlack.webhookUrl;
+      }
+      if (webhookUrl === undefined) {
+        const webhook = await p.text({
+          message: "Slack Incoming Webhook URL",
+          placeholder: "https://hooks.slack.com/services/...",
+          validate: (v) =>
+            !v || !v.startsWith("https://") ? "https:// で始まる URL を入力してください" : undefined,
+        });
+        if (p.isCancel(webhook)) {
+          p.cancel("キャンセルしました");
+          return 1;
+        }
+        webhookUrl = webhook;
       }
       cfg.notify.slack = {
-        webhookUrl: webhook,
-        promptChars: SLACK_PROMPT_CHARS,
-        sendFullPrompt: false,
+        webhookUrl,
+        // promptChars / sendFullPrompt は手動カスタマイズされていることがあるため再 init で維持する。
+        promptChars: existingSlack?.promptChars ?? SLACK_PROMPT_CHARS,
+        sendFullPrompt: existingSlack?.sendFullPrompt ?? false,
       };
       cfg.notify.os = channel === "both"; // 「Slack のみ」は OS 通知を無効化する
     } else {
