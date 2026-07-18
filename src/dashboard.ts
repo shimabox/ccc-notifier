@@ -1364,7 +1364,7 @@ function renderDashboard(
               ? `<a href="report.html">直近版へ / Recent</a>`
               : `<span aria-disabled="true">直近版は未生成です（dashboard で生成） / Recent not generated</span>`
           }</div>` +
-          `<div class="sub muted">最終生成 ${esc(generatedAt)}。正常な sweep 完了時、ローカル日の最初の正常なターン時、または手動の dashboard --all で更新されます。</div>`
+          `<div class="sub muted">最終生成 ${esc(generatedAt)}</div>`
         : "";
 
   const head =
