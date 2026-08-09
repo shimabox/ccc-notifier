@@ -30,6 +30,10 @@ export interface Cursor {
   // 2回目以降の増分読み(offset > 0 からの再開)でも失わないようカーソル越しに持ち回る。
   // Claude transcript では常に undefined。
   codexOriginator?: string | null;
+  // Codex rollout の直近 turn_context.model。ターン境界より後ろから再開した窓には turn_context が
+  // 無く、モデル不明(単価不明=0円)になってしまうためカーソル越しに持ち回る。
+  // Claude transcript では常に undefined。
+  codexModel?: string | null;
 }
 
 export interface TurnAggregate {

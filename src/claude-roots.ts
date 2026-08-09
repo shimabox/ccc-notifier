@@ -111,6 +111,14 @@ export function surfaceForClaudePath(
   transcriptPath: string,
   roots: readonly ClaudeTranscriptRoot[],
 ): Surface {
+  return rootForClaudePath(transcriptPath, roots)?.surface ?? "cli";
+}
+
+/** transcript パスを含む最長一致のルート。どのルートにも属さなければ null。 */
+export function rootForClaudePath(
+  transcriptPath: string,
+  roots: readonly ClaudeTranscriptRoot[],
+): ClaudeTranscriptRoot | null {
   let best: ClaudeTranscriptRoot | null = null;
   for (const root of roots) {
     const withSep = root.path.endsWith("/") ? root.path : `${root.path}/`;
@@ -118,7 +126,7 @@ export function surfaceForClaudePath(
       if (best === null || root.path.length > best.path.length) best = root;
     }
   }
-  return best?.surface ?? "cli";
+  return best;
 }
 
 /**

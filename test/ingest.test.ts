@@ -105,6 +105,61 @@ function dropCursorEntry(transcriptPath: string): void {
   rmSync(join(tmpHome, "cache", "ingest-mtimes.json"), { force: true });
 }
 
+/** 実ユーザープロンプト行 + assistant 行 = Claude transcript のターン1つ分。 */
+function claudeTurnLines(
+  sessionId: string,
+  prompt: string,
+  requestId: string,
+  messageId: string,
+  ts: string,
+): string {
+  const base = { isSidechain: false, cwd: "/tmp/proj", sessionId, gitBranch: "main" };
+  return (
+    JSON.stringify({ ...base, type: "user", message: { role: "user", content: prompt }, uuid: `u-${requestId}`, timestamp: ts }) +
+    "\n" +
+    JSON.stringify({
+      ...base,
+      type: "assistant",
+      requestId,
+      message: {
+        id: messageId,
+        role: "assistant",
+        model: "claude-fable-5",
+        content: [{ type: "text", text: "応答" }],
+        usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 0 },
+      },
+      uuid: `a-${requestId}`,
+      timestamp: ts,
+    }) +
+    "\n"
+  );
+}
+
+function codexTokenCountLine(ts: string, input: number, cached: number, output: number): string {
+  return JSON.stringify({
+    timestamp: ts,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output },
+        last_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 },
+      },
+    },
+  });
+}
+
+/** rollout に「1ターン分」(user_message → token_count(累積) → task_complete)を足す行群。 */
+function codexTurnLines(tsPrefix: string, input: number, cached: number, output: number, turnId: string): string {
+  return (
+    [
+      `{"timestamp":"${tsPrefix}:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"次の質問"}}`,
+      codexTokenCountLine(`${tsPrefix}:05.000Z`, input, cached, output),
+      `{"timestamp":"${tsPrefix}:06.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"${turnId}"}}`,
+    ].join("\n") + "\n"
+  );
+}
+
 function readHistory(): TurnRecord[] {
   const file = join(tmpHome, "history.jsonl");
   if (!existsSync(file)) return [];
@@ -328,6 +383,120 @@ describe("runIngest", () => {
     expect(fresh).toHaveLength(1);
     expect(fresh[0].tokens.cacheRead).toBe(1008); // 新ターン分の差分のみ(累積 6000 ではない)
     expect(fresh[0].tokens.output).toBe(13);
+  });
+
+  // history.jsonl は「1ターン1行」。カーソルが無いファイルもセッション全体を1レコードに
+  // 丸めず、ターン境界(Claude: 実ユーザープロンプト行 / Codex: task_complete)で分ける。
+  it("9. カーソル不在の Claude transcript を1レコードに丸めず、ターンごとに分けて記録する", async () => {
+    const multiPath = join(cliProjects, "proj-cli", "multi-turn.jsonl");
+    writeFileSync(
+      multiPath,
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-multi"') +
+        claudeTurnLines("sess-multi", "2つめの質問", "req_T2", "msg_T2", "2026-07-06T12:00:00.000Z") +
+        claudeTurnLines("sess-multi", "3つめの質問", "req_T3", "msg_T3", "2026-07-06T13:00:00.000Z"),
+      "utf8",
+    );
+
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    const recs = result.records
+      .filter((r) => r.sessionId === "sess-multi")
+      .sort((a, b) => a.ts.localeCompare(b.ts));
+    expect(recs).toHaveLength(3);
+    expect(recs.map((r) => r.apiCalls)).toEqual([2, 1, 1]);
+    expect(recs.map((r) => r.prompt)).toEqual(["テスト用プロンプトです", "2つめの質問", "3つめの質問"]);
+    expect(recs.map((r) => r.ts)).toEqual([
+      "2026-07-06T10:00:12.000Z",
+      "2026-07-06T12:00:00.000Z",
+      "2026-07-06T13:00:00.000Z",
+    ]);
+    // 分割しても合計は変わらない。
+    const total = recs.reduce((sum, r) => sum + r.costUSD, 0);
+    expect(total).toBeGreaterThan(0);
+    expect(readHistory().filter((r) => r.sessionId === "sess-multi")).toHaveLength(3);
+  });
+
+  it("10. カーソル不在の Codex rollout もターン(task_complete)ごとに分けて記録する", async () => {
+    const rolloutPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-cli.jsonl");
+    appendFileSync(rolloutPath, codexTurnLines("2026-07-10T12:20", 20000, 6000, 20, "turn-2"), "utf8");
+    appendFileSync(rolloutPath, codexTurnLines("2026-07-10T12:30", 30000, 9000, 40, "turn-3"), "utf8");
+
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    const recs = result.records
+      .filter((r) => r.source === "codex" && r.sessionId === "01234567-aaaa-7000-8000-000000000001")
+      .sort((a, b) => a.ts.localeCompare(b.ts));
+    expect(recs).toHaveLength(3);
+    // 各ターンは累積カウンタの差分。合計は最終累積(input 30000 のうち cached 9000 を除いた分)と一致する。
+    expect(recs.map((r) => r.tokens.output)).toEqual([7, 13, 20]);
+    expect(recs.reduce((sum, r) => sum + r.tokens.cacheRead, 0)).toBe(9000);
+    expect(recs.reduce((sum, r) => sum + r.tokens.input, 0)).toBe(30000 - 9000);
+  });
+
+  // 記録済み ts がターンの途中にある(scan が進行中ターンを先に記録した)場合、
+  // 残りが取り込まれないまま カーソルだけ EOF へ進むと欠落が恒久化する。
+  it("11. 記録済み ts がターン途中にある Codex rollout でも、残りの差分だけを取り込む", async () => {
+    const rolloutPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-partial.jsonl");
+    const sessionId = "01234567-dddd-7000-8000-000000000011";
+    writeFileSync(
+      rolloutPath,
+      [
+        `{"timestamp":"2026-07-11T09:00:00.000Z","type":"session_meta","payload":{"session_id":"${sessionId}","cwd":"/home/user/p","originator":"codex-tui","source":"cli"}}`,
+        '{"timestamp":"2026-07-11T09:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/home/user/p"}}',
+        '{"timestamp":"2026-07-11T09:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"1つめ"}}',
+        codexTokenCountLine("2026-07-11T09:00:03.000Z", 1000, 0, 10),
+        '{"timestamp":"2026-07-11T09:00:04.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}',
+        '{"timestamp":"2026-07-11T09:10:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"2つめ"}}',
+        codexTokenCountLine("2026-07-11T09:10:05.000Z", 3000, 0, 30), // ここまでを scan が記録済み
+        codexTokenCountLine("2026-07-11T09:10:10.000Z", 5000, 0, 50), // 未記録の残り
+        '{"timestamp":"2026-07-11T09:10:12.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2"}}',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // 進行中ターンの前半までが history にある状態(ts は 09:10:05)。cursors.json は無い。
+    writeFileSync(
+      join(tmpHome, "history.jsonl"),
+      JSON.stringify({
+        schemaVersion: 1,
+        ts: "2026-07-11T09:10:05.000Z",
+        sessionId,
+        project: "/home/user/p",
+        gitBranch: null,
+        models: ["gpt-5.5"],
+        tokens: { input: 3000, output: 30, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 },
+        sidechainTokens: null,
+        apiCalls: 2,
+        costUSD: 0,
+        costJPY: 0,
+        fxRate: 160,
+        fxSource: "fixed",
+        prompt: "",
+        ingest: "scan",
+        source: "codex",
+      }) + "\n",
+      "utf8",
+    );
+
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    const recs = result.records.filter((r) => r.sessionId === sessionId);
+    expect(recs).toHaveLength(1); // 1つめのターンは記録済み ts より前なので取り込まない
+    expect(recs[0].tokens.input).toBe(2000); // 5000 - 3000(記録済み分を差し引いた残りだけ)
+    expect(recs[0].tokens.output).toBe(20); // 50 - 30
+  });
+
+  // mtime キャッシュは高速化専用。失敗したファイルまで「処理済み」にすると、
+  // 次に mtime が動くまで取りこぼしが持ち越されないまま消える。
+  it("12. 取り込みに失敗したファイルは mtime キャッシュに載せず、次回もう一度走査する", async () => {
+    // history.jsonl をディレクトリにして appendTurn(appendFileSync)を必ず失敗させる。
+    mkdirSync(join(tmpHome, "history.jsonl"), { recursive: true });
+    const failed = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(failed.failures).toBeGreaterThan(0);
+    expect(failed.records).toHaveLength(0);
+
+    rmSync(join(tmpHome, "history.jsonl"), { recursive: true, force: true });
+    const retried = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(retried.skippedByMtime).toBe(0); // 前回失敗分は mtime プリフィルタで飛ばさない
+    expect(retried.records.length).toBeGreaterThan(0);
+    expect(retried.failures).toBe(0);
   });
 });
 

@@ -309,7 +309,7 @@ export function cursorPaths(): Set<string> {
  */
 export function sanitizeCursor(raw: unknown): Cursor | null {
   if (!isPlainObject(raw)) return null;
-  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals, codexOriginator } = raw;
+  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals, codexOriginator, codexModel } = raw;
   if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
   if (lastUuid !== null && typeof lastUuid !== "string") return null;
   if (lastTs !== null && typeof lastTs !== "string") return null;
@@ -336,10 +336,16 @@ export function sanitizeCursor(raw: unknown): Cursor | null {
     }
   }
 
-  // codexOriginator は string|null のときのみ採用する(Claude 側カーソルには常にこのキーが存在しない)。
+  // codexOriginator / codexModel は string|null のときのみ採用する
+  // (Claude 側カーソルには常にこれらのキーが存在しない)。
   if (Object.hasOwn(raw, "codexOriginator")) {
     if (codexOriginator === null || typeof codexOriginator === "string") {
       cursor.codexOriginator = codexOriginator;
+    }
+  }
+  if (Object.hasOwn(raw, "codexModel")) {
+    if (codexModel === null || typeof codexModel === "string") {
+      cursor.codexModel = codexModel;
     }
   }
 

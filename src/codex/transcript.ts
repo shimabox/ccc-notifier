@@ -95,6 +95,40 @@ async function readAll(path: string): Promise<Buffer | null> {
   }
 }
 
+/** session_meta(ファイル先頭行にしか現れない)から採れるセッション属性。 */
+interface SessionMetaSeed {
+  sessionId: string | null;
+  cwd: string | null;
+  originator: string | null;
+  isSubagentRollout: boolean;
+}
+
+/**
+ * バッファ先頭行を session_meta として読む。増分読み(offset > 0 からの再開)では先頭行を
+ * 走査しないため、originator / child rollout 判定 / session_id / cwd をここから補う。
+ * 先頭行が session_meta でない・壊れている場合は null。
+ */
+function readSessionMetaSeed(buffer: Buffer): SessionMetaSeed | null {
+  const nl = buffer.indexOf(NEWLINE);
+  if (nl <= 0) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(buffer.toString("utf8", 0, nl));
+  } catch {
+    return null;
+  }
+  if (!isRecord(obj) || obj.type !== "session_meta") return null;
+  const payload = isRecord(obj.payload) ? obj.payload : null;
+  if (payload === null) return null;
+  const source = payload.source;
+  return {
+    sessionId: strOrNull(payload.session_id),
+    cwd: strOrNull(payload.cwd),
+    originator: strOrNull(payload.originator),
+    isSubagentRollout: isRecord(source) && Object.hasOwn(source, "subagent"),
+  };
+}
+
 // ============ ウィンドウスキャン(aggregate / split 共通コア) ============
 
 /** task_complete で確定した(または EOF で打ち切られた)1セグメント分のスキャン結果。 */
@@ -190,15 +224,26 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
   let apiCalls = 0;
 
   // ウィンドウ全体のコンテキスト。lastModel は「直前セグメントからの持ち回り」も兼ねる。
-  let lastModel: string | null = null;
+  // ターン境界より後ろから再開した窓には turn_context が無いため、カーソル側の値を初期値にする。
+  let lastModel: string | null = cursor?.codexModel ?? null;
   let windowPrompt: string | null = null;
   let windowTurnCtxCwd: string | null = null;
   let sessionMetaCwd: string | null = null;
   let sessionMetaSid: string | null = null;
   let isSubagentRollout = false;
   // session_meta はファイル先頭にしか現れないため、増分読み(rescan でない再開)では観測できない。
-  // 前回カーソルに保存済みの値を初期値にして持ち回る。
+  // カーソルに保存済みの originator を初期値にし、先頭行からも直接読み直して補う
+  // (child rollout 判定はカーソルに持たないため、常に先頭行から採る)。
   let originator: string | null = cursor?.codexOriginator ?? null;
+  if (startOffset > 0) {
+    const seed = readSessionMetaSeed(buffer);
+    if (seed !== null) {
+      sessionMetaSid = seed.sessionId;
+      sessionMetaCwd = seed.cwd;
+      if (seed.originator !== null) originator = seed.originator;
+      isSubagentRollout = seed.isSubagentRollout;
+    }
+  }
   let firstTs: string | null = null;
   let lastTs: string | null = null;
 
@@ -353,6 +398,7 @@ function windowCursor(scan: WindowScan): Cursor {
     seenMessageKeys: [], // 去重は codexTotals の差分方式が担う
     codexTotals: { ...scan.prev },
     codexOriginator: scan.originator,
+    codexModel: scan.model,
   };
 }
 
@@ -383,6 +429,64 @@ export async function aggregateCodexTurn(
     newCursor: windowCursor(scan),
     originator: scan.originator,
     isSubagentRollout: scan.isSubagentRollout,
+  };
+}
+
+/**
+ * 「timestamp が floorTs 以前の行をすべて消費し切った」状態の再開カーソルを作る。
+ *
+ * rollout は累積カウンタの差分(step = total − prev)で集計するため、行を読み飛ばすだけでは
+ * prev が置き去りになり、次の差分が累積全量になって大幅な過大計上になる。ここでは floorTs 以前の
+ * token_count から prev を実カウンタまで進めたうえで、最初に floorTs を超える行の直前で
+ * オフセットを止める。返したカーソルで aggregateCodexTurn / splitIntoCodexTurnDrafts を呼べば、
+ * floorTs より後の分だけが正しい差分として集計される(ターンの途中に floorTs があっても、
+ * その残りだけが1ターンとして出る)。ファイルが読めなければ null。
+ */
+export async function codexResumePointAtTs(rolloutPath: string, floorTs: string): Promise<Cursor | null> {
+  const buffer = await readAll(rolloutPath);
+  if (buffer === null) return null;
+
+  const seed = readSessionMetaSeed(buffer);
+  let prev = zeroTotals();
+  let lastModel: string | null = null;
+  let consumedEnd = 0;
+  let lineStart = 0;
+
+  for (let pos = 0; pos < buffer.length; pos++) {
+    if (buffer[pos] !== NEWLINE) continue;
+    const raw = buffer.toString("utf8", lineStart, pos);
+    let obj: unknown = null;
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      obj = null; // 破損行は「消費済み」として扱う(集計側の破損行スキップと同じ)
+    }
+    if (isRecord(obj)) {
+      const ts = strOrNull(obj.timestamp);
+      if (ts !== null && ts > floorTs) break; // ここから先が未記録分
+      const payload = isRecord(obj.payload) ? obj.payload : null;
+      if (obj.type === "turn_context" && payload !== null) {
+        const m = strOrNull(payload.model);
+        if (m !== null) lastModel = m;
+      }
+      if (obj.type === "event_msg" && payload !== null && payload.type === "token_count") {
+        const info = isRecord(payload.info) ? payload.info : null;
+        const total = info === null ? null : readTotals(info.total_token_usage);
+        if (total !== null) prev = total;
+      }
+    }
+    consumedEnd = pos + 1;
+    lineStart = pos + 1;
+  }
+
+  return {
+    offset: consumedEnd,
+    lastUuid: null,
+    lastTs: floorTs,
+    seenMessageKeys: [],
+    codexTotals: prev,
+    codexOriginator: seed?.originator ?? null,
+    codexModel: lastModel,
   };
 }
 
@@ -438,6 +542,7 @@ export async function splitIntoCodexTurnDrafts(
               seenMessageKeys: [],
               codexTotals: { ...s.prevAtEnd },
               codexOriginator: scan.originator,
+              codexModel: s.model,
             },
     },
     endTs: s.endTs,

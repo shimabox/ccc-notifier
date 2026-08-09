@@ -17,7 +17,7 @@ import { notifyOS, selectNotifyBackend } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
-import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
+import { claudeTranscriptRoots, rootForClaudePath } from "./claude-roots";
 import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome, detectCodex } from "./codex/env";
 import { CODEX_HOOK_EVENTS } from "./codex/setup";
@@ -624,25 +624,34 @@ async function checkDesktopScan(): Promise<boolean> {
     `Claude transcript 追跡漏れ: ${claudeUntracked}件(全 ${claudeFiles.length}件中。未追跡分は ccc-notifier scan で回収できます)`,
   );
 
-  // 同一 sessionId が複数 surface(cli/desktop)にまたがるケースを検知する(二重計上ガード)。
-  const sessionToSurfaces = new Map<string, Set<string>>();
+  // 同一 sessionId が複数の transcript ファイルに現れるケースを検知する(二重計上ガード)。
+  // 数えるのはサーフェスの種類ではなくファイル。同じサーフェスのルートが複数ある構成
+  // (デスクトップルートが2つ等)の重複も検知対象に含める。
+  const sessionToFiles = new Map<string, string[]>();
   for (const f of claudeFiles) {
     const line = await peekFirstJsonLine(f);
     const sid = typeof line?.sessionId === "string" ? line.sessionId : null;
     if (sid === null || sid.length === 0) continue;
-    const surface = surfaceForClaudePath(f, roots);
-    const set = sessionToSurfaces.get(sid) ?? new Set();
-    set.add(surface);
-    sessionToSurfaces.set(sid, set);
+    const files = sessionToFiles.get(sid) ?? [];
+    files.push(f);
+    sessionToFiles.set(sid, files);
   }
-  const dupSessions = [...sessionToSurfaces.values()].filter((surfaces) => surfaces.size > 1).length;
-  if (dupSessions > 0) {
+  const dupEntries = [...sessionToFiles.entries()].filter(([, files]) => files.length > 1);
+  if (dupEntries.length > 0) {
+    const multiRoot = dupEntries.filter(
+      ([, files]) => new Set(files.map((f) => rootForClaudePath(f, roots)?.path ?? "")).size > 1,
+    ).length;
+    const sample = dupEntries
+      .slice(0, 3)
+      .map(([sid, files]) => `${sid.slice(0, 8)}…(${files.length}ファイル)`)
+      .join(" / ");
     log(
       "warn",
-      `同一 sessionId が複数サーフェスに現れています(${dupSessions}件)。二重計上の可能性があるため history を確認してください`,
+      `同一 sessionId が複数の transcript ファイルに現れています(${dupEntries.length}件・うち複数ルートにまたがるもの ${multiRoot}件): ${sample}。` +
+        "二重計上の可能性があるため history を確認してください",
     );
   } else {
-    log("ok", "同一 sessionId が複数の Claude ルートに重複するケースは検出されませんでした");
+    log("ok", "同一 sessionId が複数の Claude transcript ファイルに重複するケースは検出されませんでした");
   }
 
   // Codex originator 内訳 + 未追跡件数(セッションディレクトリが無ければスキップ)。

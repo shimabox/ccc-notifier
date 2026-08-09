@@ -2,8 +2,9 @@
 //
 // sweep(全リセット再構築)とは別物で、history / cursors を破壊しない追記型。
 // 指定ルート群(Claude: claudeTranscriptRoots() / Codex: listCodexRollouts())の *.jsonl を
-// 列挙し、mtime プリフィルタとカーソルで未処理増分があるファイルだけ既存の集計関数
-// (Claude: aggregateNewTurn / Codex: aggregateCodexTurn)で取り込む。
+// 列挙し、mtime プリフィルタとカーソルで未処理増分があるファイルだけ既存の分割関数
+// (Claude: splitIntoTurnDrafts / Codex: splitIntoCodexTurnDrafts)で取り込む。
+// history.jsonl は1ターン1行なので、複数ターン分の増分は sweep と同じターン境界で分けて記録する。
 // `cccn scan`(手動)と track への便乗り取込(hook 発火時ベストエフォート)の両方から使う。
 //
 // 存在しない/読めないルート・ファイルは黙ってスキップする(sweep の strictRead とは異なり、
@@ -15,7 +16,7 @@ import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
 import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome } from "./codex/env";
 import { normalizeCodexOriginator } from "./codex/originator";
-import { aggregateCodexTurn, splitIntoCodexTurnDrafts } from "./codex/transcript";
+import { codexResumePointAtTs, splitIntoCodexTurnDrafts } from "./codex/transcript";
 import { listCodexRollouts } from "./codex/sessions";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
@@ -34,7 +35,8 @@ import {
   saveAllCursors,
   sanitizeCursor,
 } from "./store";
-import { aggregateNewTurn } from "./transcript";
+import { splitIntoTurnDrafts } from "./sweep";
+import type { TurnDraft } from "./sweep";
 import type {
   Config,
   Cursor,
@@ -153,14 +155,12 @@ function saveIngestMtimeCache(cache: IngestMtimeCache): void {
 // ============ 既取り込み判定(history.jsonl 由来のセッション別 ts 下限) ============
 //
 // カーソルは「どこまで読んだか」の目印であって、取り込み済みかどうかの真実源ではない。
-// cursors.json の消失・リセット、sweep、transcript のパス変更、別マシンからの移行などで
-// 「history には記録済みなのにカーソルだけ無い」ファイルが生まれる。カーソル不在のときの
-// 集計はファイル先頭から全体を読むため、この状態では記録済みのターンを丸ごと再 append する。
+// cursors.json の消失・リセット、sweep、transcript のパス変更、別マシンからの移行では
+// 「history に記録済みなのにカーソルが無い」状態になる。カーソル不在のファイルは、history 側の
+// 「そのセッションで記録済みの最後の ts」を下限にして、それより後だけを取り込む。
 //
-// そこで history 側の「そのセッションで記録済みの最後の ts」を下限として持ち、カーソル不在の
-// ファイルはその下限より後だけを取り込む。history.jsonl は数千行・数MBになるため、読み込みは
-// 遅延1回(カーソル不在のファイルが実際に集計結果を出したときだけ)に限る。定常状態
-// (全ファイルにカーソルがある / mtime プリフィルタで落ちる)では1バイトも読まない。
+// history.jsonl は数千行・数MBになるので、読み込みは遅延1回(カーソル不在のファイルを実際に
+// 処理したときだけ)。全ファイルにカーソルがある定常状態では1バイトも読まない。
 
 /** key = source + sessionId、value = そのセッションで記録済みの最後の ts(正規化 ISO)。 */
 type HistoryFloors = Map<string, string>;
@@ -210,32 +210,47 @@ function recoveryCursor(floorTs: string): Cursor {
 
 // ============ レコード化 ============
 
-function buildClaudeRecord(agg: TurnAggregate, table: PriceTable, fx: FxResult, surface: Surface): TurnRecord {
-  const main = agg.main;
-  const sidechain = agg.sidechain;
+/** ターン下書き1件を history のレコードにする(history.jsonl は1ターン1行)。 */
+function buildClaudeDraftRecord(
+  draft: TurnDraft,
+  ts: string,
+  table: PriceTable,
+  fx: FxResult,
+  surface: Surface,
+): TurnRecord {
+  const main = draft.mainPerModel;
+  const sidechain = draft.sidechainPerModel;
   const breakdown = computeCost(main, sidechain, table);
   const sidechainHasModels = Object.keys(sidechain).length > 0;
   const rec: TurnRecord = {
     schemaVersion: 1,
-    ts: agg.lastTs ?? new Date().toISOString(),
-    sessionId: agg.sessionId,
-    project: agg.cwd ?? "",
-    gitBranch: agg.gitBranch,
+    ts,
+    sessionId: draft.sessionId,
+    project: draft.cwd ?? "",
+    gitBranch: draft.gitBranch,
     models: collectModels(main, sidechain),
     tokens: sumBuckets(main),
     sidechainTokens: sidechainHasModels ? sumBuckets(sidechain) : null,
-    apiCalls: agg.apiCalls,
+    apiCalls: draft.apiCalls,
     costUSD: breakdown.usd,
     costByModel: breakdown.byModel,
     costJPY: breakdown.usd * fx.rate,
     fxRate: fx.rate,
     fxSource: fx.source,
-    prompt: agg.prompt ?? "",
+    prompt: draft.prompt,
     ingest: "scan",
     surface,
   };
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
   return rec;
+}
+
+/** ドラフト群から transcript のセッション ID を取る(採り方は aggregateNewTurn と同じく最後の観測値)。 */
+function sessionIdOfDrafts(drafts: TurnDraft[]): string {
+  for (let i = drafts.length - 1; i >= 0; i--) {
+    if (drafts[i].sessionId.length > 0) return drafts[i].sessionId;
+  }
+  return "";
 }
 
 function buildCodexRecord(agg: TurnAggregate, table: PriceTable, fx: FxResult): TurnRecord {
@@ -385,117 +400,112 @@ async function processFiles(
     return floors.get(floorKey(source, sessionId)) ?? null;
   };
 
-  for (const filePath of claudeFiles) {
-    let mtimeMs: number;
-    try {
-      mtimeMs = (await fsp.stat(filePath)).mtimeMs;
-    } catch {
-      continue; // 発見直後に消えた等。次回の走査に委ねる
+  /** 取り込んだレコード群を history へ書き、カーソルを1回だけ進める(1ターン1行)。 */
+  const commit = (filePath: string, records: TurnRecord[], newCursor: Cursor): void => {
+    if (!dryRun) {
+      for (const rec of records) appendTurn(rec);
+      cursorsDict[filePath] = newCursor;
+      cursorsChanged = true;
     }
-    const cached = mtimeCache[filePath];
-    if (cached !== undefined && cached >= mtimeMs) {
-      result.skippedByMtime += 1;
-      continue;
-    }
-    result.scannedFiles += 1;
-    nextMtimeCache[filePath] = mtimeMs;
-    try {
-      const cursor = sanitizeCursor(cursorsDict[filePath]);
-      let agg = await aggregateNewTurn(filePath, cursor);
-      if (agg === null) continue;
-      if (cursor === null) {
-        const floor = recordedFloor("claude", agg.sessionId);
-        if (floor !== null) {
-          const consumed = agg.newCursor;
-          agg = await aggregateNewTurn(filePath, recoveryCursor(floor));
-          if (agg === null) {
-            // 記録済み分しか無いファイル。カーソルだけ EOF まで進めて次回から増分読みに戻す。
-            if (!dryRun) {
-              cursorsDict[filePath] = consumed;
-              cursorsChanged = true;
-            }
-            continue;
-          }
-        }
-      }
-      const surface = surfaceForClaudePath(filePath, claudeRoots);
-      const rec = buildClaudeRecord(agg, table, fx, surface);
-      if (!dryRun) {
-        appendTurn(rec);
-        cursorsDict[filePath] = agg.newCursor;
-        cursorsChanged = true;
-      }
-      addRecord(result, rec);
-    } catch (err) {
-      result.failures += 1;
-      logError("ingest:claude", err);
-    }
-  }
+    for (const rec of records) addRecord(result, rec);
+  };
 
-  for (const filePath of codexFiles) {
-    let mtimeMs: number;
-    try {
-      mtimeMs = (await fsp.stat(filePath)).mtimeMs;
-    } catch {
-      continue;
+  /** aggregateNewTurn と同じカーソル意味論(ウィンドウが値を持たなければ前回値を保つ)に揃える。 */
+  const carryCursor = (next: Cursor, prev: Cursor | null, floor: string | null): Cursor => ({
+    ...next,
+    lastUuid: next.lastUuid ?? prev?.lastUuid ?? null,
+    lastTs: next.lastTs ?? prev?.lastTs ?? floor,
+  });
+
+  const processClaudeFile = async (filePath: string): Promise<void> => {
+    const cursor = sanitizeCursor(cursorsDict[filePath]);
+    // カーソルが無いファイルは history 側の記録済み ts を下限にして読み直す。
+    // 下限の引き当てに sessionId が要るので、まず素の分割で sessionId を得る。
+    let split = await splitIntoTurnDrafts(filePath, cursor);
+    let floor: string | null = null;
+    if (cursor === null) {
+      floor = recordedFloor("claude", sessionIdOfDrafts(split.drafts));
+      if (floor !== null) split = await splitIntoTurnDrafts(filePath, recoveryCursor(floor));
     }
-    const cached = mtimeCache[filePath];
-    if (cached !== undefined && cached >= mtimeMs) {
-      result.skippedByMtime += 1;
-      continue;
+    const newCursor = carryCursor(split.newCursor, cursor, floor);
+
+    if (split.drafts.length === 0) {
+      // 記録済み分しか無いと分かっているときだけカーソルを進め、次回から増分読みに戻す。
+      if (floor !== null) commit(filePath, [], newCursor);
+      return;
     }
-    result.scannedFiles += 1;
-    nextMtimeCache[filePath] = mtimeMs;
-    try {
-      const cursor = sanitizeCursor(cursorsDict[filePath]);
-      const agg = await aggregateCodexTurn(filePath, cursor);
-      if (agg === null) continue;
-      if (agg.isSubagentRollout === true) {
-        // Codex child rollout は利用記録のみで料金未集計という公開仕様に合わせる(sweep と同じ扱い)。
-        // カーソルだけ進めて次回以降の再走査を避ける。
-        if (!dryRun) {
-          cursorsDict[filePath] = agg.newCursor;
-          cursorsChanged = true;
-        }
+
+    const surface = surfaceForClaudePath(filePath, claudeRoots);
+    commit(
+      filePath,
+      split.drafts.map((draft) =>
+        buildClaudeDraftRecord(draft, draft.lastTs ?? new Date().toISOString(), table, fx, surface),
+      ),
+      newCursor,
+    );
+  };
+
+  const processCodexFile = async (filePath: string): Promise<void> => {
+    const cursor = sanitizeCursor(cursorsDict[filePath]);
+    const drafts = await splitIntoCodexTurnDrafts(filePath, cursor);
+    if (drafts === null) return; // 新規 usage 無し(カーソルも進めない)
+    const windowCursor = drafts[drafts.length - 1].agg.newCursor;
+
+    if (drafts[0].isSubagentRollout) {
+      // Codex child rollout は利用記録のみで料金未集計という公開仕様に合わせる(sweep と同じ扱い)。
+      // カーソルだけ進めて次回以降の再走査を避ける。
+      commit(filePath, [], windowCursor);
+      return;
+    }
+    if (cursor !== null) {
+      commit(filePath, drafts.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
+      return;
+    }
+
+    // カーソル不在: 記録済み ts があれば、そこまで消費した再開点から読み直す。
+    // ウィンドウ全体は消費済みなので、新規ターンが無くてもカーソルは EOF まで進める。
+    const floor = recordedFloor("codex", drafts[0].agg.sessionId);
+    if (floor === null) {
+      commit(filePath, drafts.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
+      return;
+    }
+    const resume = await codexResumePointAtTs(filePath, floor);
+    const fresh = (await splitIntoCodexTurnDrafts(filePath, resume)) ?? [];
+    commit(filePath, fresh.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
+  };
+
+  const runOver = async (
+    files: string[],
+    context: "ingest:claude" | "ingest:codex",
+    handle: (filePath: string) => Promise<void>,
+  ): Promise<void> => {
+    for (const filePath of files) {
+      let mtimeMs: number;
+      try {
+        mtimeMs = (await fsp.stat(filePath)).mtimeMs;
+      } catch {
+        continue; // 発見直後に消えた等。次回の走査に委ねる
+      }
+      const cached = mtimeCache[filePath];
+      if (cached !== undefined && cached >= mtimeMs) {
+        result.skippedByMtime += 1;
         continue;
       }
-      const floor = cursor === null ? recordedFloor("codex", agg.sessionId) : null;
-      if (floor !== null) {
-        // rollout は累積カウンタの差分方式で集計するため、Claude のように ts 下限だけを渡して
-        // 読み直すことはできない(スキップした行のカウンタを取りこぼすと、次の差分が累積全量に
-        // なって大幅な過大計上になる)。task_complete 境界でターンに割ってから、記録済みより
-        // 後に「始まった」ターンだけを採る。rollout は hook がターンを記録した後にも同じターンの
-        // 行が追記されるため、記録済み ts は分割後のターン終端より僅かに手前になる。終端で
-        // 比べると同一ターンを新規と誤判定するので、開始時刻で判定する。下限をまたぐターンは
-        // 一部が記録済みなので採らない(取りこぼしより二重計上を避ける)。
-        // カーソルはウィンドウ全体を消費した位置まで進める。
-        const drafts = await splitIntoCodexTurnDrafts(filePath, null);
-        if (!dryRun) {
-          cursorsDict[filePath] = agg.newCursor;
-          cursorsChanged = true;
-        }
-        const floorMs = Date.parse(floor);
-        for (const draft of drafts ?? []) {
-          const startMs = draft.agg.firstTs === null ? NaN : Date.parse(draft.agg.firstTs);
-          if (!Number.isFinite(startMs) || startMs <= floorMs) continue;
-          const rec = buildCodexRecord(draft.agg, table, fx);
-          if (!dryRun) appendTurn(rec);
-          addRecord(result, rec);
-        }
-        continue;
+      result.scannedFiles += 1;
+      try {
+        await handle(filePath);
+        // mtime を覚えるのは取り込みに成功したときだけ。失敗したファイルを次回スキップしてしまうと
+        // 取りこぼしが持ち越されないまま消える。
+        nextMtimeCache[filePath] = mtimeMs;
+      } catch (err) {
+        result.failures += 1;
+        logError(context, err);
       }
-      const rec = buildCodexRecord(agg, table, fx);
-      if (!dryRun) {
-        appendTurn(rec);
-        cursorsDict[filePath] = agg.newCursor;
-        cursorsChanged = true;
-      }
-      addRecord(result, rec);
-    } catch (err) {
-      result.failures += 1;
-      logError("ingest:codex", err);
     }
-  }
+  };
+
+  await runOver(claudeFiles, "ingest:claude", processClaudeFile);
+  await runOver(codexFiles, "ingest:codex", processCodexFile);
 
   if (!dryRun) {
     if (cursorsChanged) saveAllCursors(cursorsDict);
@@ -508,8 +518,8 @@ async function processFiles(
 /**
  * scan(手動)/ track 便乗り取込が新規に取り込んだターン群の合計が minNotifyUSD 以上のとき、
  * 1通にまとめて通知する(サーフェス・件数・合計 USD/JPY を表記)。ミュート設定を尊重する。
- * カーソルが真実源であるため、既に取り込み済みのファイルは agg===null で自然に除外され、
- * hook 経由の既存ターン単位通知と対象が重ならない(二重通知にならない)。
+ * 対象は今回新たに history へ追記したターンだけなので、hook 経由の既存ターン単位通知と
+ * 重ならない(二重通知にならない)。
  */
 export async function notifyIngestSummary(result: IngestResult, cfg: Config): Promise<void> {
   if (result.dryRun) return;
