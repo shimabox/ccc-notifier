@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { notifyIngestSummary, runIngest } from "../src/ingest";
+import { runTrack } from "../src/track";
 import { loadCursor, readConfig, sanitizeCursor, writeMuteState } from "../src/store";
 import type { Config, TurnRecord } from "../src/types";
 
@@ -19,6 +20,7 @@ const FIXTURE_DESKTOP_TRANSCRIPT = fileURLToPath(
 );
 const FIXTURE_CODEX_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
 const FIXTURE_CODEX_DESKTOP_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-desktop.jsonl", import.meta.url));
+const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
 
 let tmpHome: string;
 let cliProjects: string;
@@ -165,6 +167,46 @@ describe("runIngest", () => {
     const real = await runIngest({ dryRun: false, offlinePricing: true });
     expect(real.totalUSD).toBeCloseTo(dry.totalUSD, 10);
     expect(real.records.length).toBe(dry.records.length);
+  });
+
+  // 回帰テスト(2026-08-09 本番事故): track が既に完全に処理済みの transcript を、
+  // ingest が cursor を見失ってファイル先頭から丸ごと再集計し、apiCalls/costUSD が
+  // 桁違いに水増しされた重複レコードを追加する事故が実際に発生した(既存カーソルは
+  // 存在するのに ingest 側の読み取りが効かず、cursor=null 相当の全件再集計になっていた)。
+  // track が cursor を書いた「後」に ingest が同じルートを走査しても、新規レコードは
+  // 0件でなければならない(= track と ingest は同じ cursors.json を真実源として共有する)。
+  it("6. 回帰: track が既にカーソルを保存済みの transcript を ingest が走査しても新規0件(二重計上しない)", async () => {
+    // 1. track が(cli ルート内の)transcript を通常どおり最初から最後まで処理し、
+    //    history 1行 + cursors.json にオフセット/lastTs/seenMessageKeys 込みの正しいカーソルを残す。
+    const trackedPath = join(cliProjects, "proj-cli", "already-tracked-by-hook.jsonl");
+    copyFileSync(FIXTURE_TRANSCRIPT, trackedPath);
+    const stdinRaw = readFileSync(FIXTURE_STDIN, "utf8");
+    const stdin = stdinRaw.replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(trackedPath));
+    await runTrack(stdin);
+
+    const afterTrack = readHistory();
+    const trackedRecord = afterTrack.find((r) => r.sessionId === "sess-1");
+    expect(trackedRecord).toBeDefined();
+    expect(trackedRecord!.apiCalls).toBe(2); // GOLDEN(transcript-basic.jsonl): 2
+
+    const cursorAfterTrack = sanitizeCursor(loadCursor(trackedPath));
+    expect(cursorAfterTrack).not.toBeNull();
+    expect(cursorAfterTrack!.seenMessageKeys.length).toBeGreaterThan(0);
+
+    const historyCountAfterTrack = afterTrack.length;
+
+    // 2. 同じルートに対して ingest(track とは無関係の、hook 非依存の増分取り込み)を走らせる。
+    //    track が既に処理し切ったこのファイルからは、新規レコードが1件も生まれてはならない。
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    const ingestedThisFile = result.records.filter((r) => r.sessionId === "sess-1");
+    expect(ingestedThisFile).toHaveLength(0);
+
+    const afterIngest = readHistory();
+    expect(afterIngest).toHaveLength(historyCountAfterTrack); // 増えていない
+    // 全レコードを通じて apiCalls が異常値(GOLDEN の 2 を大きく超える値)になっていないこと。
+    for (const rec of afterIngest) {
+      if (rec.sessionId === "sess-1") expect(rec.apiCalls).toBe(2);
+    }
   });
 });
 

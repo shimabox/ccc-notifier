@@ -24,7 +24,7 @@ import { CODEX_HOOK_EVENTS } from "./codex/setup";
 import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
 import { findLatestCodexRollout, listCodexRollouts } from "./codex/sessions";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
-import { cursorPaths, isMuted, paths, readConfig, readMuteState } from "./store";
+import { cursorPaths, isMuted, paths, readConfig, readMuteState, readTurns } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
@@ -699,6 +699,41 @@ async function checkDesktopScan(): Promise<boolean> {
   return true;
 }
 
+// ---- 9. history.jsonl 内の完全重複ターン検知(同一 sessionId + ts が複数行) ----
+//
+// 同じ transcript を track(通常の増分)と ingest(scan / 便乗り取込)の双方が異なる範囲認識で
+// 二重に取り込むと、同一 sessionId・同一 ts(そのターンの最終メッセージ時刻はカーソル位置に依らず
+// 一意に決まる)を持つ行が history.jsonl に複数現れる。1ターンにつき1行が正しい状態であるため、
+// これは強い二重計上シグナルとして扱う。apiCalls が大きく異なる(片方が全履歴分)場合は特に疑わしい。
+function checkDuplicateHistoryTurns(): boolean {
+  const turns = readTurns();
+  const groups = new Map<string, TurnRecord[]>();
+  for (const rec of turns) {
+    if (!rec.sessionId || !rec.ts) continue;
+    const key = `${rec.sessionId} ${rec.ts} ${rec.source ?? "claude"}`;
+    const list = groups.get(key) ?? [];
+    list.push(rec);
+    groups.set(key, list);
+  }
+  const dupGroups = [...groups.entries()].filter(([, list]) => list.length > 1);
+  if (dupGroups.length === 0) {
+    log("ok", "history.jsonl に同一 sessionId+ts の重複ターンは検出されませんでした");
+    return true;
+  }
+  const totalDupRows = dupGroups.reduce((sum, [, list]) => sum + list.length, 0);
+  const sample = dupGroups.slice(0, 3).map(([key, list]) => {
+    const [sessionId] = key.split(" ");
+    const apiCallsList = list.map((r) => r.apiCalls).join("/");
+    return `${sessionId.slice(0, 8)}…(apiCalls ${apiCallsList})`;
+  });
+  log(
+    "warn",
+    `history.jsonl に同一 sessionId+ts の重複ターンを検出しました(${dupGroups.length}組・${totalDupRows}行)。` +
+      `二重計上の可能性があります。例: ${sample.join(", ")}。history redact/clear での手動整理を検討してください`,
+  );
+  return true;
+}
+
 export async function runDoctor(): Promise<number> {
   const results: boolean[] = [];
 
@@ -729,6 +764,7 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("claude-recent-session", () => checkClaudeRecentSessionTotal(latestTranscript)));
   results.push(await safeRun("codex-recent-session", () => checkCodexRecentSessionTotal(codexStopConfigured)));
   results.push(await safeRun("desktop-scan", () => checkDesktopScan()));
+  results.push(await safeRun("duplicate-history", () => Promise.resolve(checkDuplicateHistoryTurns())));
 
   const hasFailure = results.some((ok) => ok === false);
   return hasFailure ? 1 : 0;

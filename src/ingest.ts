@@ -26,13 +26,13 @@ import { computeCost, loadPriceTable } from "./pricing";
 import {
   appendTurn,
   isMuted,
-  loadCursor,
+  loadAllCursors,
   logError,
   paths,
   readConfig,
   readConfigReadOnly,
+  saveAllCursors,
   sanitizeCursor,
-  saveCursor,
 } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type {
@@ -314,6 +314,13 @@ async function processFiles(
   const nextMtimeCache: IngestMtimeCache = { ...mtimeCache };
   const result = emptyResult(dryRun, fx, true);
 
+  // cursors.json は1回だけ読み、この呼び出しが保持している data lock の間だけメモリ上で更新し、
+  // 最後に1回だけ書き戻す(track の commitLock 等、他プロセスの read-modify-write と衝突する
+  // 「1ファイルごとに読み直して書き戻す」を避けるため。ファイル数が多いほど独立した書き込み回数が
+  // 増え、同時に走る別プロセスの更新をロスト・アップデートで消してしまう窓が広がっていた)。
+  const cursorsDict = loadAllCursors();
+  let cursorsChanged = false;
+
   for (const filePath of claudeFiles) {
     let mtimeMs: number;
     try {
@@ -329,14 +336,15 @@ async function processFiles(
     result.scannedFiles += 1;
     nextMtimeCache[filePath] = mtimeMs;
     try {
-      const cursor = sanitizeCursor(loadCursor(filePath));
+      const cursor = sanitizeCursor(cursorsDict[filePath]);
       const agg = await aggregateNewTurn(filePath, cursor);
       if (agg === null) continue;
       const surface = surfaceForClaudePath(filePath, claudeRoots);
       const rec = buildClaudeRecord(agg, table, fx, surface);
       if (!dryRun) {
         appendTurn(rec);
-        saveCursor(filePath, agg.newCursor);
+        cursorsDict[filePath] = agg.newCursor;
+        cursorsChanged = true;
       }
       addRecord(result, rec);
     } catch (err) {
@@ -360,19 +368,23 @@ async function processFiles(
     result.scannedFiles += 1;
     nextMtimeCache[filePath] = mtimeMs;
     try {
-      const cursor = sanitizeCursor(loadCursor(filePath));
+      const cursor = sanitizeCursor(cursorsDict[filePath]);
       const agg = await aggregateCodexTurn(filePath, cursor);
       if (agg === null) continue;
       if (agg.isSubagentRollout === true) {
         // Codex child rollout は利用記録のみで料金未集計という公開仕様に合わせる(sweep と同じ扱い)。
         // カーソルだけ進めて次回以降の再走査を避ける。
-        if (!dryRun) saveCursor(filePath, agg.newCursor);
+        if (!dryRun) {
+          cursorsDict[filePath] = agg.newCursor;
+          cursorsChanged = true;
+        }
         continue;
       }
       const rec = buildCodexRecord(agg, table, fx);
       if (!dryRun) {
         appendTurn(rec);
-        saveCursor(filePath, agg.newCursor);
+        cursorsDict[filePath] = agg.newCursor;
+        cursorsChanged = true;
       }
       addRecord(result, rec);
     } catch (err) {
@@ -381,7 +393,10 @@ async function processFiles(
     }
   }
 
-  if (!dryRun) saveIngestMtimeCache(nextMtimeCache);
+  if (!dryRun) {
+    if (cursorsChanged) saveAllCursors(cursorsDict);
+    saveIngestMtimeCache(nextMtimeCache);
+  }
 
   return result;
 }

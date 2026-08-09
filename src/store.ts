@@ -13,6 +13,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { Config, Cursor, DEFAULT_CONFIG, TurnRecord } from "./types";
@@ -346,6 +347,52 @@ export function sanitizeCursor(raw: unknown): Cursor | null {
 }
 
 /**
+ * cursors.json 全体を1回の読み込みで返す(生の辞書。値は sanitizeCursor に通す前)。
+ * ingest(src/ingest.ts)のように多数のファイルのカーソルをまとめて参照する呼び出し元向け。
+ * loadCursor をファイルごとに呼ぶと、その回数だけ独立した read-modify-write(saveCursor 側)の
+ * 機会が生まれ、同時に書き込む別プロセス(track 等)との間でロスト・アップデートの窓を広げてしまう。
+ * 呼び出し元は同じ data lock を保持したまま読み → 処理 → saveAllCursors で1回だけ書き戻すこと。
+ * 不在 → 空辞書。壊れている → logError して空辞書(loadCursor と同じ規則)。
+ */
+export function loadAllCursors(): Record<string, unknown> {
+  const p = paths();
+  if (!existsSync(p.cursorsFile)) return {};
+  try {
+    const raw = readFileSync(p.cursorsFile, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) {
+      logError("loadAllCursors", new Error("cursors.json root is not an object"));
+      return {};
+    }
+    return parsed;
+  } catch (err) {
+    logError("loadAllCursors", err);
+    return {};
+  }
+}
+
+/**
+ * cursors.json 全体を1回の書き込みで置換する(loadAllCursors とペアで使う)。
+ * dict.tmp に書いて renameSync することで原子的に置換する(saveCursor と同じ方式)。
+ * 呼び出し元が data lock を保持したまま loadAllCursors → 更新 → saveAllCursors を行うことで、
+ * 多数ファイル分のカーソル更新を1回の read + 1回の write に閉じ込め、他プロセスとの
+ * read-modify-write レースの窓を作らない。
+ */
+export function saveAllCursors(dict: Record<string, unknown>): void {
+  const p = paths();
+  // tmp ファイル名は呼び出しごとに一意にする(固定名だと、万一ロックの外や別プロセスから
+  // 同時に書き込みが起きた場合に、互いの tmp ファイルの中身を上書きし合って一方の更新が
+  // 消える経路になり得るため。data-lock.ts の owner ファイル書き込みと同じ流儀)。
+  const tmpFile = `${p.cursorsFile}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpFile, JSON.stringify(dict), "utf8");
+    renameSync(tmpFile, p.cursorsFile);
+  } finally {
+    rmSync(tmpFile, { force: true });
+  }
+}
+
+/**
  * cursors.json に transcriptPath -> Cursor を保存する。
  * 読み込み→更新→ cursors.json.tmp に書いて renameSync することで原子的に置換する。
  * 既存 cursors.json が壊れている場合は(復旧不能なため)空辞書から作り直す。
@@ -368,9 +415,14 @@ export function saveCursor(transcriptPath: string, c: Cursor): void {
 
   dict[transcriptPath] = c;
 
-  const tmpFile = `${p.cursorsFile}.tmp`;
-  writeFileSync(tmpFile, JSON.stringify(dict), "utf8");
-  renameSync(tmpFile, p.cursorsFile);
+  // tmp ファイル名は呼び出しごとに一意にする(saveAllCursors と同じ理由)。
+  const tmpFile = `${p.cursorsFile}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpFile, JSON.stringify(dict), "utf8");
+    renameSync(tmpFile, p.cursorsFile);
+  } finally {
+    rmSync(tmpFile, { force: true });
+  }
 }
 
 /**
