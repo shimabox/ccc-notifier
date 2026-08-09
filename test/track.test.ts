@@ -998,8 +998,14 @@ describe("runTrack: ingest piggyback (best-effort, hook 非依存の取りこぼ
     const prevDesktopRoots = process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
     const projects = join(tmpHome, "claude-projects");
     mkdirSync(join(projects, "proj"), { recursive: true });
-    // transcriptPath(track の直接対象)とは別の、便乗り取込だけが拾うはずのファイル。
-    copyFileSync(FIXTURE_TRANSCRIPT, join(projects, "proj", "other-session.jsonl"));
+    // transcriptPath(track の直接対象)とは別セッションの、便乗り取込だけが拾うはずのファイル。
+    // sessionId は必ず変える: ingest は「history に記録済みの ts」を下限に既取り込み分を弾くため、
+    // 同一 sessionId のコピーは(パスが違っても)同じセッションの再取り込みとして正しく抑止される。
+    writeFileSync(
+      join(projects, "proj", "other-session.jsonl"),
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-other"'),
+      "utf8",
+    );
     process.env.CCCN_CLAUDE_PROJECTS = projects;
     process.env.CCCN_CLAUDE_DESKTOP_ROOTS = join(tmpHome, "no-desktop-roots");
     try {
@@ -1016,7 +1022,7 @@ describe("runTrack: ingest piggyback (best-effort, hook 非依存の取りこぼ
     expect(rows).toHaveLength(2);
     const ingested = rows.find((r) => r.ingest === "scan");
     expect(ingested).toBeDefined();
-    expect(ingested?.sessionId).toBe("sess-1");
+    expect(ingested?.sessionId).toBe("sess-other");
     const main = rows.find((r) => r.ingest === undefined);
     expect(main).toBeDefined();
   });

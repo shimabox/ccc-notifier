@@ -4,7 +4,16 @@
 // 一時 CCCN_CODEX_HOME に隔離して検証する。実データ(~/.claude 等)には一切触れない。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +90,20 @@ afterEach(() => {
   if (prevDryRun === undefined) delete process.env.CCCN_DRY_RUN;
   else process.env.CCCN_DRY_RUN = prevDryRun;
 });
+
+/**
+ * cursors.json から1ファイル分のエントリだけを消す(cursors.json のリセット・sweep・
+ * transcript のパス変更・別マシンからの移行で実際に起きる「history にはあるがカーソルが無い」状態)。
+ * mtime プリフィルタで走査対象から外れてしまわないよう、キャッシュも一緒に落とす。
+ */
+function dropCursorEntry(transcriptPath: string): void {
+  const file = join(tmpHome, "cursors.json");
+  const dict = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  expect(Object.hasOwn(dict, transcriptPath)).toBe(true);
+  delete dict[transcriptPath];
+  writeFileSync(file, JSON.stringify(dict), "utf8");
+  rmSync(join(tmpHome, "cache", "ingest-mtimes.json"), { force: true });
+}
 
 function readHistory(): TurnRecord[] {
   const file = join(tmpHome, "history.jsonl");
@@ -207,6 +230,104 @@ describe("runIngest", () => {
     for (const rec of afterIngest) {
       if (rec.sessionId === "sess-1") expect(rec.apiCalls).toBe(2);
     }
+  });
+
+  // カーソルの有無は「取り込み済みか」の証拠にならない。cursors.json のリセット・sweep・
+  // パス変更・別マシンからの移行で「history には記録済みだがカーソルだけ無い」状態が生まれ、
+  // その状態の集計はファイル全体を1ターンとして読む。history 側の ts と突合しない限り、
+  // 記録済みのターンがそのまま重複レコードになる(2026-08-09 の本番事故の形)。
+  // テスト6はカーソルを残したままなのでこの経路を通らない。
+  it("7. 回帰: history に記録済みで cursors にエントリが無い Claude transcript を丸ごと再取り込みしない", async () => {
+    const lostPath = join(cliProjects, "proj-cli", "cursor-lost.jsonl");
+    writeFileSync(
+      lostPath,
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-lost"'),
+      "utf8",
+    );
+
+    // 1. 通常どおり取り込む(history 1行 + cursors エントリ)。
+    await runIngest({ dryRun: false, offlinePricing: true });
+    const recorded = readHistory().filter((r) => r.sessionId === "sess-lost");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].apiCalls).toBe(2); // GOLDEN(transcript-basic.jsonl): 2
+    const historyCount = readHistory().length;
+
+    // 2. カーソルだけを失わせる(history はそのまま)。
+    dropCursorEntry(lostPath);
+
+    // 3. 再走査しても、記録済みのターンは1件も再 append されない。
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.sessionId === "sess-lost")).toHaveLength(0);
+    expect(readHistory()).toHaveLength(historyCount);
+    expect(readHistory().filter((r) => r.sessionId === "sess-lost")).toHaveLength(1);
+    // カーソルは張り直され、次回以降は通常の増分読みに戻る。
+    expect(sanitizeCursor(loadCursor(lostPath))).not.toBeNull();
+
+    // 4. 未記録の末尾(記録済み ts より後の assistant 行)だけは取りこぼさずに取り込む。
+    appendFileSync(
+      lostPath,
+      JSON.stringify({
+        parentUuid: "u3",
+        isSidechain: false,
+        cwd: "/tmp/proj",
+        sessionId: "sess-lost",
+        gitBranch: "main",
+        type: "assistant",
+        requestId: "req_NEW",
+        message: {
+          id: "msg_NEW",
+          role: "assistant",
+          model: "claude-fable-5",
+          content: [{ type: "text", text: "新しい応答" }],
+          usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 0 },
+        },
+        uuid: "aNEW",
+        timestamp: "2026-07-06T11:00:00.000Z",
+      }) + "\n",
+      "utf8",
+    );
+    dropCursorEntry(lostPath);
+
+    const third = await runIngest({ dryRun: false, offlinePricing: true });
+    const fresh = third.records.filter((r) => r.sessionId === "sess-lost");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].apiCalls).toBe(1); // 追記した1件だけ(ファイル全体の 3 ではない)
+  });
+
+  it("8. 回帰: history に記録済みで cursors にエントリが無い Codex rollout を丸ごと再取り込みしない", async () => {
+    const rolloutPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-cli.jsonl");
+    const sessionId = "01234567-aaaa-7000-8000-000000000001";
+
+    await runIngest({ dryRun: false, offlinePricing: true });
+    const recorded = readHistory().filter((r) => r.source === "codex" && r.sessionId === sessionId);
+    expect(recorded).toHaveLength(1);
+    const historyCount = readHistory().length;
+
+    dropCursorEntry(rolloutPath);
+
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.sessionId === sessionId)).toHaveLength(0);
+    expect(readHistory()).toHaveLength(historyCount);
+    expect(sanitizeCursor(loadCursor(rolloutPath))).not.toBeNull();
+
+    // 記録済みより後に始まった新ターンだけは取り込む(累積カウンタの差分= 2728/1008/13)。
+    appendFileSync(
+      rolloutPath,
+      [
+        '{"timestamp":"2026-07-10T12:20:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"2+2は？"}}',
+        '{"timestamp":"2026-07-10T12:20:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20000,"cached_input_tokens":6000,"output_tokens":20,"total_tokens":26020},"last_token_usage":{"input_tokens":2728,"cached_input_tokens":1008,"output_tokens":13,"total_tokens":3741},"model_context_window":258400}}}',
+        '{"timestamp":"2026-07-10T12:20:06.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"01234567-bbbb-7000-8000-000000000002","last_agent_message":"4です。"}}',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    dropCursorEntry(rolloutPath);
+
+    const third = await runIngest({ dryRun: false, offlinePricing: true });
+    const fresh = third.records.filter((r) => r.sessionId === sessionId);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].tokens.cacheRead).toBe(1008); // 新ターン分の差分のみ(累積 6000 ではない)
+    expect(fresh[0].tokens.output).toBe(13);
   });
 });
 

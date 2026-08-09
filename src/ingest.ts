@@ -15,7 +15,7 @@ import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
 import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome } from "./codex/env";
 import { normalizeCodexOriginator } from "./codex/originator";
-import { aggregateCodexTurn } from "./codex/transcript";
+import { aggregateCodexTurn, splitIntoCodexTurnDrafts } from "./codex/transcript";
 import { listCodexRollouts } from "./codex/sessions";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
@@ -37,6 +37,7 @@ import {
 import { aggregateNewTurn } from "./transcript";
 import type {
   Config,
+  Cursor,
   FxResult,
   PriceTable,
   Surface,
@@ -147,6 +148,64 @@ function saveIngestMtimeCache(cache: IngestMtimeCache): void {
   } catch {
     // ベストエフォートのキャッシュ。書き込み失敗は次回の効率が落ちるだけで正しさには影響しない。
   }
+}
+
+// ============ 既取り込み判定(history.jsonl 由来のセッション別 ts 下限) ============
+//
+// カーソルは「どこまで読んだか」の目印であって、取り込み済みかどうかの真実源ではない。
+// cursors.json の消失・リセット、sweep、transcript のパス変更、別マシンからの移行などで
+// 「history には記録済みなのにカーソルだけ無い」ファイルが生まれる。カーソル不在のときの
+// 集計はファイル先頭から全体を読むため、この状態では記録済みのターンを丸ごと再 append する。
+//
+// そこで history 側の「そのセッションで記録済みの最後の ts」を下限として持ち、カーソル不在の
+// ファイルはその下限より後だけを取り込む。history.jsonl は数千行・数MBになるため、読み込みは
+// 遅延1回(カーソル不在のファイルが実際に集計結果を出したときだけ)に限る。定常状態
+// (全ファイルにカーソルがある / mtime プリフィルタで落ちる)では1バイトも読まない。
+
+/** key = source + sessionId、value = そのセッションで記録済みの最後の ts(正規化 ISO)。 */
+type HistoryFloors = Map<string, string>;
+
+function floorKey(source: "claude" | "codex", sessionId: string): string {
+  return `${source}\u0000${sessionId}`;
+}
+
+function loadHistorySessionFloors(): HistoryFloors {
+  const floors: HistoryFloors = new Map();
+  let raw: string;
+  try {
+    raw = readFileSync(paths().historyFile, "utf8");
+  } catch {
+    return floors; // 履歴不在(初回)。すべて未取り込みとして扱うのが正しい
+  }
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+    let rec: { sessionId?: unknown; ts?: unknown; source?: unknown };
+    try {
+      rec = JSON.parse(line) as typeof rec;
+    } catch {
+      continue; // 破損行は黙殺(readTurns と同じ規則)
+    }
+    const { sessionId, ts } = rec;
+    if (typeof sessionId !== "string" || sessionId.length === 0) continue;
+    if (typeof ts !== "string") continue;
+    const ms = Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    // transcript 側の ts と文字列比較するため、表記ゆれで大小が狂わないよう正規化して持つ。
+    const iso = new Date(ms).toISOString();
+    const key = floorKey(rec.source === "codex" ? "codex" : "claude", sessionId);
+    const cur = floors.get(key);
+    if (cur === undefined || cur < iso) floors.set(key, iso);
+  }
+  return floors;
+}
+
+/**
+ * 記録済み ts を下限に持つ回収用カーソル。offset 0 = 先頭から読み直し、
+ * aggregateNewTurn 側では「カーソルはあるが offset が無効」= rescan として扱われ、
+ * lastTs 以前の行は集計から除外される(オフセットだけは EOF まで進む)。
+ */
+function recoveryCursor(floorTs: string): Cursor {
+  return { offset: 0, lastUuid: null, lastTs: floorTs, seenMessageKeys: [] };
 }
 
 // ============ レコード化 ============
@@ -315,11 +374,16 @@ async function processFiles(
   const result = emptyResult(dryRun, fx, true);
 
   // cursors.json は1回だけ読み、この呼び出しが保持している data lock の間だけメモリ上で更新し、
-  // 最後に1回だけ書き戻す(track の commitLock 等、他プロセスの read-modify-write と衝突する
-  // 「1ファイルごとに読み直して書き戻す」を避けるため。ファイル数が多いほど独立した書き込み回数が
-  // 増え、同時に走る別プロセスの更新をロスト・アップデートで消してしまう窓が広がっていた)。
+  // 最後に1回だけ書き戻す。
   const cursorsDict = loadAllCursors();
   let cursorsChanged = false;
+
+  let floors: HistoryFloors | null = null;
+  const recordedFloor = (source: "claude" | "codex", sessionId: string): string | null => {
+    if (sessionId.length === 0) return null; // セッション不明のファイルは突合できない
+    floors ??= loadHistorySessionFloors();
+    return floors.get(floorKey(source, sessionId)) ?? null;
+  };
 
   for (const filePath of claudeFiles) {
     let mtimeMs: number;
@@ -337,8 +401,23 @@ async function processFiles(
     nextMtimeCache[filePath] = mtimeMs;
     try {
       const cursor = sanitizeCursor(cursorsDict[filePath]);
-      const agg = await aggregateNewTurn(filePath, cursor);
+      let agg = await aggregateNewTurn(filePath, cursor);
       if (agg === null) continue;
+      if (cursor === null) {
+        const floor = recordedFloor("claude", agg.sessionId);
+        if (floor !== null) {
+          const consumed = agg.newCursor;
+          agg = await aggregateNewTurn(filePath, recoveryCursor(floor));
+          if (agg === null) {
+            // 記録済み分しか無いファイル。カーソルだけ EOF まで進めて次回から増分読みに戻す。
+            if (!dryRun) {
+              cursorsDict[filePath] = consumed;
+              cursorsChanged = true;
+            }
+            continue;
+          }
+        }
+      }
       const surface = surfaceForClaudePath(filePath, claudeRoots);
       const rec = buildClaudeRecord(agg, table, fx, surface);
       if (!dryRun) {
@@ -377,6 +456,31 @@ async function processFiles(
         if (!dryRun) {
           cursorsDict[filePath] = agg.newCursor;
           cursorsChanged = true;
+        }
+        continue;
+      }
+      const floor = cursor === null ? recordedFloor("codex", agg.sessionId) : null;
+      if (floor !== null) {
+        // rollout は累積カウンタの差分方式で集計するため、Claude のように ts 下限だけを渡して
+        // 読み直すことはできない(スキップした行のカウンタを取りこぼすと、次の差分が累積全量に
+        // なって大幅な過大計上になる)。task_complete 境界でターンに割ってから、記録済みより
+        // 後に「始まった」ターンだけを採る。rollout は hook がターンを記録した後にも同じターンの
+        // 行が追記されるため、記録済み ts は分割後のターン終端より僅かに手前になる。終端で
+        // 比べると同一ターンを新規と誤判定するので、開始時刻で判定する。下限をまたぐターンは
+        // 一部が記録済みなので採らない(取りこぼしより二重計上を避ける)。
+        // カーソルはウィンドウ全体を消費した位置まで進める。
+        const drafts = await splitIntoCodexTurnDrafts(filePath, null);
+        if (!dryRun) {
+          cursorsDict[filePath] = agg.newCursor;
+          cursorsChanged = true;
+        }
+        const floorMs = Date.parse(floor);
+        for (const draft of drafts ?? []) {
+          const startMs = draft.agg.firstTs === null ? NaN : Date.parse(draft.agg.firstTs);
+          if (!Number.isFinite(startMs) || startMs <= floorMs) continue;
+          const rec = buildCodexRecord(draft.agg, table, fx);
+          if (!dryRun) appendTurn(rec);
+          addRecord(result, rec);
         }
         continue;
       }
