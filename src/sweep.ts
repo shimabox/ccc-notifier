@@ -14,7 +14,6 @@
 import { readFile } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 
 import { extractBucket, promptCandidate } from "./transcript";
 import { computeCost, loadPriceTable } from "./pricing";
@@ -36,10 +35,13 @@ import type { SubagentUsage } from "./subagents";
 import { codexHome } from "./codex/env";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import type { CodexTurnDraft } from "./codex/transcript";
+import { normalizeCodexOriginator } from "./codex/originator";
 import { listCodexRollouts } from "./codex/sessions";
 import type { CodexRolloutDiscovery } from "./codex/sessions";
+import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
+import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
-import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
+import type { Cursor, FxResult, PriceTable, Surface, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 import { waitForDataLock, type DataLockHandle } from "./data-lock";
 import { writeDashboardHtml } from "./dashboard";
 import {
@@ -417,7 +419,13 @@ export async function splitIntoTurnDrafts(
 
 // ============ レコード化 ============
 
-function draftToRecord(draft: TurnDraft, ts: string, table: PriceTable, fx: FxResult): TurnRecord {
+function draftToRecord(
+  draft: TurnDraft,
+  ts: string,
+  table: PriceTable,
+  fx: FxResult,
+  surface: Surface,
+): TurnRecord {
   const breakdown = computeCost(draft.mainPerModel, draft.sidechainPerModel, table);
   const sidechainHasModels = Object.keys(draft.sidechainPerModel).length > 0;
 
@@ -438,6 +446,7 @@ function draftToRecord(draft: TurnDraft, ts: string, table: PriceTable, fx: FxRe
     fxSource: fx.source,
     prompt: draft.prompt,
     ingest: "sweep",
+    surface,
   };
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
   return rec;
@@ -459,12 +468,14 @@ async function processTranscriptLocked(
   daysCutoff: number | null,
   dryRun: boolean,
   summary: SweepSummary,
+  roots: ClaudeTranscriptRoot[],
   opts: { ignoreCursors?: boolean; strictRead?: boolean } = {},
 ): Promise<void> {
   if (opts.strictRead) {
     const file = await fsp.open(mainPath, "r");
     await file.close();
   }
+  const surface = surfaceForClaudePath(mainPath, roots);
   const cursor = opts.ignoreCursors ? null : sanitizeCursor(loadCursor(mainPath));
   const { drafts, newCursor, messageKeys } = await splitIntoTurnDrafts(mainPath, cursor);
 
@@ -476,7 +487,7 @@ async function processTranscriptLocked(
       const tsMs = Date.parse(ts);
       if (!Number.isFinite(tsMs) || tsMs < daysCutoff) continue; // 古い → 捨てる
     }
-    records.push(draftToRecord(draft, ts, table, fx));
+    records.push(draftToRecord(draft, ts, table, fx, surface));
   }
 
   // サブエージェント回収。
@@ -543,6 +554,7 @@ async function processTranscriptLocked(
           fxSource: fx.source,
           prompt: "",
           ingest: "sweep",
+          surface,
         };
         records.push(target);
       }
@@ -624,7 +636,9 @@ function codexDraftToRecord(
     prompt: draft.agg.prompt ?? "",
     ingest: "sweep",
     source: "codex",
+    surface: normalizeCodexOriginator(draft.agg.originator),
   };
+  if (typeof draft.agg.originator === "string") rec.originator = draft.agg.originator;
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
   return rec;
 }
@@ -720,11 +734,6 @@ async function discoverCodexSweepSource(): Promise<CodexSweepSource | null> {
 }
 
 // ============ 走査 ============
-
-function projectsRoot(override: string | null): string {
-  if (override) return override;
-  return process.env.CCCN_CLAUDE_PROJECTS || join(homedir(), ".claude", "projects");
-}
 
 interface SweepFlags {
   dryRun: boolean;
@@ -853,6 +862,7 @@ async function scanAllSources(
   dryRun: boolean,
   summary: SweepSummary,
   progress: SweepProgressReporter,
+  claudeRoots: ClaudeTranscriptRoot[],
 ): Promise<void> {
   const codexRollouts = codexSource?.discovery.rollouts.length ?? 0;
   progress({
@@ -879,7 +889,7 @@ async function scanAllSources(
   for (const mainPath of transcriptPaths) {
     summary.transcripts += 1;
     try {
-      await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, {
+      await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, claudeRoots, {
         ignoreCursors: true,
         strictRead: true,
       });
@@ -944,19 +954,33 @@ export async function runSweep(
   }
   const flags = parsed.flags;
   const progress = createSweepProgressReporter();
-  const root = projectsRoot(flags.projects);
+  const claudeRoots = await claudeTranscriptRoots({ projectsOverride: flags.projects });
+  const cliRoot = claudeRoots.find((r) => r.surface === "cli")!;
 
   // Claude ルート不在でも、Codex 側が走査可能なら警告1行を出して Codex 走査だけ続行する
   // (Codex 専用ユーザーの全再生成を成立させるため)。両方走査不能ならreset前にエラー終了。
-  const projectDirs = await listProjectDirs(root);
+  const cliProjectDirs = await listProjectDirs(cliRoot.path);
   const codexSource = await discoverCodexSweepSource();
-  if (projectDirs === null) {
+  if (cliProjectDirs === null) {
     if (codexSource === null || codexSource.discovery.unreadableDirs > 0) {
-      console.log(`走査ルートが見つかりません: ${root}`);
+      console.log(`走査ルートが見つかりません: ${cliRoot.path}`);
       return 1;
     }
-    console.log(`Claude の走査ルートが見つかりません: ${root}(Codex のみ走査します)`);
+    console.log(`Claude の走査ルートが見つかりません: ${cliRoot.path}(Codex のみ走査します)`);
   }
+
+  // デスクトップルート(surface=desktop)は不在・読み込み失敗を黙ってスキップする
+  // (非公開レイアウトでアプリ更新により壊れ得るため、本体機能に影響させない)。
+  const desktopProjectDirs: string[] = [];
+  for (const root of claudeRoots) {
+    if (root.surface !== "desktop") continue;
+    const dirs = await listProjectDirs(root.path);
+    if (dirs !== null) desktopProjectDirs.push(...dirs);
+  }
+  const projectDirs =
+    cliProjectDirs === null && desktopProjectDirs.length === 0
+      ? null
+      : [...(cliProjectDirs ?? []), ...desktopProjectDirs];
 
   // 実行時に一度だけ: 設定 / 単価表(オンライン可・失敗時は内蔵へフォールバック) / 為替。
   progress({ type: "preparing", dryRun: flags.dryRun });
@@ -990,7 +1014,7 @@ export async function runSweep(
 
   if (flags.dryRun) {
     try {
-      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary, progress);
+      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary, progress, claudeRoots);
     } catch (err) {
       reportSourceFailure(summary, true, "sweep:dry-run", err);
     }
@@ -1015,7 +1039,7 @@ export async function runSweep(
   try {
     invalidateCanonicalDashboards();
     resetHistoryAndCursors();
-    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary, progress);
+    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary, progress, claudeRoots);
     try {
       // scan前の古いHTMLだけでなく、writerが作り得るplaceholderも一度消してから同じsnapshotで再生成する。
       invalidateCanonicalDashboards();

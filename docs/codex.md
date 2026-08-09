@@ -77,6 +77,12 @@ Codex 由来のレコードが1件でもあると、`dashboard` に次の要素�
 
 Codex のレコードが無い環境ではソースフィルタ自体が表示されず、既存の見た目は変わりません。
 
+## Codex Desktop(統合ChatGPTアプリのCodexモード)
+
+Codex Desktopは`~/.codex/sessions`にCLIと同じ形式でrolloutを書きますが、CLIと違ってCodex CLI本体のStop hookが確実に発火するとは限らず、取りこぼしが起きることがあります。ccc-notifierはrolloutの先頭行(`session_meta.originator`)から利用元を判別し、`track`実行時の便乗り取込(hook非依存の増分取り込み)や手動`ccc-notifier scan`でこの取りこぼしを回収します。詳しくは[仕組み](how-it-works.md)の「hook非依存の増分取り込み」を参照してください。
+
+回収したレコードには正規化した`surface`(例: `codex-tui` / `codex_cli_rs` / `codex_exec` → `cli`、`Codex Desktop` / `codex_desktop` / `codex_work_desktop` → `desktop`、`codex_vscode` → `vscode`、`Claude Code` → `claude-code`、`codex-chrome-extension-sidepanel` → `chrome-extension`、未知値 → `other`)に加え、生の`originator`値も保持します。`doctor`はCodexのoriginator内訳(実機での分布の目安: `codex-tui`が最多、次いで`Codex Desktop`)と、rolloutの追跡漏れ件数を表示します。
+
 ## 履歴の再生成 / Rebuilding history (sweep)
 
 `sweep`は既存のコスト履歴と取り込み位置をresetし、Claude Code / Codexの手元に残る元JSONLから概算を再生成します。Codex対応後は`~/.codex/sessions`配下も自動的に走査対象になりますが、Codexサブエージェントのchild rolloutは料金未集計のため履歴へ入れません(`~/.codex`が無い/未使用の環境では黙ってスキップされます)。

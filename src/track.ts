@@ -11,6 +11,8 @@
 
 import { aggregateCodexTurn } from "./codex/transcript";
 import { closeCodexRootContext } from "./codex/subagent-store";
+import { normalizeCodexOriginator } from "./codex/originator";
+import { determineClaudeSurface } from "./claude-roots";
 import { writeDashboardHtml } from "./dashboard";
 import {
   isFullDashboardDue,
@@ -19,6 +21,7 @@ import {
 } from "./dashboard-state";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
+import { notifyIngestSummary, runIngest } from "./ingest";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { computeCost, loadPriceTable } from "./pricing";
@@ -200,6 +203,15 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       // valid parent turnにはactivityの到着順と無関係に、keyCheck検証済みの匿名join keyを保存する。
       // key/ledger整合性の検証失敗だけをmain記録から隔離し、未検証keyは履歴へ付けない。
       if (activityProjectionKey !== null) record.activityProjectionKey = activityProjectionKey;
+      const rawOriginator = agg?.originator;
+      record.surface = normalizeCodexOriginator(rawOriginator);
+      if (typeof rawOriginator === "string") record.originator = rawOriginator;
+    } else {
+      try {
+        record.surface = await determineClaudeSurface(transcriptPath);
+      } catch (err) {
+        logError("track:surface", err);
+      }
     }
     if (breakdown.unknownModels.length > 0) {
       record.unknownModels = breakdown.unknownModels;
@@ -263,60 +275,77 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       tasks.push(notifySlack(record, cfg, todayUSD));
     }
 
-    if (cfg.dashboard.autoRegenerate) {
-      tasks.push(
-        (async () => {
-          const now = new Date();
-          const dashboardLock = await waitForDataLock(1000);
-          if (dashboardLock === null) {
-            logError("track:dashboard-lock", new Error("data lock timeout; dashboard skipped"));
+    // ingest 便乗り取込 → report.html 再生成の順で1本の直列タスクにする(この2つは同じ data lock を
+    // 奪い合わないよう、あえて Promise.allSettled の別要素にせず直列合成する。並列にすると、送信通知
+    // タスクとは独立でよいが、この2つ自身は同じ lock を取り合ってどちらかがタイムアウトしうるため)。
+    // ingest を先にすることで、直後の dashboard 再生成に新規取り込み分を反映できる。
+    tasks.push(
+      (async () => {
+        // - ingest 便乗り取込(hook 非依存の増分取り込み。デスクトップアプリ等の hook 取りこぼしの保険):
+        //   本来のターン処理(上の記録・カーソル保存)の後にベストエフォートで実行する。runIngest 自身が
+        //   実際の書き込み区間だけを data lock で直列化する(config/単価/為替の準備・ファイル列挙は
+        //   lock 外)。失敗しても track 本来の処理は失敗させない(logError のみ)。単価表はキャッシュのみ
+        //   (offlinePricing)で毎 hook のネット待ちを避ける。新規に取り込んだターン群の合計が
+        //   minNotifyUSD 以上ならまとめて1通通知する(notifyIngestSummary はミュート・しきい値を尊重)。
+        try {
+          const result = await runIngest({ dryRun: false, offlinePricing: true });
+          if (result.records.length > 0) {
+            await notifyIngestSummary(result, cfg);
+          }
+        } catch (err) {
+          logError("track:ingest", err);
+        }
+
+        if (!cfg.dashboard.autoRegenerate) return;
+        const now = new Date();
+        const dashboardLock = await waitForDataLock(1000);
+        if (dashboardLock === null) {
+          logError("track:dashboard-lock", new Error("data lock timeout; dashboard skipped"));
+          return;
+        }
+        try {
+          // privacy: 履歴snapshotの取得から両canonical書込まで同じ所有権lock内に置く。
+          let allTurns: TurnRecord[];
+          try {
+            allTurns = readTurns();
+          } catch (err) {
+            logError("track:dashboard-read", err);
             return;
           }
-          try {
-            // privacy: 履歴snapshotの取得から両canonical書込まで同じ所有権lock内に置く。
-            let allTurns: TurnRecord[];
-            try {
-              allTurns = readTurns();
-            } catch (err) {
-              logError("track:dashboard-read", err);
-              return;
-            }
 
+          try {
+            writeDashboardHtml({
+              days: cfg.dashboard.days,
+              outPath: paths().recentDashboardFile,
+              autoReloadSec: cfg.dashboard.autoReloadSec,
+              allTurns,
+              variant: "recent",
+            });
+          } catch (err) {
+            logError("track:dashboard-recent", err);
+          }
+
+          if (isFullDashboardDue(now)) {
             try {
               writeDashboardHtml({
-                days: cfg.dashboard.days,
-                outPath: paths().recentDashboardFile,
+                days: null,
+                outPath: paths().fullDashboardFile,
                 autoReloadSec: cfg.dashboard.autoReloadSec,
                 allTurns,
-                variant: "recent",
+                variant: "full",
+                generatedAt: now.toISOString(),
               });
+              // HTML の atomic rename が成功した後だけ state を進める。
+              writeFullDashboardStateAtomic(makeFullDashboardState(now));
             } catch (err) {
-              logError("track:dashboard-recent", err);
+              logError("track:dashboard-full", err);
             }
-
-            if (isFullDashboardDue(now)) {
-              try {
-                writeDashboardHtml({
-                  days: null,
-                  outPath: paths().fullDashboardFile,
-                  autoReloadSec: cfg.dashboard.autoReloadSec,
-                  allTurns,
-                  variant: "full",
-                  generatedAt: now.toISOString(),
-                });
-                // HTML の atomic rename が成功した後だけ state を進める。
-                writeFullDashboardStateAtomic(makeFullDashboardState(now));
-              } catch (err) {
-                logError("track:dashboard-full", err);
-              }
-            }
-
-          } finally {
-            dashboardLock.release();
           }
-        })(),
-      );
-    }
+        } finally {
+          dashboardLock.release();
+        }
+      })(),
+    );
 
     if (tasks.length > 0) {
       await Promise.allSettled(tasks);

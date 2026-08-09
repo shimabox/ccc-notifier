@@ -68,7 +68,10 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
       lastTs: "2026-07-10T12:09:34.000Z",
       seenMessageKeys: [],
       codexTotals: { input: 17272, cached: 4992, output: 7 },
+      codexOriginator: "codex-tui",
     });
+    expect(r.originator).toBe("codex-tui");
+    expect(r.isSubagentRollout).toBe(false);
   });
 
   // 2. rollout-multiturn 全体: 逐次差分で4件を積み、破損 JSON 行・info:null の token_count・

@@ -6,7 +6,7 @@
 // 二重に例外を捕捉することで、1つのチェックの想定外の失敗が残りのチェックを止めないようにする。
 
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { computeCost, loadPriceTable } from "./pricing";
@@ -17,12 +17,14 @@ import { notifyOS, selectNotifyBackend } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
+import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
+import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome, detectCodex } from "./codex/env";
 import { CODEX_HOOK_EVENTS } from "./codex/setup";
 import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
-import { findLatestCodexRollout } from "./codex/sessions";
+import { findLatestCodexRollout, listCodexRollouts } from "./codex/sessions";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
-import { isMuted, paths, readConfig, readMuteState } from "./store";
+import { cursorPaths, isMuted, paths, readConfig, readMuteState } from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
@@ -547,6 +549,156 @@ async function checkCodexRecentSessionTotal(configured: boolean): Promise<boolea
   }
 }
 
+// ---- 8. デスクトップ検出状況・追跡漏れ・originator 内訳・sessionId 重複(desktop-cost-tracking) ----
+
+/** ファイル先頭の1行だけを読み JSON として返す。失敗は null(診断のみが目的のベストエフォート)。 */
+async function peekFirstJsonLine(path: string, maxBytes = 8192): Promise<Record<string, unknown> | null> {
+  try {
+    const fh = await open(path, "r");
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+      const text = buf.toString("utf8", 0, bytesRead);
+      const nl = text.indexOf("\n");
+      const line = (nl === -1 ? text : text.slice(0, nl)).trim();
+      if (line.length === 0) return null;
+      const obj: unknown = JSON.parse(line);
+      return isRecord(obj) ? obj : null;
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function listProjectDirsSafe(root: string): Promise<string[]> {
+  try {
+    const entries = readdirSync(root, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => join(root, e.name));
+  } catch {
+    return [];
+  }
+}
+
+async function listTranscriptsSafe(projectDir: string): Promise<string[]> {
+  try {
+    const entries = readdirSync(projectDir, { withFileTypes: true });
+    return entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => join(projectDir, e.name));
+  } catch {
+    return [];
+  }
+}
+
+async function discoverClaudeFilesForDoctor(roots: ClaudeTranscriptRoot[]): Promise<string[]> {
+  const files: string[] = [];
+  for (const root of roots) {
+    for (const dir of await listProjectDirsSafe(root.path)) {
+      files.push(...(await listTranscriptsSafe(dir)));
+    }
+  }
+  return files;
+}
+
+async function checkDesktopScan(): Promise<boolean> {
+  const roots = await claudeTranscriptRoots();
+  const desktopRoots = roots.filter((r) => r.surface === "desktop");
+  if (desktopRoots.length === 0) {
+    log("ok", "Claude デスクトップのスキャンルートは検出されませんでした(未使用、または macOS 以外・CCCN_CLAUDE_DESKTOP_ROOTS 未設定)");
+  } else {
+    for (const root of desktopRoots) {
+      const exists = existsSync(root.path);
+      log(
+        exists ? "ok" : "warn",
+        `Claude デスクトップのスキャンルート: ${root.path}${exists ? "" : "(現在は不在。アプリ更新でレイアウトが変わった可能性があります)"}`,
+      );
+    }
+  }
+
+  const tracked = cursorPaths();
+
+  const claudeFiles = await discoverClaudeFilesForDoctor(roots);
+  const claudeUntracked = claudeFiles.filter((f) => !tracked.has(f)).length;
+  log(
+    "ok",
+    `Claude transcript 追跡漏れ: ${claudeUntracked}件(全 ${claudeFiles.length}件中。未追跡分は ccc-notifier scan で回収できます)`,
+  );
+
+  // 同一 sessionId が複数 surface(cli/desktop)にまたがるケースを検知する(二重計上ガード)。
+  const sessionToSurfaces = new Map<string, Set<string>>();
+  for (const f of claudeFiles) {
+    const line = await peekFirstJsonLine(f);
+    const sid = typeof line?.sessionId === "string" ? line.sessionId : null;
+    if (sid === null || sid.length === 0) continue;
+    const surface = surfaceForClaudePath(f, roots);
+    const set = sessionToSurfaces.get(sid) ?? new Set();
+    set.add(surface);
+    sessionToSurfaces.set(sid, set);
+  }
+  const dupSessions = [...sessionToSurfaces.values()].filter((surfaces) => surfaces.size > 1).length;
+  if (dupSessions > 0) {
+    log(
+      "warn",
+      `同一 sessionId が複数サーフェスに現れています(${dupSessions}件)。二重計上の可能性があるため history を確認してください`,
+    );
+  } else {
+    log("ok", "同一 sessionId が複数の Claude ルートに重複するケースは検出されませんでした");
+  }
+
+  // Codex originator 内訳 + 未追跡件数(セッションディレクトリが無ければスキップ)。
+  const sessionsRoot = join(codexHome(), "sessions");
+  if (!existsSync(sessionsRoot)) {
+    log("ok", "Codex セッションディレクトリが無いため originator 内訳・追跡漏れはスキップしました");
+    return true;
+  }
+
+  let codexFiles: string[] = [];
+  try {
+    codexFiles = (await listCodexRollouts(sessionsRoot)).rollouts;
+  } catch (err) {
+    log("warn", `Codex rollout の列挙中にエラーが発生しました: ${errMessage(err)}`);
+    return true;
+  }
+
+  const codexUntracked = codexFiles.filter((f) => !tracked.has(f)).length;
+  log(
+    "ok",
+    `Codex rollout 追跡漏れ: ${codexUntracked}件(全 ${codexFiles.length}件中。未追跡分は ccc-notifier scan で回収できます)`,
+  );
+
+  const originatorCounts = new Map<string, number>();
+  const sessionIdToFiles = new Map<string, Set<string>>();
+  for (const f of codexFiles) {
+    const line = await peekFirstJsonLine(f);
+    const payload = isRecord(line?.payload) ? line!.payload : null;
+    const originator = typeof payload?.originator === "string" ? payload.originator : "(unknown)";
+    originatorCounts.set(originator, (originatorCounts.get(originator) ?? 0) + 1);
+    const sid = typeof payload?.session_id === "string" ? payload.session_id : null;
+    if (sid !== null && sid.length > 0) {
+      const set = sessionIdToFiles.get(sid) ?? new Set();
+      set.add(f);
+      sessionIdToFiles.set(sid, set);
+    }
+  }
+  const originatorSummary = [...originatorCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}:${v}`)
+    .join(" / ");
+  log("ok", `Codex originator 内訳: ${originatorSummary.length > 0 ? originatorSummary : "(rollout なし)"}`);
+
+  const dupCodex = [...sessionIdToFiles.values()].filter((files) => files.size > 1).length;
+  if (dupCodex > 0) {
+    log(
+      "warn",
+      `同一 session_id を持つ Codex rollout が複数ファイルにまたがっています(${dupCodex}件)。二重計上の可能性があるため history を確認してください`,
+    );
+  } else {
+    log("ok", "同一 session_id が複数の Codex rollout ファイルに重複するケースは検出されませんでした");
+  }
+
+  return true;
+}
+
 export async function runDoctor(): Promise<number> {
   const results: boolean[] = [];
 
@@ -576,6 +728,7 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("notify", () => checkNotification(cfg)));
   results.push(await safeRun("claude-recent-session", () => checkClaudeRecentSessionTotal(latestTranscript)));
   results.push(await safeRun("codex-recent-session", () => checkCodexRecentSessionTotal(codexStopConfigured)));
+  results.push(await safeRun("desktop-scan", () => checkDesktopScan()));
 
   const hasFailure = results.some((ok) => ok === false);
   return hasFailure ? 1 : 0;

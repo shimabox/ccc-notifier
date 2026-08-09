@@ -146,6 +146,7 @@ interface WindowScan {
   cwd: string | null; // 最後の turn_context.cwd → session_meta.cwd
   sessionId: string; // session_meta.session_id → ファイル名の uuid 部 → ""
   isSubagentRollout: boolean; // child rollout は sweep の料金履歴へ入れないため呼び出し側へ伝える
+  originator: string | null; // session_meta.originator(生値)。ファイル先頭にしか無いのでカーソル越しに持ち回る
   firstTs: string | null;
   lastTs: string | null;
   newOffset: number; // 処理済み末尾バイト(書きかけ行の行頭で止まる)
@@ -195,6 +196,9 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
   let sessionMetaCwd: string | null = null;
   let sessionMetaSid: string | null = null;
   let isSubagentRollout = false;
+  // session_meta はファイル先頭にしか現れないため、増分読み(rescan でない再開)では観測できない。
+  // 前回カーソルに保存済みの値を初期値にして持ち回る。
+  let originator: string | null = cursor?.codexOriginator ?? null;
   let firstTs: string | null = null;
   let lastTs: string | null = null;
 
@@ -250,6 +254,8 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
       if (c !== null) sessionMetaCwd = c;
       const source = payload.source;
       if (isRecord(source) && Object.hasOwn(source, "subagent")) isSubagentRollout = true;
+      const orig = strOrNull(payload.originator);
+      if (orig !== null) originator = orig;
       return;
     }
     if (type === "turn_context") {
@@ -331,6 +337,7 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
     cwd: windowTurnCtxCwd ?? sessionMetaCwd,
     sessionId: sessionMetaSid ?? sessionIdFromFilename(rolloutPath),
     isSubagentRollout,
+    originator,
     firstTs,
     lastTs,
     newOffset,
@@ -345,6 +352,7 @@ function windowCursor(scan: WindowScan): Cursor {
     lastTs: scan.lastTs,
     seenMessageKeys: [], // 去重は codexTotals の差分方式が担う
     codexTotals: { ...scan.prev },
+    codexOriginator: scan.originator,
   };
 }
 
@@ -373,6 +381,8 @@ export async function aggregateCodexTurn(
     firstTs: scan.firstTs,
     lastTs: scan.lastTs,
     newCursor: windowCursor(scan),
+    originator: scan.originator,
+    isSubagentRollout: scan.isSubagentRollout,
   };
 }
 
@@ -411,6 +421,8 @@ export async function splitIntoCodexTurnDrafts(
       prompt: s.prompt,
       cwd: s.cwd,
       gitBranch: null,
+      originator: scan.originator, // session_meta はファイル先頭にしか無いので全ドラフト共通
+      isSubagentRollout: scan.isSubagentRollout,
       firstTs: s.firstTs,
       lastTs: s.endTs,
       // 最後のドラフトはウィンドウ全体を消費した状態(= aggregateCodexTurn の newCursor と同一。
@@ -425,6 +437,7 @@ export async function splitIntoCodexTurnDrafts(
               lastTs: s.lastTsAtEnd,
               seenMessageKeys: [],
               codexTotals: { ...s.prevAtEnd },
+              codexOriginator: scan.originator,
             },
     },
     endTs: s.endTs,

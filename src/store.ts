@@ -282,6 +282,23 @@ export function loadCursor(transcriptPath: string): Cursor | null {
 }
 
 /**
+ * cursors.json に登録済みの全パス(キー)を返す(doctor の追跡漏れ検知用)。
+ * 不在/破損時は空 Set(loadCursor と同じ規則: 破損時のみ logError)。
+ */
+export function cursorPaths(): Set<string> {
+  const p = paths();
+  if (!existsSync(p.cursorsFile)) return new Set();
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(p.cursorsFile, "utf8"));
+    if (!isPlainObject(parsed)) return new Set();
+    return new Set(Object.keys(parsed));
+  } catch (err) {
+    logError("cursorPaths", err);
+    return new Set();
+  }
+}
+
+/**
  * loadCursor の戻り値を「形全体」で検証する。
  * cursors.json は理論上手で編集されうるため、文字列だけの seenMessageKeys フィルタでは足りない。
  * offset が有限数値 / lastUuid が string|null / lastTs が string|null / seenMessageKeys が string 配列 —
@@ -291,7 +308,7 @@ export function loadCursor(transcriptPath: string): Cursor | null {
  */
 export function sanitizeCursor(raw: unknown): Cursor | null {
   if (!isPlainObject(raw)) return null;
-  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals } = raw;
+  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals, codexOriginator } = raw;
   if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
   if (lastUuid !== null && typeof lastUuid !== "string") return null;
   if (lastTs !== null && typeof lastTs !== "string") return null;
@@ -315,6 +332,13 @@ export function sanitizeCursor(raw: unknown): Cursor | null {
       typeof output === "number" && Number.isFinite(output) && output >= 0
     ) {
       cursor.codexTotals = { input, cached, output };
+    }
+  }
+
+  // codexOriginator は string|null のときのみ採用する(Claude 側カーソルには常にこのキーが存在しない)。
+  if (Object.hasOwn(raw, "codexOriginator")) {
+    if (codexOriginator === null || typeof codexOriginator === "string") {
+      cursor.codexOriginator = codexOriginator;
     }
   }
 

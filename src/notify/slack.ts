@@ -1,5 +1,5 @@
 import type { Config, TurnRecord } from "../types";
-import { formatSummary } from "../format";
+import { formatSummary, type FormattedSummary } from "../format";
 import { appendNotifyError, writeDryRun } from "./util";
 
 const SEND_TIMEOUT_MS = 3000;
@@ -18,13 +18,18 @@ interface SlackPayload {
  * Slack Incoming Webhook へ通知を送る。通知はベストエフォートであり、
  * どのような失敗が起きても reject しない(本体 Claude Code の処理を妨げない)。
  */
-export async function notifySlack(record: TurnRecord, cfg: Config, todayUSD?: number): Promise<void> {
+export async function notifySlack(
+  record: TurnRecord,
+  cfg: Config,
+  todayUSD?: number,
+  summaryOverride?: FormattedSummary,
+): Promise<void> {
   try {
     const slackCfg = cfg?.notify?.slack;
     const webhookUrl = slackCfg?.webhookUrl;
     if (!webhookUrl) return;
 
-    const { title, body } = formatSummary(record, cfg, todayUSD);
+    const { title, body } = summaryOverride ?? formatSummary(record, cfg, todayUSD);
     const line1 = body.split("\n")[0] ?? "";
 
     const rawPrompt = record.prompt ?? "";

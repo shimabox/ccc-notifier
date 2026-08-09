@@ -40,6 +40,11 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Reset and rebuild estimates from source JSONL (--dry-run previews)",
   },
   {
+    cmd: "scan [--dry-run] [--json]",
+    ja: "hook非依存の増分取り込み(デスクトップアプリ等の取りこぼしを回収。--dry-runはpreview)",
+    en: "Hook-independent incremental ingest (catches desktop app etc.; --dry-run previews)",
+  },
+  {
     cmd: "history <clear|redact> [--days N] [--yes]",
     ja: "履歴を削除(clear=レコードごと / redact=プロンプトのみ。--days で古い分だけ)",
     en: "Delete history (clear=records / redact=prompts only; --days limits to older)",
@@ -221,6 +226,10 @@ export async function main(argv: string[]): Promise<number> {
       case "sweep": {
         const { runSweep } = await import("./sweep");
         return await runSweep(rest);
+      }
+      case "scan": {
+        const { runScan } = await import("./scan");
+        return await runScan(rest);
       }
       case "history": {
         const { runHistory } = await import("./history");

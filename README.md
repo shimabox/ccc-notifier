@@ -23,6 +23,7 @@ in 1.2k(cache 40%) / out 480 · 📁 my-app · 今日: $1.85
 - 月予算を設定し、今月の使用率を確認できます
 - 通知を一時停止しても、履歴の記録は続けられます
 - Codex CLIも任意で追加し、Claude Codeと同じダッシュボードで確認できます
+- Claude デスクトップアプリ・Codex Desktopの利用分も`scan`コマンド（または応答完了時の自動便乗り取込）でローカルログから取り込めます（macOS。詳しくは[仕組み](docs/how-it-works.md)を参照）
 
 ## 必要なもの
 
@@ -131,6 +132,8 @@ ccc-notifier init
 | `ccc-notifier unmute` | 通知を再開する |
 | `ccc-notifier sweep --dry-run [--days N]` | 履歴を作り直した場合の件数と概算を確認する |
 | `ccc-notifier sweep [--days N]` | 残っている利用データから履歴を作り直す |
+| `ccc-notifier scan --dry-run` | hook非依存の増分取り込み（デスクトップアプリ等の取りこぼし回収）の予定件数・金額を確認する |
+| `ccc-notifier scan` | 未追跡分（Claude デスクトップ、Codex Desktop等）を履歴へ取り込む |
 
 > [!CAUTION]
 > **`sweep`は履歴を作り直すコマンドです。** 保存済みの履歴をいったん消し、Claude Code / Codex CLIに残っているデータから再作成します。設定や通知は消えませんが、履歴のバックアップは作りません。以前に削除・伏せ字にした履歴も、Claude Code / Codex CLI側の元データに残っていれば再び入ります。また、再作成した時点の単価と為替を使うため、以前の金額から変わることがあります。先に`--dry-run`で確認してください。詳しくは[履歴の再生成](docs/sweep.md)を参照してください。
