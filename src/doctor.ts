@@ -717,13 +717,37 @@ async function checkDesktopScan(): Promise<boolean> {
 function checkDuplicateHistoryTurns(): boolean {
   const turns = readTurns();
   const groups = new Map<string, TurnRecord[]>();
+  // 一意キー(計上した呼び出しの集合から決まる)を持つレコードはキーで、
+  // キーが無い旧レコードは sessionId + ts で束ねる。
+  const byIngestKey = new Map<string, TurnRecord[]>();
   for (const rec of turns) {
+    if (typeof rec.ingestKey === "string" && rec.ingestKey.length > 0) {
+      const keyed = byIngestKey.get(rec.ingestKey) ?? [];
+      keyed.push(rec);
+      byIngestKey.set(rec.ingestKey, keyed);
+    }
     if (!rec.sessionId || !rec.ts) continue;
     const key = `${rec.sessionId} ${rec.ts} ${rec.source ?? "claude"}`;
     const list = groups.get(key) ?? [];
     list.push(rec);
     groups.set(key, list);
   }
+
+  const dupKeys = [...byIngestKey.entries()].filter(([, list]) => list.length > 1);
+  if (dupKeys.length > 0) {
+    const rows = dupKeys.reduce((sum, [, list]) => sum + list.length, 0);
+    const sample = dupKeys
+      .slice(0, 3)
+      .map(([key, list]) => `${key.slice(0, 8)}…(${list[0].sessionId.slice(0, 8)}… apiCalls ${list.map((r) => r.apiCalls).join("/")})`);
+    log(
+      "warn",
+      `history.jsonl に同一の取り込みキーを持つレコードが複数あります(${dupKeys.length}組・${rows}行)。` +
+        `同じ API 呼び出しを二度計上しています。例: ${sample.join(", ")}`,
+    );
+  } else {
+    log("ok", "history.jsonl に同一の取り込みキーを持つ重複レコードは検出されませんでした");
+  }
+
   const dupGroups = [...groups.entries()].filter(([, list]) => list.length > 1);
   if (dupGroups.length === 0) {
     log("ok", "history.jsonl に同一 sessionId+ts の重複ターンは検出されませんでした");

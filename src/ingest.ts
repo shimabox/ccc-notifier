@@ -11,7 +11,7 @@
 // ここでの失敗は「取りこぼしを次回に持ち越す」だけで全体を止めない)。
 
 import { promises as fsp, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
 import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome } from "./codex/env";
@@ -35,6 +35,8 @@ import {
   saveAllCursors,
   sanitizeCursor,
 } from "./store";
+import { anyOf, callFingerprints, codexTurnFingerprint, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
+import type { MessageKeyFilter } from "./counted-calls";
 import { attachSubagentGroups, splitIntoTurnDrafts } from "./sweep";
 import type { TurnDraft } from "./sweep";
 import { collectSubagentUsage } from "./subagents";
@@ -154,23 +156,23 @@ function saveIngestMtimeCache(cache: IngestMtimeCache): void {
   }
 }
 
-// ============ 既取り込み判定(history.jsonl 由来のセッション別 ts 下限) ============
+// ============ 既取り込み判定(history.jsonl 由来) ============
 //
-// カーソルは「どこまで読んだか」の目印であって、取り込み済みかどうかの真実源ではない。
+// カーソルは「どこまで読んだか」の目印であって、計上済みかどうかの真実源ではない。
 // cursors.json の消失・リセット、sweep、transcript のパス変更、別マシンからの移行では
-// 「history に記録済みなのにカーソルが無い」状態になる。カーソル不在のファイルは、history 側の
-// 「そのセッションで記録済みの最後の ts」を下限にして、それより後だけを取り込む。
+// 「history に記録済みなのにカーソルが無い」状態になる。そこで真実源を history 側に置く:
 //
-// サブエージェント分の下限は別に持つ。SA は親ターンへ合算されるため、親ターンが記録済みでも
-// その時点で SA が回収されていたとは限らない(agent ファイルが親の最後の Stop より後に
-// 書かれた場合など)。親の下限で切ると未記録の SA まで落ちるので、SA については
-// 「subagents ブロックを持つレコードの最後の ts」を下限にする。
+//  1. 計上済み呼び出しの指紋集合(TurnRecord.countedCalls)。ここに載っている呼び出しは
+//     どの経路からでも再計上しない。親ターン分もサブエージェント分も同じ集合で扱う。
+//  2. レコードの一意キー(TurnRecord.ingestKey)。同じキーのレコードは二度 append しない。
+//  3. 指紋を持たない旧レコード向けのフォールバックとして、セッション別の ts 下限。
+//     カーソルを持たないファイルを読み直すとき、この下限より前は計上済みとみなす。
+//     サブエージェント用の下限は別に持つ(親ターンが記録済みでも、その時点で SA が
+//     回収済みとは限らないため。下限は「subagents を持つ旧レコードの最後の ts」)。
 //
-// history.jsonl は数千行・数MBになるので、読み込みは遅延1回(カーソル不在のファイルを実際に
-// 処理したときだけ)。全ファイルにカーソルがある定常状態では1バイトも読まない。
-
-/** key = scope + sessionId、value = そのセッションで記録済みの最後の ts(正規化 ISO)。 */
-type HistoryFloors = Map<string, string>;
+// history.jsonl は数千行・数MBになるので、読み込みは ingest 1回につき最大1度・遅延実行
+// (カーソルまたは指紋の突合が実際に必要になったときだけ)。全ファイルにカーソルがあり
+// mtime も動いていない定常状態では1バイトも読まない。
 
 /** claude / codex = メインターン、claude-sa = サブエージェント分を含むターン。 */
 type FloorScope = "claude" | "codex" | "claude-sa";
@@ -179,22 +181,53 @@ function floorKey(scope: FloorScope, sessionId: string): string {
   return `${scope}\u0000${sessionId}`;
 }
 
-function loadHistorySessionFloors(): HistoryFloors {
-  const floors: HistoryFloors = new Map();
+interface HistoryIndex {
+  /** 計上済み呼び出しの指紋。 */
+  countedCalls: Set<string>;
+  /** 既に history にあるレコードの一意キー。 */
+  ingestKeys: Set<string>;
+  /** 指紋を持たない旧レコードだけから作った ts 下限(scope + sessionId → 正規化 ISO)。 */
+  legacyFloors: Map<string, string>;
+}
+
+function loadHistoryIndex(): HistoryIndex {
+  const index: HistoryIndex = { countedCalls: new Set(), ingestKeys: new Set(), legacyFloors: new Map() };
   let raw: string;
   try {
     raw = readFileSync(paths().historyFile, "utf8");
   } catch {
-    return floors; // 履歴不在(初回)。すべて未取り込みとして扱うのが正しい
+    return index; // 履歴不在(初回)。すべて未取り込みとして扱うのが正しい
   }
   for (const line of raw.split("\n")) {
     if (line.length === 0) continue;
-    let rec: { sessionId?: unknown; ts?: unknown; source?: unknown; subagents?: unknown };
+    let rec: {
+      sessionId?: unknown;
+      ts?: unknown;
+      source?: unknown;
+      subagents?: unknown;
+      countedCalls?: unknown;
+      ingestKey?: unknown;
+    };
     try {
       rec = JSON.parse(line) as typeof rec;
     } catch {
       continue; // 破損行は黙殺(readTurns と同じ規則)
     }
+
+    let hasFingerprints = false;
+    if (Array.isArray(rec.countedCalls)) {
+      for (const fp of rec.countedCalls) {
+        if (typeof fp === "string" && fp.length > 0) {
+          index.countedCalls.add(fp);
+          hasFingerprints = true;
+        }
+      }
+    }
+    if (typeof rec.ingestKey === "string" && rec.ingestKey.length > 0) index.ingestKeys.add(rec.ingestKey);
+
+    // 指紋を持つレコードは指紋で正確に突合できるので、下限(粗い近似)には寄与させない。
+    if (hasFingerprints) continue;
+
     const { sessionId, ts } = rec;
     if (typeof sessionId !== "string" || sessionId.length === 0) continue;
     if (typeof ts !== "string") continue;
@@ -203,15 +236,15 @@ function loadHistorySessionFloors(): HistoryFloors {
     // transcript 側の ts と文字列比較するため、表記ゆれで大小が狂わないよう正規化して持つ。
     const iso = new Date(ms).toISOString();
     const isCodex = rec.source === "codex";
-    const keys: FloorScope[] = isCodex ? ["codex"] : ["claude"];
-    if (!isCodex && rec.subagents !== undefined && rec.subagents !== null) keys.push("claude-sa");
-    for (const scope of keys) {
+    const scopes: FloorScope[] = isCodex ? ["codex"] : ["claude"];
+    if (!isCodex && rec.subagents !== undefined && rec.subagents !== null) scopes.push("claude-sa");
+    for (const scope of scopes) {
       const key = floorKey(scope, sessionId);
-      const cur = floors.get(key);
-      if (cur === undefined || cur < iso) floors.set(key, iso);
+      const cur = index.legacyFloors.get(key);
+      if (cur === undefined || cur < iso) index.legacyFloors.set(key, iso);
     }
   }
-  return floors;
+  return index;
 }
 
 /**
@@ -257,6 +290,7 @@ function buildClaudeDraftRecord(
     surface,
   };
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, callFingerprints(draft.messageKeys));
   return rec;
 }
 
@@ -266,6 +300,15 @@ function sessionIdOfDrafts(drafts: TurnDraft[]): string {
     if (drafts[i].sessionId.length > 0) return drafts[i].sessionId;
   }
   return "";
+}
+
+/**
+ * 新規ターンが1件も無い窓では上の関数がセッション ID を返せないので、ファイル名から補う。
+ * Claude Code の transcript は `<projectDir>/<sessionId>.jsonl` に置かれる。
+ */
+function sessionIdFromTranscriptPath(filePath: string): string {
+  const name = basename(filePath);
+  return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : "";
 }
 
 function buildCodexRecord(agg: TurnAggregate, table: PriceTable, fx: FxResult): TurnRecord {
@@ -294,6 +337,7 @@ function buildCodexRecord(agg: TurnAggregate, table: PriceTable, fx: FxResult): 
   };
   if (typeof agg.originator === "string") rec.originator = agg.originator;
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, [codexTurnFingerprint(rec.sessionId, agg.firstTs, agg.lastTs, rec.tokens)]);
   return rec;
 }
 
@@ -321,6 +365,8 @@ export interface IngestResult {
   records: TurnRecord[];
   scannedFiles: number;
   skippedByMtime: number;
+  /** 一意キーが history に既にあり append しなかったレコード数(冪等化が効いた件数)。 */
+  skippedDuplicates: number;
   failures: number;
   totalUSD: number;
   totalJPY: number;
@@ -336,6 +382,7 @@ function emptyResult(dryRun: boolean, fx: FxResult, lockAcquired: boolean): Inge
     records: [],
     scannedFiles: 0,
     skippedByMtime: 0,
+    skippedDuplicates: 0,
     failures: 0,
     totalUSD: 0,
     totalJPY: 0,
@@ -345,14 +392,17 @@ function emptyResult(dryRun: boolean, fx: FxResult, lockAcquired: boolean): Inge
   };
 }
 
+/** 合計はサブエージェント分を含む(取り込んだ金額そのもの = 通知しきい値の判定対象)。 */
 function addRecord(result: IngestResult, rec: TurnRecord): void {
+  const usd = rec.costUSD + (rec.subagents?.costUSD ?? 0);
+  const jpy = rec.costJPY + (rec.subagents?.costUSD ?? 0) * rec.fxRate;
   result.records.push(rec);
-  result.totalUSD += rec.costUSD;
-  result.totalJPY += rec.costJPY;
+  result.totalUSD += usd;
+  result.totalJPY += jpy;
   const surface = rec.surface ?? "cli";
   const cur = result.bySurface[surface] ?? { turns: 0, usd: 0 };
   cur.turns += 1;
-  cur.usd += rec.costUSD;
+  cur.usd += usd;
   result.bySurface[surface] = cur;
 }
 
@@ -408,12 +458,15 @@ async function processFiles(
   const cursorsDict = loadAllCursors();
   let cursorsChanged = false;
 
-  let floors: HistoryFloors | null = null;
+  // history 由来の突合材料は ingest 1回につき最大1度だけ読む。
+  let index: HistoryIndex | null = null;
+  const historyIndex = (): HistoryIndex => (index ??= loadHistoryIndex());
   const recordedFloor = (scope: FloorScope, sessionId: string): string | null => {
     if (sessionId.length === 0) return null; // セッション不明のファイルは突合できない
-    floors ??= loadHistorySessionFloors();
-    return floors.get(floorKey(scope, sessionId)) ?? null;
+    return historyIndex().legacyFloors.get(floorKey(scope, sessionId)) ?? null;
   };
+  /** history に指紋として残っている呼び出しを弾く述語。 */
+  const countedFilter = (): MessageKeyFilter => messageKeyFilterOf(historyIndex().countedCalls);
 
   /**
    * 取り込んだレコード群を history へ書き、カーソルを進める(1ターン1行)。
@@ -426,13 +479,26 @@ async function processFiles(
     newCursor: Cursor,
     subagentCursors: Array<{ path: string; cursor: Cursor }> = [],
   ): void => {
+    // 同じ一意キーのレコードが既に history にあるなら append しない(append の冪等化)。
+    // キーは計上した呼び出しの集合そのものから決まるので、カーソルがどう壊れていても効く。
+    const fresh: TurnRecord[] = [];
+    for (const rec of records) {
+      const key = rec.ingestKey;
+      if (key !== undefined && historyIndex().ingestKeys.has(key)) {
+        result.skippedDuplicates += 1;
+        continue;
+      }
+      if (key !== undefined) historyIndex().ingestKeys.add(key);
+      for (const fp of rec.countedCalls ?? []) historyIndex().countedCalls.add(fp);
+      fresh.push(rec);
+    }
     if (!dryRun) {
-      for (const rec of records) appendTurn(rec);
+      for (const rec of fresh) appendTurn(rec);
       cursorsDict[filePath] = newCursor;
       for (const nc of subagentCursors) cursorsDict[nc.path] = nc.cursor;
       cursorsChanged = true;
     }
-    for (const rec of records) addRecord(result, rec);
+    for (const rec of fresh) addRecord(result, rec);
   };
 
   /** aggregateNewTurn と同じカーソル意味論(ウィンドウが値を持たなければ前回値を保つ)に揃える。 */
@@ -446,13 +512,18 @@ async function processFiles(
     const cursor = sanitizeCursor(cursorsDict[filePath]);
     // カーソルが無いファイルは history 側の記録済み ts を下限にして読み直す。
     // 下限の引き当てに sessionId が要るので、まず素の分割で sessionId を得る。
-    let split = await splitIntoTurnDrafts(filePath, cursor);
+    // 計上済みの呼び出しは、カーソルの有無に関係なく history 由来の指紋で弾く。
+    const counted = countedFilter();
+    let split = await splitIntoTurnDrafts(filePath, cursor, { excludeMessageKeys: counted });
     // sessionId は「下限で切る前」の分割から採る(下限適用後は0ターンになり得るため)。
-    const sessionId = sessionIdOfDrafts(split.drafts);
+    const sessionId = sessionIdOfDrafts(split.drafts) || sessionIdFromTranscriptPath(filePath);
     let floor: string | null = null;
     if (cursor === null) {
+      // 指紋を持たない旧レコードぶんのフォールバック。
       floor = recordedFloor("claude", sessionId);
-      if (floor !== null) split = await splitIntoTurnDrafts(filePath, recoveryCursor(floor));
+      if (floor !== null) {
+        split = await splitIntoTurnDrafts(filePath, recoveryCursor(floor), { excludeMessageKeys: counted });
+      }
     }
     const newCursor = carryCursor(split.newCursor, cursor, floor);
     const surface = surfaceForClaudePath(filePath, claudeRoots);
@@ -463,12 +534,14 @@ async function processFiles(
     // サブエージェント(<transcript>/subagents/agent-*.jsonl)は親ターンへ合算する。
     // hook 経路(track)・sweep と同じ回収をしないと、取り込み経路によって同じセッションの
     // 金額が変わる。カーソルが無いときだけ、SA 用の下限で既記録分を除外する。
-    const saFloor = cursor === null ? recordedFloor("claude-sa", sessionId) : null;
+    // 二重計上は指紋で防ぐ。旧レコードぶんのフォールバックとして、カーソルを持たない
+    // agent ファイルにだけ SA 用の下限を適用する(親カーソルの有無とは独立)。
+    const saFloor = recordedFloor("claude-sa", sessionId);
     let sa: SubagentUsage | null = null;
     try {
       sa = await collectSubagentUsage(filePath, {
-        excludeMessageKeys: new Set(split.messageKeys),
-        minTimestampMs: saFloor === null ? null : Date.parse(saFloor) + 1,
+        excludeMessageKeys: anyOf([new Set(split.messageKeys), counted]),
+        recoveryMinTimestampMs: saFloor === null ? null : Date.parse(saFloor) + 1,
         readCursor: (path) => sanitizeCursor(cursorsDict[path]),
       });
     } catch (err) {
@@ -501,14 +574,11 @@ async function processFiles(
 
     // カーソル不在: 記録済み ts があれば、そこまで消費した再開点から読み直す。
     // ウィンドウ全体は消費済みなので、新規ターンが無くてもカーソルは EOF まで進める。
+    // (同じターンを再集計しても指紋が一致するので、commit 側でも重複は落ちる)
     const floor = recordedFloor("codex", drafts[0].agg.sessionId);
-    if (floor === null) {
-      commit(filePath, drafts.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
-      return;
-    }
-    const resume = await codexResumePointAtTs(filePath, floor);
-    const fresh = (await splitIntoCodexTurnDrafts(filePath, resume)) ?? [];
-    commit(filePath, fresh.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
+    const target =
+      floor === null ? drafts : ((await splitIntoCodexTurnDrafts(filePath, await codexResumePointAtTs(filePath, floor))) ?? []);
+    commit(filePath, target.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
   };
 
   const runOver = async (
@@ -527,7 +597,7 @@ async function processFiles(
       // まだ取り込みが確定していない(sweep のリセット後・cursors.json の消失など)ので、
       // mtime が動いていなくても必ず走査して history 側と突合する。
       const cached = mtimeCache[filePath];
-      if (cached !== undefined && cached >= mtimeMs && cursorsDict[filePath] !== undefined) {
+      if (cached !== undefined && cached >= mtimeMs && sanitizeCursor(cursorsDict[filePath]) !== null) {
         result.skippedByMtime += 1;
         continue;
       }

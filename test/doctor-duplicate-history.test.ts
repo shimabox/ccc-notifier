@@ -87,6 +87,26 @@ describe("doctor: duplicate history turn detection", () => {
     expect(out).toContain("apiCalls 3/406");
   });
 
+  it("同一 ingestKey のレコードが複数あれば warn で検知する", async () => {
+    // 一意キーは計上した呼び出しの集合から決まるので、ts が違っても同じ呼び出しなら一致する。
+    appendTurn(makeTurn({ ts: "2026-07-11T12:12:15.857Z", countedCalls: ["aaaa1111bbbb2222"], ingestKey: "k1" }));
+    appendTurn(makeTurn({ ts: "2026-07-11T13:00:00.000Z", countedCalls: ["aaaa1111bbbb2222"], ingestKey: "k1" }));
+
+    await runDoctor();
+
+    const out = logs.join("\n");
+    expect(out).toContain("同一の取り込みキーを持つレコードが複数あります");
+  });
+
+  it("ingestKey が重複していなければ ok で報告する", async () => {
+    appendTurn(makeTurn({ ts: "2026-07-11T12:12:15.857Z", countedCalls: ["aaaa1111bbbb2222"], ingestKey: "k1" }));
+    appendTurn(makeTurn({ ts: "2026-07-11T13:00:00.000Z", countedCalls: ["cccc3333dddd4444"], ingestKey: "k2" }));
+
+    await runDoctor();
+
+    expect(logs.join("\n")).toContain("同一の取り込みキーを持つ重複レコードは検出されませんでした");
+  });
+
   it("重複が無ければ ok で報告する", async () => {
     appendTurn(makeTurn({ ts: "2026-07-11T12:12:15.857Z" }));
     appendTurn(makeTurn({ ts: "2026-07-12T09:00:00.000Z" }));

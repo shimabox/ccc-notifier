@@ -23,6 +23,8 @@ import { promises as fs } from "node:fs";
 import type { Dirent } from "node:fs";
 import { join } from "node:path";
 import { aggregateNewTurn } from "./transcript";
+import { anyOf } from "./counted-calls";
+import type { MessageKeyFilter } from "./counted-calls";
 import { loadCursor, logError, sanitizeCursor } from "./store";
 import type { Cursor, TokenBuckets, UsageByModel } from "./types";
 
@@ -43,6 +45,8 @@ export interface SubagentUsage {
 export interface SubagentUsageGroup {
   perModel: UsageByModel;
   apiCalls: number;
+  /** このグループで計上した messageKey(history へ指紋として残し、再計上を防ぐ)。 */
+  messageKeys: string[];
   firstTs: string | null;
   lastTs: string | null;
 }
@@ -124,8 +128,14 @@ export async function collectSubagentUsage(
     ignoreCursors?: boolean;
     strictRead?: boolean;
     includeAllFiles?: boolean;
-    excludeMessageKeys?: ReadonlySet<string>;
+    excludeMessageKeys?: MessageKeyFilter;
     minTimestampMs?: number | null;
+    /**
+     * カーソルを持たない agent ファイルにだけ適用する下限(ms)。カーソルが無いファイルは
+     * 先頭からの読み直しになるため、history 側で計上済みと分かっている範囲を除外する。
+     * カーソルがあるファイルはカーソルの消費位置を信用する。
+     */
+    recoveryMinTimestampMs?: number | null;
     /**
      * カーソルの読み出し口(既定は cursors.json を都度読む loadCursor)。
      * 多数のファイルをまとめて処理する呼び出し元は、1回だけ読んだ辞書を引く関数を渡して
@@ -160,7 +170,9 @@ export async function collectSubagentUsage(
   // prevents a call copied into another agent file on a later turn from being
   // charged again. The cursor ring is intentionally bounded by transcript.ts.
   const readCursor = opts.readCursor ?? ((path: string) => sanitizeCursor(loadCursor(path)));
-  const excluded = new Set(opts.excludeMessageKeys ?? []);
+  // このディレクトリ内で消費したキー(実行中に増える)+ 呼び出し元から渡された除外条件。
+  const excluded = new Set<string>();
+  const excludeFilter = anyOf([excluded, opts.excludeMessageKeys]);
   if (!opts.ignoreCursors) {
     for (const filePath of files) {
       const prior = readCursor(filePath);
@@ -175,9 +187,11 @@ export async function collectSubagentUsage(
         await file.close();
       }
       const cursor = opts.ignoreCursors ? null : readCursor(filePath);
+      // カーソルが無いファイルだけ、history 側で計上済みと分かっている範囲を下限で落とす。
+      const recoveryFloor = cursor === null ? (opts.recoveryMinTimestampMs ?? null) : null;
       const agg = await aggregateNewTurn(filePath, cursor, {
-        excludeMessageKeys: excluded,
-        minTimestampMs: opts.minTimestampMs,
+        excludeMessageKeys: excludeFilter,
+        minTimestampMs: opts.minTimestampMs ?? recoveryFloor,
         returnEmpty: true,
       });
       if (agg === null) continue; // このファイルに新規 usage なし
@@ -197,6 +211,7 @@ export async function collectSubagentUsage(
       groups.push({
         perModel: groupUsage,
         apiCalls: agg.apiCalls,
+        messageKeys: agg.messageKeys,
         firstTs: agg.firstTs,
         lastTs: agg.lastTs,
       });

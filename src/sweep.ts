@@ -16,6 +16,8 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 
 import { extractBucket, promptCandidate } from "./transcript";
+import { addCountedCalls, anyOf, callFingerprints, setCountedCalls } from "./counted-calls";
+import type { MessageKeyFilter } from "./counted-calls";
 import { computeCost, loadPriceTable } from "./pricing";
 import { getUsdJpy } from "./fx";
 import {
@@ -141,6 +143,8 @@ export interface TurnDraft {
   mainPerModel: UsageByModel;
   sidechainPerModel: UsageByModel;
   apiCalls: number;
+  /** このターンで計上した messageKey(history へ指紋として残し、再計上を防ぐ)。 */
+  messageKeys: string[];
   firstTs: string | null;
   lastTs: string | null;
   cwd: string | null;
@@ -256,6 +260,7 @@ async function readAll(path: string): Promise<Buffer | null> {
 export async function splitIntoTurnDrafts(
   transcriptPath: string,
   cursor: Cursor | null,
+  opts: { excludeMessageKeys?: MessageKeyFilter } = {},
 ): Promise<{ drafts: TurnDraft[]; newCursor: Cursor; messageKeys: string[] }> {
   const buffer = await readAll(transcriptPath);
   if (buffer === null) {
@@ -281,7 +286,9 @@ export async function splitIntoTurnDrafts(
     rescan = cursor !== null;
   }
 
-  const priorSeen = new Set<string>(cursor?.seenMessageKeys ?? []); // グローバル seen(過去に計上済み)
+  // グローバル seen(過去に計上済み)= カーソルのリング + 呼び出し元が渡した除外条件
+  // (history 由来の「計上済み指紋」など。カーソルが失われていても再計上させない)。
+  const priorSeen = anyOf([new Set<string>(cursor?.seenMessageKeys ?? []), opts.excludeMessageKeys]);
   const tsFloor = cursor?.lastTs ?? null;
 
   const drafts: TurnDraft[] = [];
@@ -296,9 +303,11 @@ export async function splitIntoTurnDrafts(
     if (cur.pending.size === 0) return; // assistant usage が無いバッファはターンにしない
     const mainPerModel: UsageByModel = {};
     const sidechainPerModel: UsageByModel = {};
+    const draftKeys: string[] = [];
     for (const [key, pm] of cur.pending) {
       runSeen.add(key);
       newKeys.push(key);
+      draftKeys.push(key);
       if (pm.isSidechain) addToModel(sidechainPerModel, pm.model, pm.bucket);
       else addToModel(mainPerModel, pm.model, pm.bucket);
     }
@@ -307,6 +316,7 @@ export async function splitIntoTurnDrafts(
       mainPerModel,
       sidechainPerModel,
       apiCalls: cur.pending.size,
+      messageKeys: draftKeys,
       firstTs: cur.firstTs,
       lastTs: cur.lastTs,
       cwd: cur.cwd,
@@ -449,6 +459,7 @@ function draftToRecord(
     surface,
   };
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, callFingerprints(draft.messageKeys));
   return rec;
 }
 
@@ -523,6 +534,7 @@ export function attachSubagentGroups(
       records.push(target);
     }
 
+    addCountedCalls(target, callFingerprints(group.messageKeys));
     if (target.subagents === undefined) {
       target.subagents = saBlock;
     } else {

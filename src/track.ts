@@ -37,6 +37,7 @@ import {
   saveCursor,
   todayTotalUSD,
 } from "./store";
+import { callFingerprints, codexTurnFingerprint, setCountedCalls } from "./counted-calls";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
@@ -237,6 +238,23 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         }
         record.unknownModels = merged;
       }
+    }
+
+    // 6c. 計上した呼び出しの指紋を載せる(親ターン分 + サブエージェント分)。
+    //     カーソルが失われても、ここに載った呼び出しは以後どの経路でも再計上されない。
+    if (isCodex) {
+      // rollout に呼び出し単位の ID は無いので、ターンの内容から 1 ターン 1 指紋を作る。
+      setCountedCalls(
+        record,
+        agg === null ? [] : [codexTurnFingerprint(record.sessionId, agg.firstTs, agg.lastTs, record.tokens)],
+      );
+    } else {
+      const countedKeys: string[] = [];
+      if (agg !== null && "messageKeys" in agg) {
+        countedKeys.push(...(agg as TurnAggregate & { messageKeys: string[] }).messageKeys);
+      }
+      for (const group of sa?.groups ?? []) countedKeys.push(...group.messageKeys);
+      setCountedCalls(record, callFingerprints(countedKeys));
     }
 
     // 7. 記録 → カーソル保存(この順序固定)。

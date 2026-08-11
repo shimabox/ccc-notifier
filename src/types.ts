@@ -99,6 +99,14 @@ export interface TurnRecord {
     agentTypes: string[];
     usageStatus: 'partial' | 'unavailable';
   };
+  /**
+   * このレコードで計上した API 呼び出しの指紋(src/counted-calls.ts)。親ターン分と
+   * サブエージェント分の両方を含む。取り込み側はこれを除外条件にして、カーソルが壊れても
+   * 同じ呼び出しを二度計上しない。欠損 = この仕組みより前のレコード(ts による識別へフォールバック)。
+   */
+  countedCalls?: string[];
+  /** countedCalls から決まるレコードの一意キー。呼び出しを計上していないレコードには付かない。 */
+  ingestKey?: string;
   unknownModels?: string[];
   subagents?: {              // サブエージェント枠(旧レコード後方互換のため optional)
     costUSD: number;                     // サブエージェント合計(丸めない)

@@ -1003,7 +1003,11 @@ describe("runTrack: ingest piggyback (best-effort, hook 非依存の取りこぼ
     // 同一 sessionId のコピーは(パスが違っても)同じセッションの再取り込みとして正しく抑止される。
     writeFileSync(
       join(projects, "proj", "other-session.jsonl"),
-      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-other"'),
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8")
+        .replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-other"')
+        .replaceAll('"msg_', '"msg_other_')
+        .replaceAll('"req_', '"req_other_')
+        .replaceAll('"requestId":"req_', '"requestId":"req_other_'),
       "utf8",
     );
     process.env.CCCN_CLAUDE_PROJECTS = projects;

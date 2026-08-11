@@ -162,10 +162,22 @@ function codexTurnLines(tsPrefix: string, input: number, cached: number, output:
   );
 }
 
+/** transcript fixture を、指定セッション・固有の messageId/requestId に読み替えて返す。 */
+function transcriptFixture(sessionId: string, tag: string): string {
+  return readFileSync(FIXTURE_TRANSCRIPT, "utf8")
+    .replaceAll('"sessionId":"sess-1"', `"sessionId":"${sessionId}"`)
+    .replaceAll('"msg_', `"msg_${tag}_`)
+    .replaceAll('"req_', `"req_${tag}_`)
+    .replaceAll('"requestId":"req_', `"requestId":"req_${tag}_`);
+}
+
 /** サブエージェント fixture を、指定セッション・指定時刻に読み替えて返す。 */
 function subagentFixture(sessionId: string, ts1: string, ts2: string): string {
   return readFileSync(FIXTURE_SUBAGENT, "utf8")
     .replaceAll('"sessionId":"sess-1"', `"sessionId":"${sessionId}"`)
+    .replaceAll('"msg_', `"msg_${sessionId}_`)
+    .replaceAll('"req_', `"req_${sessionId}_`)
+    .replaceAll('"requestId":"req_', `"requestId":"req_${sessionId}_`)
     .replaceAll("2026-07-06T10:00:20.000Z", `2026-07-06T${ts1}.000Z`)
     .replaceAll("2026-07-06T10:00:21.000Z", `2026-07-06T${ts2}.000Z`);
 }
@@ -301,7 +313,7 @@ describe("runIngest", () => {
     const lostPath = join(cliProjects, "proj-cli", "cursor-lost.jsonl");
     writeFileSync(
       lostPath,
-      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-lost"'),
+      transcriptFixture("sess-lost", "lost"),
       "utf8",
     );
 
@@ -396,7 +408,7 @@ describe("runIngest", () => {
     const multiPath = join(cliProjects, "proj-cli", "multi-turn.jsonl");
     writeFileSync(
       multiPath,
-      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-multi"') +
+      transcriptFixture("sess-multi", "multi") +
         claudeTurnLines("sess-multi", "2つめの質問", "req_T2", "msg_T2", "2026-07-06T12:00:00.000Z") +
         claudeTurnLines("sess-multi", "3つめの質問", "req_T3", "msg_T3", "2026-07-06T13:00:00.000Z"),
       "utf8",
@@ -527,7 +539,7 @@ describe("runIngest", () => {
     const parentPath = join(cliProjects, "proj-cli", "with-subagents.jsonl");
     writeFileSync(
       parentPath,
-      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-sa"'),
+      transcriptFixture("sess-sa", "sa"),
       "utf8",
     );
     const agentDir = join(cliProjects, "proj-cli", "with-subagents", "subagents");
@@ -551,11 +563,143 @@ describe("runIngest", () => {
     expect(saRows).toHaveLength(1);
   });
 
+  // 受け入れ基準: カーソルをどう壊しても結果が変わらないこと。
+  // 「計上済みか」の真実源を history 側(countedCalls / ingestKey)に置いたので、
+  // 親カーソル・agent カーソル・cursors.json 全体のいずれを失っても再計上されない。
+  describe("カーソル破壊耐性", () => {
+    interface Setup {
+      parentPath: string;
+      agentPath: string;
+    }
+
+    async function seed(): Promise<Setup> {
+      const parentPath = join(cliProjects, "proj-cli", "resilient.jsonl");
+      writeFileSync(parentPath, transcriptFixture("sess-resilient", "res"), "utf8");
+      const agentDir = join(cliProjects, "proj-cli", "resilient", "subagents");
+      mkdirSync(agentDir, { recursive: true });
+      const agentPath = join(agentDir, "agent-res.jsonl");
+      writeFileSync(agentPath, subagentFixture("sess-resilient", "10:00:09", "10:00:10"), "utf8");
+      await runIngest({ dryRun: false, offlinePricing: true });
+      return { parentPath, agentPath };
+    }
+
+    /** history 全体で「同一 sessionId+ts」「同一 ingestKey」が重複していないこと。 */
+    function expectNoDuplicates(): void {
+      const rows = readHistory();
+      const byTs = new Map<string, number>();
+      const byKey = new Map<string, number>();
+      for (const rec of rows) {
+        const tsKey = `${rec.sessionId} ${rec.ts} ${rec.source ?? "claude"}`;
+        byTs.set(tsKey, (byTs.get(tsKey) ?? 0) + 1);
+        if (rec.ingestKey) byKey.set(rec.ingestKey, (byKey.get(rec.ingestKey) ?? 0) + 1);
+      }
+      expect([...byTs.entries()].filter(([, n]) => n > 1)).toEqual([]);
+      expect([...byKey.entries()].filter(([, n]) => n > 1)).toEqual([]);
+    }
+
+    function totals(): { main: number; sa: number; rows: number } {
+      const rows = readHistory();
+      return {
+        rows: rows.length,
+        main: rows.reduce((sum, r) => sum + r.costUSD, 0),
+        sa: rows.reduce((sum, r) => sum + (r.subagents?.costUSD ?? 0), 0),
+      };
+    }
+
+    it("16a. ケース1: カーソル無改変では2回目に何も取り込まない", async () => {
+      await seed();
+      const before = totals();
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records).toHaveLength(0);
+      expect(totals()).toEqual(before);
+      expectNoDuplicates();
+    });
+
+    it("16b. ケース2: 親 transcript のカーソルを1件削除しても再計上しない", async () => {
+      const { parentPath } = await seed();
+      const before = totals();
+      dropCursorEntry(parentPath);
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records.filter((r) => r.sessionId === "sess-resilient")).toHaveLength(0);
+      expect(totals()).toEqual(before);
+      expectNoDuplicates();
+    });
+
+    it("16c. ケース3: cursors.json を {} に全損させても再計上しない", async () => {
+      await seed();
+      const before = totals();
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records).toHaveLength(0);
+      expect(totals()).toEqual(before);
+      expectNoDuplicates();
+    });
+
+    it("16d. ケース4: agent-*.jsonl のカーソルだけを削除しても SA を再計上しない", async () => {
+      const { agentPath } = await seed();
+      const before = totals();
+      expect(before.sa).toBeGreaterThan(0);
+      dropCursorEntry(agentPath);
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records).toHaveLength(0);
+      expect(totals()).toEqual(before);
+      expectNoDuplicates();
+    });
+
+    it("16e. カーソルを全損させても、未記録の新しいターンは取りこぼさない", async () => {
+      const { parentPath } = await seed();
+      const before = totals();
+      appendFileSync(
+        parentPath,
+        claudeTurnLines("sess-resilient", "追加の質問", "req_res_NEW", "msg_res_NEW", "2026-07-06T14:00:00.000Z"),
+        "utf8",
+      );
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      const fresh = again.records.filter((r) => r.sessionId === "sess-resilient");
+      expect(fresh).toHaveLength(1);
+      expect(fresh[0].apiCalls).toBe(1);
+      expect(totals().rows).toBe(before.rows + 1);
+      expectNoDuplicates();
+    });
+
+    it("16f. 壊れたカーソルは「カーソルあり」と扱わず、mtime プリフィルタで恒久スキップしない", async () => {
+      const { parentPath } = await seed();
+      const dict = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+      dict[parentPath] = { offset: "壊れた値", seenMessageKeys: null };
+      writeFileSync(join(tmpHome, "cursors.json"), JSON.stringify(dict), "utf8");
+
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.scannedFiles).toBeGreaterThan(0); // 壊れたカーソルのファイルは走査対象に戻る
+      expect(again.records).toHaveLength(0); // 走査はするが再計上はしない
+      expect(sanitizeCursor(loadCursor(parentPath))).not.toBeNull(); // カーソルは張り直される
+      expectNoDuplicates();
+    });
+  });
+
+  it("17. IngestResult の合計にサブエージェント分を含める", async () => {
+    const parentPath = join(cliProjects, "proj-cli", "sa-total.jsonl");
+    writeFileSync(parentPath, transcriptFixture("sess-total", "tot"), "utf8");
+    const agentDir = join(cliProjects, "proj-cli", "sa-total", "subagents");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, "agent-tot.jsonl"), subagentFixture("sess-total", "10:00:09", "10:00:10"), "utf8");
+
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    const expected = result.records.reduce((sum, r) => sum + r.costUSD + (r.subagents?.costUSD ?? 0), 0);
+    expect(result.totalUSD).toBeCloseTo(expected, 10);
+    const saTotal = result.records.reduce((sum, r) => sum + (r.subagents?.costUSD ?? 0), 0);
+    expect(saTotal).toBeGreaterThan(0);
+    // サーフェス別内訳の合計も本体合計と一致する。
+    const bySurface = Object.values(result.bySurface).reduce((sum, v) => sum + (v?.usd ?? 0), 0);
+    expect(bySurface).toBeCloseTo(result.totalUSD, 10);
+  });
+
   it("15. カーソルを失っても、記録済みのサブエージェント分を二重計上しない", async () => {
     const parentPath = join(cliProjects, "proj-cli", "sa-cursor-lost.jsonl");
     writeFileSync(
       parentPath,
-      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-sa-lost"'),
+      transcriptFixture("sess-sa-lost", "salost"),
       "utf8",
     );
     const agentDir = join(cliProjects, "proj-cli", "sa-cursor-lost", "subagents");

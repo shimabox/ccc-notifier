@@ -474,3 +474,25 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - reset対象はhistory、cursors、canonical dashboardと日次更新stateだけ。全sourceの再生成が正常完了し、`dashboard.autoRegenerate=true`なら直近版・全履歴版と日次更新stateを即時再生成して相互リンクを有効にする。false、`--dry-run`、source partial failureでは生成せず、必要なら手動`dashboard` / `dashboard --all`に委ねる。config、月予算、通知設定、mute、単価/為替cache、Codex hook、Codexサブエージェント利用記録は保持する。
 - 対象履歴はsweep実行時点の単価表/FXで再計算し、過去額は変わり得る。clear済み履歴/redact済みpromptもsourceにあれば復活する。source消失・移動・破損行は復元できない。Codexサブエージェント利用記録は保持するが、再生成した過去turnへの表示joinは失われ得る。
 - source単位のhard failureは終了コード1とし、部分生成をrollbackしない。同じ`sweep`を再実行すると履歴/cursorを再度resetして最初から再生成する。
+
+## 2026-08-11 追加: append の冪等化(TurnRecord.countedCalls / ingestKey)
+
+- `cursors.json` は「ファイルのどこまで読んだか」の目印であって、計上済みかどうかの真実源ではない。
+  真実源は `history.jsonl` 側に置く。各 `TurnRecord` は「そのレコードで計上した API 呼び出しの指紋」を
+  `countedCalls`(`string[]`)に、そこから決まる一意キーを `ingestKey` に持つ。
+- 指紋(`src/counted-calls.ts`)は内容だけで決まり、取り込み時刻・経路には依存しない。
+  - Claude: `sha256("claude-call <messageId>:<requestId>")` の先頭 16 hex。親ターン分も
+    サブエージェント(`agent-*.jsonl`)分も同じ名前空間に入れる。
+  - Codex: rollout に呼び出し単位の ID が無いため、`session_id` / 時刻範囲 / トークン数から
+    1 ターン 1 指紋を作る。
+  - `ingestKey` は `countedCalls` を整列・重複除去した集合の sha256。呼び出しを1件も計上していない
+    レコードには付けない(内容で識別できないものを重複扱いして取りこぼさないため)。
+- 取り込み側(`src/ingest.ts`)は history から指紋集合・キー集合・旧レコード用の ts 下限を
+  ingest 1回につき最大1度だけ構築し、(1) 指紋に載っている呼び出しは集計から除外、
+  (2) 既に同じ `ingestKey` があるレコードは append しない。カーソルが失われても再計上されない。
+- 指紋を持たない旧レコードはマイグレーションしない。旧レコードだけから作ったセッション別 ts 下限で
+  従来どおり突合する(カーソルを持たないファイル・agent ファイルにだけ適用する)。
+- `IngestResult` の `totalUSD` / `totalJPY` / `bySurface` はサブエージェント分を含む
+  (= 実際に取り込んだ金額。通知しきい値 `minNotifyUSD` の判定対象もこれ)。
+- `doctor` は同一 `ingestKey` を持つレコードが複数あれば warn する(旧レコードは従来どおり
+  同一 `sessionId` + `ts` で検知)。
