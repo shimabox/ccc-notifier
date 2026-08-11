@@ -11,6 +11,7 @@
 
 import { promises as fsp } from "node:fs";
 import { homedir } from "node:os";
+import * as nodePath from "node:path";
 import { delimiter, join } from "node:path";
 import type { Surface } from "./types";
 
@@ -120,19 +121,45 @@ export function surfaceForClaudePath(
   return rootForClaudePath(transcriptPath, roots)?.surface ?? "cli";
 }
 
-/** transcript パスを含む最長一致のルート。どのルートにも属さなければ null。 */
+/**
+ * transcript パスを含む最長一致のルート。どのルートにも属さなければ null。
+ * 区切り文字を直接比較すると Windows の `\` を使う子パスに一致しないため、
+ * プラットフォーム非依存の path.relative で「ルート配下か」を判定する。
+ */
 export function rootForClaudePath(
   transcriptPath: string,
   roots: readonly ClaudeTranscriptRoot[],
 ): ClaudeTranscriptRoot | null {
   let best: ClaudeTranscriptRoot | null = null;
   for (const root of roots) {
-    const withSep = root.path.endsWith("/") ? root.path : `${root.path}/`;
-    if (transcriptPath === root.path || transcriptPath.startsWith(withSep)) {
-      if (best === null || root.path.length > best.path.length) best = root;
-    }
+    if (!isUnderRoot(transcriptPath, root.path)) continue;
+    if (best === null || root.path.length > best.path.length) best = root;
   }
   return best;
+}
+
+/** path モジュールのうち、配下判定に必要な部分だけ(既定は実行中プラットフォーム)。 */
+export interface PathFlavor {
+  relative(from: string, to: string): string;
+  isAbsolute(p: string): boolean;
+  sep: string;
+}
+
+/**
+ * target が root と同じか、その配下にあるか。
+ * flavor は既定で実行中プラットフォームの path。Windows での挙動を他プラットフォームから
+ * 検証できるよう、path.win32 / path.posix を差し込めるようにしている。
+ */
+export function isUnderRoot(target: string, root: string, flavor: PathFlavor = nodePath): boolean {
+  let rel: string;
+  try {
+    rel = flavor.relative(root, target);
+  } catch {
+    return false;
+  }
+  if (rel.length === 0) return true; // 同一パス
+  if (flavor.isAbsolute(rel)) return false; // ドライブが違う等
+  return rel !== ".." && !rel.startsWith(`..${flavor.sep}`);
 }
 
 /**

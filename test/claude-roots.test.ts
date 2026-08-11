@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
 import {
   claudeTranscriptRoots,
   defaultClaudeDesktopSessionsRoot,
   determineClaudeSurface,
   discoverDesktopProjectRoots,
+  isUnderRoot,
+  rootForClaudePath,
   surfaceForClaudePath,
 } from "../src/claude-roots";
 
@@ -65,6 +67,29 @@ describe("claudeTranscriptRoots", () => {
     process.env.CCCN_CLAUDE_PROJECTS = join(dir, "does-not-exist-projects");
     process.env.CCCN_CLAUDE_DESKTOP_ROOTS = join(dir, "does-not-exist-desktop");
     await expect(claudeTranscriptRoots()).resolves.toBeDefined();
+  });
+
+  it("3b. rootForClaudePath は区切り文字に依存せずルート配下を判定する", () => {
+    // 判定は path.relative ベース。POSIX / Windows どちらの区切りでも、
+    // 「ルート自身」「配下」「兄弟(前方一致するが配下ではない)」を正しく分ける。
+    const roots = [{ path: join(dir, "root"), surface: "desktop" as const }];
+    expect(rootForClaudePath(join(dir, "root"), roots)?.path).toBe(join(dir, "root"));
+    expect(rootForClaudePath(join(dir, "root", "proj", "x.jsonl"), roots)?.path).toBe(join(dir, "root"));
+    expect(rootForClaudePath(join(dir, "root-sibling", "x.jsonl"), roots)).toBeNull();
+    expect(rootForClaudePath(join(dir, "other", "x.jsonl"), roots)).toBeNull();
+  });
+
+  it("3c. Windows(バックスラッシュ区切り)でもルート配下を判定できる", () => {
+    // CCCN_CLAUDE_DESKTOP_ROOTS は Windows 利用者向けの拡張余地として用意している。
+    // ルート末尾に "/" を足して前方一致する実装では "\\" 区切りの子パスに一致しない。
+    // 実行中プラットフォームに依らず win32 の規則で検証する。
+    const root = "C:\\Users\\me\\AppData\\Roaming\\Claude\\projects";
+    expect(isUnderRoot(`${root}\\proj\\x.jsonl`, root, win32)).toBe(true);
+    expect(isUnderRoot(root, root, win32)).toBe(true);
+    // 前方一致するだけの兄弟ディレクトリは配下とみなさない。
+    expect(isUnderRoot(`${root}-other\\x.jsonl`, root, win32)).toBe(false);
+    // 別ドライブも配下ではない。
+    expect(isUnderRoot("D:\\other\\x.jsonl", root, win32)).toBe(false);
   });
 
   it("4. surfaceForClaudePath は最も具体的なルートの surface を返し、未一致は cli", () => {

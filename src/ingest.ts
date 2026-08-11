@@ -159,6 +159,40 @@ function saveIngestMtimeCache(cache: IngestMtimeCache): void {
   }
 }
 
+async function fileMtimeMs(filePath: string): Promise<number> {
+  return (await fsp.stat(filePath)).mtimeMs;
+}
+
+/**
+ * Claude transcript の「変化したか」を表す値。親 transcript だけでなく
+ * <transcript>/subagents/agent-*.jsonl も含めた最大 mtime を使う。
+ * サブエージェントのログは親より遅れて作成・追記されるので、親の mtime だけを見ていると
+ * 「親は変わっていない」と判定してサブエージェント分を恒久的に取りこぼす。
+ */
+async function claudeMtimeSignature(filePath: string): Promise<number> {
+  let newest = (await fsp.stat(filePath)).mtimeMs;
+  const dir = join(
+    filePath.endsWith(".jsonl") ? filePath.slice(0, -".jsonl".length) : filePath,
+    "subagents",
+  );
+  let entries;
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return newest; // サブエージェントディレクトリが無い(大多数)
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith("agent-") || !entry.name.endsWith(".jsonl")) continue;
+    try {
+      const m = (await fsp.stat(join(dir, entry.name))).mtimeMs;
+      if (m > newest) newest = m;
+    } catch {
+      // 走査中に消えた等。他のファイルで判定を続ける
+    }
+  }
+  return newest;
+}
+
 // ============ 既取り込み判定(history.jsonl 由来) ============
 //
 // カーソルは「どこまで読んだか」の目印であって、計上済みかどうかの真実源ではない。
@@ -445,6 +479,7 @@ async function processFiles(
     // 計上済みの呼び出しは、カーソルの有無に関係なく history 由来の指紋で弾く。
     const counted = countedFilter();
     let split = await splitIntoTurnDrafts(filePath, cursor, { excludeMessageKeys: counted });
+    if (split.unreadable === true) throw new Error(`transcript を読み込めませんでした: ${filePath}`);
     // sessionId は「下限で切る前」の分割から採る(下限適用後は0ターンになり得るため)。
     const sessionId = sessionIdOfDrafts(split.drafts) || sessionIdFromTranscriptPath(filePath);
     let floor: string | null = null;
@@ -495,7 +530,8 @@ async function processFiles(
     if (drafts === null) {
       // 新規 usage 無し(または読めない)。読み切った位置までカーソルだけ進める。
       const consumed = await codexConsumedCursor(filePath, cursor, scanOpts);
-      if (consumed !== null) commit(filePath, [], consumed);
+      if (consumed === null) throw new Error(`rollout を読み込めませんでした: ${filePath}`);
+      commit(filePath, [], consumed);
       return;
     }
     const windowCursor = drafts[drafts.length - 1].agg.newCursor;
@@ -527,11 +563,12 @@ async function processFiles(
     files: string[],
     context: "ingest:claude" | "ingest:codex",
     handle: (filePath: string) => Promise<void>,
+    signature: (filePath: string) => Promise<number> = fileMtimeMs,
   ): Promise<void> => {
     for (const filePath of files) {
       let mtimeMs: number;
       try {
-        mtimeMs = (await fsp.stat(filePath)).mtimeMs;
+        mtimeMs = await signature(filePath);
       } catch {
         continue; // 発見直後に消えた等。次回の走査に委ねる
       }
@@ -556,7 +593,7 @@ async function processFiles(
     }
   };
 
-  await runOver(claudeFiles, "ingest:claude", processClaudeFile);
+  await runOver(claudeFiles, "ingest:claude", processClaudeFile, claudeMtimeSignature);
   await runOver(codexFiles, "ingest:codex", processCodexFile);
 
   if (!dryRun) {

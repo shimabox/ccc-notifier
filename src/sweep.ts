@@ -261,12 +261,14 @@ export async function splitIntoTurnDrafts(
   transcriptPath: string,
   cursor: Cursor | null,
   opts: { excludeMessageKeys?: MessageKeyFilter } = {},
-): Promise<{ drafts: TurnDraft[]; newCursor: Cursor; messageKeys: string[] }> {
+): Promise<{ drafts: TurnDraft[]; newCursor: Cursor; messageKeys: string[]; unreadable?: true }> {
   const buffer = await readAll(transcriptPath);
   if (buffer === null) {
     // 読めない場合は何も消費しない(既存カーソルがあればそのまま、無ければゼロ)。
+    // 「読めなかった」と「新規 usage が無かった」を呼び出し側が区別できるよう印を付ける
+    // (読み取り失敗を処理済みとして扱うと、権限が戻っても mtime が同じ限り拾えなくなる)。
     const nc: Cursor = cursor ?? { offset: 0, lastUuid: null, lastTs: null, seenMessageKeys: [] };
-    return { drafts: [], newCursor: nc, messageKeys: [] };
+    return { drafts: [], newCursor: nc, messageKeys: [], unreadable: true };
   }
   const fileSize = buffer.length;
 
@@ -986,17 +988,8 @@ export async function runSweep(
   const claudeRoots = await claudeTranscriptRoots({ projectsOverride: flags.projects });
   const cliRoot = claudeRoots.find((r) => r.surface === "cli")!;
 
-  // Claude ルート不在でも、Codex 側が走査可能なら警告1行を出して Codex 走査だけ続行する
-  // (Codex 専用ユーザーの全再生成を成立させるため)。両方走査不能ならreset前にエラー終了。
   const cliProjectDirs = await listProjectDirs(cliRoot.path);
   const codexSource = await discoverCodexSweepSource();
-  if (cliProjectDirs === null) {
-    if (codexSource === null || codexSource.discovery.unreadableDirs > 0) {
-      console.log(`走査ルートが見つかりません: ${cliRoot.path}`);
-      return 1;
-    }
-    console.log(`Claude の走査ルートが見つかりません: ${cliRoot.path}(Codex のみ走査します)`);
-  }
 
   // デスクトップルート(surface=desktop)は不在・読み込み失敗を黙ってスキップする
   // (非公開レイアウトでアプリ更新により壊れ得るため、本体機能に影響させない)。
@@ -1005,6 +998,22 @@ export async function runSweep(
     if (root.surface !== "desktop") continue;
     const dirs = await listProjectDirs(root.path);
     if (dirs !== null) desktopProjectDirs.push(...dirs);
+  }
+
+  // CLI ルート不在でも、デスクトップまたは Codex が走査可能なら続行する
+  // (デスクトップ専業・Codex 専業ユーザーの全再生成を成立させるため)。
+  // すべての source が走査不能なときだけ reset 前にエラー終了する。
+  if (cliProjectDirs === null) {
+    const codexUsable = codexSource !== null && codexSource.discovery.unreadableDirs === 0;
+    if (!codexUsable && desktopProjectDirs.length === 0) {
+      console.log(`走査ルートが見つかりません: ${cliRoot.path}`);
+      return 1;
+    }
+    const remaining = [
+      desktopProjectDirs.length > 0 ? "デスクトップ" : null,
+      codexUsable ? "Codex" : null,
+    ].filter((v): v is string => v !== null);
+    console.log(`Claude CLI の走査ルートが見つかりません: ${cliRoot.path}(${remaining.join(" / ")} のみ走査します)`);
   }
   const projectDirs =
     cliProjectDirs === null && desktopProjectDirs.length === 0

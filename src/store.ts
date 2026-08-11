@@ -4,9 +4,12 @@
 // history readerはCodex activityのruntime projectionもpure mergeする。
 
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   writeFileSync,
   appendFileSync,
   renameSync,
@@ -419,6 +422,44 @@ export function saveCursor(transcriptPath: string, c: Cursor): void {
     renameSync(tmpFile, p.cursorsFile);
   } finally {
     rmSync(tmpFile, { force: true });
+  }
+}
+
+/** 直近の重複チェックで読む history 末尾のバイト数(数百レコード分)。 */
+const HISTORY_TAIL_SCAN_BYTES = 256 * 1024;
+
+/**
+ * history.jsonl の末尾だけを見て、同じ一意キーのレコードが既にあるかを返す。
+ *
+ * 「append は成功したがカーソル保存が失敗した(あるいは直後に落ちた)」場合、次回は古い
+ * 有効カーソルから同じ範囲を読み直すことになる。カーソルが健全な経路で history 全体を読むのは
+ * hook の応答時間に響くので、直近の数百レコードだけを対象にする。狙うのは「1つ前の append が
+ * カーソルに反映されていない」という直近の状態なので、末尾で十分に届く。
+ */
+export function historyTailHasIngestKey(ingestKey: string, maxBytes = HISTORY_TAIL_SCAN_BYTES): boolean {
+  if (ingestKey.length === 0) return false;
+  const p = paths();
+  let fd: number | null = null;
+  try {
+    const size = statSync(p.historyFile).size;
+    const start = Math.max(0, size - maxBytes);
+    const length = size - start;
+    if (length <= 0) return false;
+    const buf = Buffer.alloc(length);
+    fd = openSync(p.historyFile, "r");
+    readSync(fd, buf, 0, length, start);
+    // ingestKey は sha256 の hex なので、部分一致でも別レコードと取り違えない。
+    return buf.toString("utf8").includes(`"ingestKey":"${ingestKey}"`);
+  } catch {
+    return false; // 履歴不在・読めない → 重複判定はしない(取りこぼさない側に倒す)
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // クローズ失敗は握りつぶす(判定結果には影響しない)
+      }
+    }
   }
 }
 

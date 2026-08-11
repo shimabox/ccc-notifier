@@ -38,6 +38,7 @@ import {
   saveCursor,
   todayTotalUSD,
   floorKey,
+  historyTailHasIngestKey,
   loadHistoryIndex,
 } from "./store";
 import type { FloorScope, HistoryIndex } from "./store";
@@ -320,11 +321,18 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     }
 
     // 7. 記録 → カーソル保存(この順序固定)。
-    //    クラッシュ時は「記録済み・カーソル未更新」側に倒し、seenMessageKeys による重複排除で
-    //    二重計上を防ぐ。逆順にすると「カーソルだけ進んで未記録」= 恒久的なコスト取りこぼしになる。
+    //    クラッシュ時は「記録済み・カーソル未更新」側に倒す。逆順にすると「カーソルだけ進んで
+    //    未記録」= 恒久的なコスト取りこぼしになる。ただし前回の append 後にカーソル保存が
+    //    失敗していると、古い有効カーソルから同じ範囲を読み直して同じレコードを作ってしまう。
+    //    直近の履歴に同じ一意キーがあれば append をスキップする(カーソルだけ張り直して収束させる)。
     //    SA のカーソルはメインより後に保存する(途中クラッシュで SA 分が再集計されても、
     //    次回 seenMessageKeys で重複排除される側に倒す)。
-    appendTurn(record);
+    if (record.ingestKey !== undefined && historyTailHasIngestKey(record.ingestKey)) {
+      // 同じターンが既に記録済み。通知も再送しない(前回の append 時に済んでいる)。
+      hasMainUsage = false;
+    } else {
+      appendTurn(record);
+    }
     if (agg !== null) saveCursor(transcriptPath, agg.newCursor);
     if (sa !== null) {
       for (const nc of sa.newCursors) {

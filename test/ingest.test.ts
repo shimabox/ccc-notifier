@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -890,6 +891,32 @@ describe("runIngest", () => {
       expect(sanitizeCursor(loadCursor(trackedPath))).not.toBeNull(); // カーソルは張り直される
     });
 
+    it("26. カーソル保存に失敗した後(記録済み・カーソル未更新)でも同じターンを再 append しない", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "crash-window.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-crash", "csh"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+      await runTrack(stdin);
+      const cursorsAfterTurn1 = readFileSync(join(tmpHome, "cursors.json"), "utf8");
+
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-crash", "2つめ", "req_csh_X", "msg_csh_X", "2026-07-06T17:00:00.000Z"),
+        "utf8",
+      );
+      await runTrack(stdin);
+      const rows = readHistory().filter((r) => r.sessionId === "sess-crash");
+      expect(rows).toHaveLength(2);
+
+      // appendTurn は成功したが saveCursor が失敗した状態を再現する。
+      writeFileSync(join(tmpHome, "cursors.json"), cursorsAfterTurn1, "utf8");
+      await runTrack(stdin);
+
+      expect(readHistory().filter((r) => r.sessionId === "sess-crash")).toHaveLength(2);
+    });
+
     it("24. カーソルが健全なら track は history の指紋を参照しない", async () => {
       const trackedPath = join(cliProjects, "proj-cli", "track-no-read.jsonl");
       writeFileSync(trackedPath, transcriptFixture("sess-noread", "nrd"), "utf8");
@@ -941,6 +968,55 @@ describe("runIngest", () => {
       await runTrack(stdin3);
       expect(readHistory().filter((r) => r.sessionId === "sess-read" && r.ingestKey !== "poison2")).toHaveLength(0);
     });
+  });
+
+  // mtime プリフィルタは親 transcript だけでなく subagents/agent-*.jsonl の変化も見る。
+  // サブエージェントのログは親より遅れて作られる/追記されるため、親の mtime だけでは
+  // 「変化なし」と誤判定して恒久的に取りこぼす。
+  it("27. 親を触らずサブエージェントログだけ追加・更新しても取り込む", async () => {
+    const parentPath = join(cliProjects, "proj-cli", "late-sa.jsonl");
+    writeFileSync(parentPath, transcriptFixture("sess-late", "lat"), "utf8");
+    await runIngest({ dryRun: false, offlinePricing: true });
+    const baseRows = readHistory().length;
+    expect(readHistory().filter((r) => r.sessionId === "sess-late")).toHaveLength(1);
+
+    // 親には一切触らず、サブエージェントログだけを後から置く。
+    const agentDir = join(cliProjects, "proj-cli", "late-sa", "subagents");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, "agent-a1.jsonl"), subagentFixture("sess-late", "10:00:09", "10:00:10"), "utf8");
+
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.subagents !== undefined)).toHaveLength(1);
+    expect(readHistory()).toHaveLength(baseRows + 1);
+
+    // さらに既存の agent ファイルへ追記した場合も拾う(ファイル一覧が変わらないケース)。
+    appendFileSync(
+      join(agentDir, "agent-a1.jsonl"),
+      subagentFixture("sess-late", "10:00:11", "10:00:12").replaceAll("_SA1", "_SA2"),
+      "utf8",
+    );
+    const third = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(third.records.filter((r) => r.subagents !== undefined)).toHaveLength(1);
+  });
+
+  // 読み取り失敗は「新規なし」と区別する。処理済み扱いで mtime を保存すると、
+  // 権限が戻っても mtime が同じ限り二度と走査されない。
+  it("28. transcript を読めなかったファイルは失敗として数え、mtime キャッシュに載せない", async () => {
+    const lockedPath = join(cliProjects, "proj-cli", "unreadable.jsonl");
+    writeFileSync(lockedPath, transcriptFixture("sess-locked", "lck"), "utf8");
+    chmodSync(lockedPath, 0o000);
+    try {
+      const blocked = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(blocked.failures).toBeGreaterThan(0);
+      expect(blocked.records.filter((r) => r.sessionId === "sess-locked")).toHaveLength(0);
+    } finally {
+      chmodSync(lockedPath, 0o644);
+    }
+
+    // 権限が戻れば(mtime が変わっていなくても)取り込める。
+    const recovered = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(recovered.failures).toBe(0);
+    expect(recovered.records.filter((r) => r.sessionId === "sess-locked")).toHaveLength(1);
   });
 
   it("17. IngestResult の合計にサブエージェント分を含める", async () => {
