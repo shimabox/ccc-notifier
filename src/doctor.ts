@@ -551,18 +551,48 @@ async function checkCodexRecentSessionTotal(configured: boolean): Promise<boolea
 
 // ---- 8. デスクトップ検出状況・追跡漏れ・originator 内訳・sessionId 重複(desktop-cost-tracking) ----
 
-/** ファイル先頭の1行だけを読み JSON として返す。失敗は null(診断のみが目的のベストエフォート)。 */
-async function peekFirstJsonLine(path: string, maxBytes = 8192): Promise<Record<string, unknown> | null> {
+const PEEK_CHUNK_BYTES = 64 * 1024;
+const PEEK_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * ファイル先頭の1行だけを読み JSON として返す。失敗は null(診断のみが目的のベストエフォート)。
+ *
+ * 改行が見つかるまでチャンク単位で読み進める。Codex rollout の先頭行は base_instructions
+ * (長いシステムプロンプト)を含み、実データでは 14KB〜42KB になる。固定長で切ると
+ * 途中で切れた文字列を JSON.parse することになり、全件が黙って null になる。
+ * ファイル全体を読み込まないよう上限を設け、超えたら null にする。
+ */
+async function peekFirstJsonLine(
+  path: string,
+  maxBytes = PEEK_MAX_BYTES,
+): Promise<Record<string, unknown> | null> {
   try {
     const fh = await open(path, "r");
     try {
-      const buf = Buffer.alloc(maxBytes);
-      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
-      const text = buf.toString("utf8", 0, bytesRead);
-      const nl = text.indexOf("\n");
-      const line = (nl === -1 ? text : text.slice(0, nl)).trim();
-      if (line.length === 0) return null;
-      const obj: unknown = JSON.parse(line);
+      const chunk = Buffer.alloc(Math.min(PEEK_CHUNK_BYTES, maxBytes));
+      const parts: Buffer[] = [];
+      let read = 0;
+      let line: string | null = null;
+      while (read < maxBytes) {
+        const { bytesRead } = await fh.read(chunk, 0, Math.min(chunk.length, maxBytes - read), read);
+        if (bytesRead === 0) {
+          line = Buffer.concat(parts).toString("utf8"); // 改行なしで EOF = ファイル全体が1行
+          break;
+        }
+        const slice = chunk.subarray(0, bytesRead);
+        const nl = slice.indexOf(0x0a);
+        if (nl !== -1) {
+          parts.push(Buffer.from(slice.subarray(0, nl)));
+          line = Buffer.concat(parts).toString("utf8");
+          break;
+        }
+        parts.push(Buffer.from(slice));
+        read += bytesRead;
+      }
+      if (line === null) return null; // 上限まで改行が無い
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return null;
+      const obj: unknown = JSON.parse(trimmed);
       return isRecord(obj) ? obj : null;
     } finally {
       await fh.close();
@@ -682,7 +712,14 @@ async function checkDesktopScan(): Promise<boolean> {
     const payload = isRecord(line?.payload) ? line!.payload : null;
     const originator = typeof payload?.originator === "string" ? payload.originator : "(unknown)";
     originatorCounts.set(originator, (originatorCounts.get(originator) ?? 0) + 1);
-    const sid = typeof payload?.session_id === "string" ? payload.session_id : null;
+    // 実データの session_meta.payload のキーは id(session_id ではない)。
+    // 将来 session_id へ戻る可能性に備えて両方を見る。
+    const sid =
+      typeof payload?.id === "string"
+        ? payload.id
+        : typeof payload?.session_id === "string"
+          ? payload.session_id
+          : null;
     if (sid !== null && sid.length > 0) {
       const set = sessionIdToFiles.get(sid) ?? new Set();
       set.add(f);

@@ -129,7 +129,8 @@ function readSessionMetaSeed(buffer: Buffer): SessionMetaSeed | null {
   if (payload === null) return null;
   const source = payload.source;
   return {
-    sessionId: strOrNull(payload.session_id),
+    // 実データの session_meta.payload のキーは id。将来 session_id へ戻る可能性に備えて両方見る。
+    sessionId: strOrNull(payload.id) ?? strOrNull(payload.session_id),
     cwd: strOrNull(payload.cwd),
     originator: strOrNull(payload.originator),
     isSubagentRollout: isRecord(source) && Object.hasOwn(source, "subagent"),
@@ -188,7 +189,7 @@ interface WindowScan {
   model: string | null; // ウィンドウ内最後の turn_context.model
   prompt: string | null; // ウィンドウ内最後の user_message.message
   cwd: string | null; // 最後の turn_context.cwd → session_meta.cwd
-  sessionId: string; // session_meta.session_id → ファイル名の uuid 部 → ""
+  sessionId: string; // session_meta の id(旧 session_id)→ ファイル名の uuid 部 → ""
   eventKeys: string[]; // ウィンドウ全体で計上した token_count イベントの指紋
   isSubagentRollout: boolean; // child rollout は sweep の料金履歴へ入れないため呼び出し側へ伝える
   originator: string | null; // session_meta.originator(生値)。ファイル先頭にしか無いのでカーソル越しに持ち回る
@@ -316,7 +317,7 @@ async function scanWindow(
 
     const type = obj.type;
     if (type === "session_meta") {
-      const sid = strOrNull(payload.session_id);
+      const sid = strOrNull(payload.id) ?? strOrNull(payload.session_id);
       if (sid !== null) sessionMetaSid = sid;
       const c = strOrNull(payload.cwd);
       if (c !== null) sessionMetaCwd = c;
