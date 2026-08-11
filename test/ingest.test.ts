@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { notifyIngestSummary, runIngest } from "../src/ingest";
+import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
 import { loadCursor, readConfig, sanitizeCursor, writeMuteState } from "../src/store";
 import type { Config, TurnRecord } from "../src/types";
@@ -31,6 +32,7 @@ const FIXTURE_CODEX_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-ba
 const FIXTURE_CODEX_DESKTOP_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-desktop.jsonl", import.meta.url));
 const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
 const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
+const FIXTURE_CODEX_STOP_PAYLOAD = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
 
 let tmpHome: string;
 let cliProjects: string;
@@ -675,6 +677,102 @@ describe("runIngest", () => {
       expect(again.records).toHaveLength(0); // 走査はするが再計上はしない
       expect(sanitizeCursor(loadCursor(parentPath))).not.toBeNull(); // カーソルは張り直される
       expectNoDuplicates();
+    });
+  });
+
+  // Codex の指紋は token_count イベント単位(rollout 内のバイトオフセット + 累積カウンタ)なので、
+  // 集計窓の広さやターン境界の取り方が変わっても一致する。
+  describe("Codex のカーソル破壊耐性", () => {
+    /** 3ターン分の rollout(session_meta → turn_context → user → token_count → task_complete × 3)。 */
+    function multiTurnRollout(sessionId: string): string {
+      const lines = [
+        `{"timestamp":"2026-07-12T09:00:00.000Z","type":"session_meta","payload":{"session_id":"${sessionId}","cwd":"/home/user/p","originator":"codex-tui","source":"cli"}}`,
+        '{"timestamp":"2026-07-12T09:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/home/user/p"}}',
+      ];
+      const totals = [
+        [1000, 200, 10],
+        [2500, 500, 25],
+        [4000, 900, 40],
+      ];
+      totals.forEach(([input, cached, output], i) => {
+        const mm = String(10 + i * 10).padStart(2, "0");
+        lines.push(
+          `{"timestamp":"2026-07-12T09:${mm}:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"質問${i + 1}"}}`,
+          `{"timestamp":"2026-07-12T09:${mm}:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":${input},"cached_input_tokens":${cached},"output_tokens":${output}}}}}`,
+          `{"timestamp":"2026-07-12T09:${mm}:06.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t${i + 1}"}}`,
+        );
+      });
+      return lines.join("\n") + "\n";
+    }
+
+    const rolloutDir = () => join(codexHomeDir, "sessions", "2026", "08", "01");
+
+    it("18. track が複数ターンをまとめて記録した後にカーソルを失っても、再分割で二重計上しない", async () => {
+      const sessionId = "01234567-eeee-7000-8000-000000000018";
+      const rolloutPath = join(rolloutDir(), "rollout-multiturn-track.jsonl");
+      writeFileSync(rolloutPath, multiTurnRollout(sessionId), "utf8");
+
+      // track は Stop 時点のカーソル位置から EOF までを「1ターン」としてまとめて記録する。
+      const payload = JSON.parse(readFileSync(FIXTURE_CODEX_STOP_PAYLOAD, "utf8")) as Record<string, unknown>;
+      payload.transcript_path = rolloutPath;
+      payload.session_id = sessionId;
+      await runTrack(JSON.stringify(payload), { codex: true });
+
+      const tracked = readHistory().filter((r) => r.sessionId === sessionId);
+      expect(tracked).toHaveLength(1); // 3ターンぶんが1レコードにまとまっている
+      expect(tracked[0].countedCalls).toHaveLength(3); // 指標は token_count イベント単位
+      const trackedTotal = tracked[0].tokens.input + tracked[0].tokens.cacheRead + tracked[0].tokens.output;
+      const historyCount = readHistory().length;
+
+      // カーソルを失った状態で ingest が task_complete ごとに再分割しても、再計上されない。
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records.filter((r) => r.sessionId === sessionId)).toHaveLength(0);
+      expect(readHistory().filter((r) => r.sessionId === sessionId)).toHaveLength(1);
+      expect(readHistory()).toHaveLength(historyCount);
+      expect(trackedTotal).toBe(4000 + 40); // 累積カウンタの最終値(cached は input の内数)
+    });
+
+    it("19. sweep で再構築した Codex レコードにも指紋が載り、カーソルを失っても再計上しない", async () => {
+      const sessionId = "01234567-ffff-7000-8000-000000000019";
+      const rolloutPath = join(rolloutDir(), "rollout-multiturn-sweep.jsonl");
+      writeFileSync(rolloutPath, multiTurnRollout(sessionId), "utf8");
+
+      await runSweep([]); // history / cursors を捨てて先頭から再構築する
+      const rebuilt = readHistory().filter((r) => r.sessionId === sessionId);
+      expect(rebuilt).toHaveLength(3); // task_complete ごとに1レコード
+      for (const rec of rebuilt) {
+        expect(rec.ingest).toBe("sweep");
+        expect(rec.countedCalls).toHaveLength(1);
+        expect(rec.ingestKey).toBeTruthy();
+      }
+      const historyCount = readHistory().length;
+
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records.filter((r) => r.sessionId === sessionId)).toHaveLength(0);
+      expect(readHistory()).toHaveLength(historyCount);
+    });
+
+    it("20. 部分取り込み後にカーソルを失っても、未計上のイベントだけを取り込む", async () => {
+      const sessionId = "01234567-aaab-7000-8000-000000000020";
+      const rolloutPath = join(rolloutDir(), "rollout-partial-resume.jsonl");
+      const full = multiTurnRollout(sessionId).split("\n").filter(Boolean);
+      // 先に2ターン分だけ存在する状態で取り込む。
+      writeFileSync(rolloutPath, full.slice(0, 8).join("\n") + "\n", "utf8");
+      await runIngest({ dryRun: false, offlinePricing: true });
+      const before = readHistory().filter((r) => r.sessionId === sessionId);
+      expect(before.length).toBeGreaterThan(0);
+
+      // 3ターン目が追記され、かつカーソルを失う。
+      writeFileSync(rolloutPath, full.join("\n") + "\n", "utf8");
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      const fresh = again.records.filter((r) => r.sessionId === sessionId);
+      expect(fresh).toHaveLength(1); // 3ターン目だけ
+      expect(fresh[0].tokens.cacheRead).toBe(900 - 500); // 累積 900 − 既計上 500
+      expect(fresh[0].tokens.output).toBe(40 - 25);
     });
   });
 

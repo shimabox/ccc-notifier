@@ -12,7 +12,14 @@
 
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { codexEventFingerprint } from "../counted-calls";
+import type { MessageKeyFilter } from "../counted-calls";
 import type { Cursor, TokenBuckets, TurnAggregate } from "../types";
+
+/** 走査オプション。excludeEvents は「計上済みイベントの指紋」を判定する述語。 */
+export interface CodexScanOptions {
+  excludeEvents?: MessageKeyFilter;
+}
 
 const NEWLINE = 0x0a; // '\n'
 
@@ -143,6 +150,7 @@ interface Segment {
   endOffset: number; // セグメント末尾直後のバイトオフセット(行境界)
   prevAtEnd: CodexTotals; // 確定時点の prev(このオフセットから再開するときの codexTotals)
   lastTsAtEnd: string | null; // 確定時点のウィンドウ最終 timestamp
+  eventKeys: string[]; // このセグメントで計上した token_count イベントの指紋
 }
 
 /** スキャン中の現セグメントのバッファ。task_complete で Segment に確定して作り直す。 */
@@ -154,6 +162,7 @@ interface SegmentBuf {
   firstTs: string | null;
   endTs: string | null;
   hasLines: boolean; // 処理した行が1つでもあるか(EOF 時に「残り」を持ち帰る判定)
+  eventKeys: string[];
 }
 
 function newSegmentBuf(): SegmentBuf {
@@ -165,6 +174,7 @@ function newSegmentBuf(): SegmentBuf {
     firstTs: null,
     endTs: null,
     hasLines: false,
+    eventKeys: [],
   };
 }
 
@@ -179,6 +189,7 @@ interface WindowScan {
   prompt: string | null; // ウィンドウ内最後の user_message.message
   cwd: string | null; // 最後の turn_context.cwd → session_meta.cwd
   sessionId: string; // session_meta.session_id → ファイル名の uuid 部 → ""
+  eventKeys: string[]; // ウィンドウ全体で計上した token_count イベントの指紋
   isSubagentRollout: boolean; // child rollout は sweep の料金履歴へ入れないため呼び出し側へ伝える
   originator: string | null; // session_meta.originator(生値)。ファイル先頭にしか無いのでカーソル越しに持ち回る
   firstTs: string | null;
@@ -191,7 +202,11 @@ interface WindowScan {
  * 同時に作る。両関数がこのコアを共有することで「全ドラフトの acc 合計・適用後 newCursor =
  * aggregateCodexTurn の結果」という相互運用不変条件が構造的に保証される。
  */
-async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<WindowScan | null> {
+async function scanWindow(
+  rolloutPath: string,
+  cursor: Cursor | null,
+  opts: CodexScanOptions = {},
+): Promise<WindowScan | null> {
   const buffer = await readAll(rolloutPath);
   if (buffer === null) return null;
   const fileSize = buffer.length;
@@ -248,7 +263,13 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
   let lastTs: string | null = null;
 
   const segments: Segment[] = [];
+  const windowEventKeys: string[] = [];
   let seg = newSegmentBuf();
+
+  // 指紋の素材になるセッション ID。session_meta はファイル先頭行にしかないので、
+  // 先頭から読む場合は最初の行で、増分読みの場合は seed で既に確定している。
+  const filenameId = sessionIdFromFilename(rolloutPath);
+  const rolloutId = (): string => sessionMetaSid ?? filenameId;
 
   // 現セグメントを endOffset 時点の状態で確定する。prevAtEnd / lastTsAtEnd を持たせるので、
   // どのセグメント末尾も「そこから読み直せば残りが差分になる」有効な再開点になる。
@@ -263,9 +284,10 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
     endOffset,
     prevAtEnd: { ...prev },
     lastTsAtEnd: lastTs,
+    eventKeys: seg.eventKeys,
   });
 
-  const handleLine = (raw: string, endOffset: number): void => {
+  const handleLine = (raw: string, lineOffset: number, endOffset: number): void => {
     if (raw.trim().length === 0) return; // 空行
     let obj: unknown;
     try {
@@ -333,6 +355,14 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
       const total = readTotals(info.total_token_usage);
       if (total === null) return;
 
+      // 既に計上済みのイベントは金額に足さない。ただし prev は必ず進める
+      // (累積カウンタを取りこぼすと、次のイベントの差分が累積全量になって過大計上になる)。
+      const eventKey = codexEventFingerprint(rolloutId(), lineOffset, total);
+      if (opts.excludeEvents?.has(eventKey) === true) {
+        prev = total;
+        return;
+      }
+
       let step: CodexTotals = {
         input: total.input - prev.input,
         cached: total.cached - prev.cached,
@@ -344,6 +374,8 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
       }
       addTotals(acc, step);
       addTotals(seg.acc, step);
+      seg.eventKeys.push(eventKey);
+      windowEventKeys.push(eventKey);
       prev = total; // フォールバック時も「最後に観測した実カウンタ」に追従させる
       if (!isZeroTotals(step)) {
         apiCalls++; // 重複イベント(step=0)は API 呼び出しに数えない
@@ -363,7 +395,7 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
   let lineStart = startOffset;
   for (let pos = startOffset; pos < fileSize; pos++) {
     if (buffer[pos] !== NEWLINE) continue;
-    handleLine(buffer.toString("utf8", lineStart, pos), pos + 1);
+    handleLine(buffer.toString("utf8", lineStart, pos), lineStart, pos + 1);
     lineStart = pos + 1;
   }
   const newOffset = lineStart;
@@ -380,7 +412,8 @@ async function scanWindow(rolloutPath: string, cursor: Cursor | null): Promise<W
     model: lastModel,
     prompt: windowPrompt,
     cwd: windowTurnCtxCwd ?? sessionMetaCwd,
-    sessionId: sessionMetaSid ?? sessionIdFromFilename(rolloutPath),
+    sessionId: rolloutId(),
+    eventKeys: windowEventKeys,
     isSubagentRollout,
     originator,
     firstTs,
@@ -413,8 +446,9 @@ function windowCursor(scan: WindowScan): Cursor {
 export async function aggregateCodexTurn(
   rolloutPath: string,
   cursor: Cursor | null,
+  opts: CodexScanOptions = {},
 ): Promise<TurnAggregate | null> {
-  const scan = await scanWindow(rolloutPath, cursor);
+  const scan = await scanWindow(rolloutPath, cursor, opts);
   if (scan === null || isZeroTotals(scan.acc)) return null;
   return {
     sessionId: scan.sessionId,
@@ -429,7 +463,22 @@ export async function aggregateCodexTurn(
     newCursor: windowCursor(scan),
     originator: scan.originator,
     isSubagentRollout: scan.isSubagentRollout,
+    codexEventKeys: scan.eventKeys,
   };
+}
+
+/**
+ * ウィンドウを消費し切った位置のカーソルだけを返す(新規 usage の有無に関わらず)。
+ * 「読んだが計上対象は無かった」ファイルのカーソルを進めて、次回の再読み込みを避けるために使う。
+ * ファイルが読めなければ null。
+ */
+export async function codexConsumedCursor(
+  rolloutPath: string,
+  cursor: Cursor | null,
+  opts: CodexScanOptions = {},
+): Promise<Cursor | null> {
+  const scan = await scanWindow(rolloutPath, cursor, opts);
+  return scan === null ? null : windowCursor(scan);
 }
 
 /**
@@ -499,8 +548,9 @@ export async function codexResumePointAtTs(rolloutPath: string, floorTs: string)
 export async function splitIntoCodexTurnDrafts(
   rolloutPath: string,
   cursor: Cursor | null,
+  opts: CodexScanOptions = {},
 ): Promise<CodexTurnDraft[] | null> {
-  const scan = await scanWindow(rolloutPath, cursor);
+  const scan = await scanWindow(rolloutPath, cursor, opts);
   if (scan === null || isZeroTotals(scan.acc)) return null;
 
   // usage を持つ確定セグメントだけがターンになる(ゼロのセグメントは境界ごと読み捨て)。
@@ -527,6 +577,7 @@ export async function splitIntoCodexTurnDrafts(
       gitBranch: null,
       originator: scan.originator, // session_meta はファイル先頭にしか無いので全ドラフト共通
       isSubagentRollout: scan.isSubagentRollout,
+      codexEventKeys: s.eventKeys,
       firstTs: s.firstTs,
       lastTs: s.endTs,
       // 最後のドラフトはウィンドウ全体を消費した状態(= aggregateCodexTurn の newCursor と同一。

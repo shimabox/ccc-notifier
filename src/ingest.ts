@@ -16,7 +16,7 @@ import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
 import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome } from "./codex/env";
 import { normalizeCodexOriginator } from "./codex/originator";
-import { codexResumePointAtTs, splitIntoCodexTurnDrafts } from "./codex/transcript";
+import { codexConsumedCursor, codexResumePointAtTs, splitIntoCodexTurnDrafts } from "./codex/transcript";
 import { listCodexRollouts } from "./codex/sessions";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
@@ -35,7 +35,7 @@ import {
   saveAllCursors,
   sanitizeCursor,
 } from "./store";
-import { anyOf, callFingerprints, codexTurnFingerprint, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
+import { anyOf, callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
 import type { MessageKeyFilter } from "./counted-calls";
 import { attachSubagentGroups, splitIntoTurnDrafts } from "./sweep";
 import type { TurnDraft } from "./sweep";
@@ -337,7 +337,7 @@ function buildCodexRecord(agg: TurnAggregate, table: PriceTable, fx: FxResult): 
   };
   if (typeof agg.originator === "string") rec.originator = agg.originator;
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
-  setCountedCalls(rec, [codexTurnFingerprint(rec.sessionId, agg.firstTs, agg.lastTs, rec.tokens)]);
+  setCountedCalls(rec, agg.codexEventKeys ?? []);
   return rec;
 }
 
@@ -557,8 +557,17 @@ async function processFiles(
 
   const processCodexFile = async (filePath: string): Promise<void> => {
     const cursor = sanitizeCursor(cursorsDict[filePath]);
-    const drafts = await splitIntoCodexTurnDrafts(filePath, cursor);
-    if (drafts === null) return; // 新規 usage 無し(カーソルも進めない)
+    // 計上済みの token_count イベントは、カーソルの有無に関係なく指紋で弾く。
+    // Codex 側は既に指紋そのものを渡してくるので、集合をそのまま述語に使う
+    // (Claude 側の messageKey → 指紋の変換は挟まない)。
+    const scanOpts = { excludeEvents: historyIndex().countedCalls };
+    const drafts = await splitIntoCodexTurnDrafts(filePath, cursor, scanOpts);
+    if (drafts === null) {
+      // 新規 usage 無し(または読めない)。読み切った位置までカーソルだけ進める。
+      const consumed = await codexConsumedCursor(filePath, cursor, scanOpts);
+      if (consumed !== null) commit(filePath, [], consumed);
+      return;
+    }
     const windowCursor = drafts[drafts.length - 1].agg.newCursor;
 
     if (drafts[0].isSubagentRollout) {
@@ -575,9 +584,12 @@ async function processFiles(
     // カーソル不在: 記録済み ts があれば、そこまで消費した再開点から読み直す。
     // ウィンドウ全体は消費済みなので、新規ターンが無くてもカーソルは EOF まで進める。
     // (同じターンを再集計しても指紋が一致するので、commit 側でも重複は落ちる)
+    // 指紋を持たない旧レコードぶんのフォールバック。
     const floor = recordedFloor("codex", drafts[0].agg.sessionId);
     const target =
-      floor === null ? drafts : ((await splitIntoCodexTurnDrafts(filePath, await codexResumePointAtTs(filePath, floor))) ?? []);
+      floor === null
+        ? drafts
+        : ((await splitIntoCodexTurnDrafts(filePath, await codexResumePointAtTs(filePath, floor), scanOpts)) ?? []);
     commit(filePath, target.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
   };
 

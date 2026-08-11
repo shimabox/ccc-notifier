@@ -37,7 +37,7 @@ import {
   saveCursor,
   todayTotalUSD,
 } from "./store";
-import { callFingerprints, codexTurnFingerprint, setCountedCalls } from "./counted-calls";
+import { callFingerprints, setCountedCalls } from "./counted-calls";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
@@ -243,11 +243,8 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     // 6c. 計上した呼び出しの指紋を載せる(親ターン分 + サブエージェント分)。
     //     カーソルが失われても、ここに載った呼び出しは以後どの経路でも再計上されない。
     if (isCodex) {
-      // rollout に呼び出し単位の ID は無いので、ターンの内容から 1 ターン 1 指紋を作る。
-      setCountedCalls(
-        record,
-        agg === null ? [] : [codexTurnFingerprint(record.sessionId, agg.firstTs, agg.lastTs, record.tokens)],
-      );
+      // rollout は token_count イベント1件を1呼び出しとみなして指紋を付ける。
+      setCountedCalls(record, agg?.codexEventKeys ?? []);
     } else {
       const countedKeys: string[] = [];
       if (agg !== null && "messageKeys" in agg) {

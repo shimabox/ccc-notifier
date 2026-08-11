@@ -668,6 +668,7 @@ function codexDraftToRecord(
   };
   if (typeof draft.agg.originator === "string") rec.originator = draft.agg.originator;
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, draft.agg.codexEventKeys ?? []);
   return rec;
 }
 

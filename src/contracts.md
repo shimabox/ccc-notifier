@@ -483,8 +483,11 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - 指紋(`src/counted-calls.ts`)は内容だけで決まり、取り込み時刻・経路には依存しない。
   - Claude: `sha256("claude-call <messageId>:<requestId>")` の先頭 16 hex。親ターン分も
     サブエージェント(`agent-*.jsonl`)分も同じ名前空間に入れる。
-  - Codex: rollout に呼び出し単位の ID が無いため、`session_id` / 時刻範囲 / トークン数から
-    1 ターン 1 指紋を作る。
+  - Codex: rollout に呼び出し単位の ID が無いため、`token_count` イベント1件を1呼び出しとみなし、
+    `sha256("codex-event|<session_id>|<行のバイトオフセット>|<累積カウンタ3成分>")` の先頭 16 hex。
+    rollout は追記専用なので、この素材は集計窓の広さ・ターン境界の取り方・取り込み経路に依存しない。
+    計上済みイベントは金額に足さないが累積カウンタ(prev)は必ず進める(取りこぼすと次の差分が
+    累積全量になるため)。
   - `ingestKey` は `countedCalls` を整列・重複除去した集合の sha256。呼び出しを1件も計上していない
     レコードには付けない(内容で識別できないものを重複扱いして取りこぼさないため)。
 - 取り込み側(`src/ingest.ts`)は history から指紋集合・キー集合・旧レコード用の ts 下限を

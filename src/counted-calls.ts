@@ -8,14 +8,14 @@
 //
 //  - Claude: 1 呼び出し = assistant メッセージ("<messageId>:<requestId>")。親ターンの分も
 //    サブエージェント(agent-*.jsonl)の分も同じ名前空間で扱う。
-//  - Codex: rollout に呼び出し単位の ID は無いので、ターンの内容(session_id / 時刻範囲 /
-//    累積トークンの差分)から 1 ターン 1 指紋を作る。
+//  - Codex: rollout に呼び出し単位の ID は無いので、token_count イベント1件を1呼び出しとみなし、
+//    セッション ID + そのイベント行のバイトオフセット + 累積カウンタから指紋を作る。
 //
 // 指紋は sha256 の先頭 64bit(16 hex)。実データ規模(6万件弱)での衝突確率は 1e-10 未満で、
 // 生キーをそのまま持つより history.jsonl を 3.7MB ではなく 1.0MB の増加に抑えられる。
 
 import { createHash } from "node:crypto";
-import type { TokenBuckets, TurnRecord } from "./types";
+import type { TurnRecord } from "./types";
 
 const FINGERPRINT_HEX = 16;
 
@@ -35,23 +35,25 @@ export function callFingerprints(messageKeys: Iterable<string>): string[] {
 }
 
 /**
- * Codex の 1 ターン分の指紋。同じ rollout の同じ範囲を再集計すれば同じ値になる
- * (取り込み時刻・経路には依存しない)。
+ * Codex の 1 呼び出し(= token_count イベント1件)の指紋。
+ *
+ * rollout には呼び出し単位の ID が無いので、rollout 内で位置が確定している不変量から作る:
+ * セッション ID + そのイベント行のファイル先頭からのバイトオフセット + そのイベントが運ぶ
+ * 累積カウンタ。rollout は追記専用なので、これらはどこから読み始めても変わらない
+ * (ターン境界の取り方・集計窓の広さ・取り込み経路に依存しない)。
  */
-export function codexTurnFingerprint(
+export function codexEventFingerprint(
   sessionId: string,
-  firstTs: string | null,
-  lastTs: string | null,
-  tokens: TokenBuckets,
+  byteOffset: number,
+  totals: { input: number; cached: number; output: number },
 ): string {
   const material = [
-    "codex-turn",
+    "codex-event",
     sessionId,
-    firstTs ?? "",
-    lastTs ?? "",
-    tokens.input,
-    tokens.output,
-    tokens.cacheRead,
+    byteOffset,
+    totals.input,
+    totals.cached,
+    totals.output,
   ].join("|");
   return sha256Hex(material).slice(0, FINGERPRINT_HEX);
 }
