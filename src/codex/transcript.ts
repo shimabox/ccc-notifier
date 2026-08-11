@@ -268,6 +268,7 @@ async function scanWindow(
 
   // 指紋の素材になるセッション ID。session_meta はファイル先頭行にしかないので、
   // 先頭から読む場合は最初の行で、増分読みの場合は seed で既に確定している。
+  const rolloutFile = basename(rolloutPath);
   const filenameId = sessionIdFromFilename(rolloutPath);
   const rolloutId = (): string => sessionMetaSid ?? filenameId;
 
@@ -357,7 +358,7 @@ async function scanWindow(
 
       // 既に計上済みのイベントは金額に足さない。ただし prev は必ず進める
       // (累積カウンタを取りこぼすと、次のイベントの差分が累積全量になって過大計上になる)。
-      const eventKey = codexEventFingerprint(rolloutId(), lineOffset, total);
+      const eventKey = codexEventFingerprint(rolloutFile, rolloutId(), lineOffset, total);
       if (opts.excludeEvents?.has(eventKey) === true) {
         prev = total;
         return;

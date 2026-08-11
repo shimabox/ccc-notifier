@@ -484,7 +484,8 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   - Claude: `sha256("claude-call <messageId>:<requestId>")` の先頭 16 hex。親ターン分も
     サブエージェント(`agent-*.jsonl`)分も同じ名前空間に入れる。
   - Codex: rollout に呼び出し単位の ID が無いため、`token_count` イベント1件を1呼び出しとみなし、
-    `sha256("codex-event|<session_id>|<行のバイトオフセット>|<累積カウンタ3成分>")` の先頭 16 hex。
+    `sha256("codex-event|<rollout ファイル名>|<session_id>|<行のバイトオフセット>|<累積カウンタ3成分>")`
+    の先頭 16 hex。
     rollout は追記専用なので、この素材は集計窓の広さ・ターン境界の取り方・取り込み経路に依存しない。
     計上済みイベントは金額に足さないが累積カウンタ(prev)は必ず進める(取りこぼすと次の差分が
     累積全量になるため)。
@@ -497,5 +498,10 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   従来どおり突合する(カーソルを持たないファイル・agent ファイルにだけ適用する)。
 - `IngestResult` の `totalUSD` / `totalJPY` / `bySurface` はサブエージェント分を含む
   (= 実際に取り込んだ金額。通知しきい値 `minNotifyUSD` の判定対象もこれ)。
+- `track`(Stop hook)も同じ原則で動く。**カーソルが健全なとき(`sanitizeCursor` が非 null)は
+  history を1バイトも読まない**。カーソルが欠損・破損しているときだけ history 由来の指紋と
+  旧レコード向けの ts 下限を除外条件にし、既計上分しか無ければレコードを作らずカーソルだけ
+  張り直す。サブエージェント側は「カーソルを持たない agent ファイルに遭遇したときだけ」
+  遅延して history を読む。
 - `doctor` は同一 `ingestKey` を持つレコードが複数あれば warn する(旧レコードは従来どおり
   同一 `sessionId` + `ts` で検知)。

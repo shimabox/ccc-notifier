@@ -503,6 +503,79 @@ export function readTurns(days?: number): TurnRecord[] {
   return result;
 }
 
+/** claude / codex = メインターン、claude-sa = サブエージェント分を含むターン。 */
+export type FloorScope = "claude" | "codex" | "claude-sa";
+
+export function floorKey(scope: FloorScope, sessionId: string): string {
+  return `${scope}\u0000${sessionId}`;
+}
+
+export interface HistoryIndex {
+  /** 計上済み呼び出しの指紋。 */
+  countedCalls: Set<string>;
+  /** 既に history にあるレコードの一意キー。 */
+  ingestKeys: Set<string>;
+  /** 指紋を持たない旧レコードだけから作った ts 下限(scope + sessionId → 正規化 ISO)。 */
+  legacyFloors: Map<string, string>;
+}
+
+export function loadHistoryIndex(): HistoryIndex {
+  const index: HistoryIndex = { countedCalls: new Set(), ingestKeys: new Set(), legacyFloors: new Map() };
+  let raw: string;
+  try {
+    raw = readFileSync(paths().historyFile, "utf8");
+  } catch {
+    return index; // 履歴不在(初回)。すべて未取り込みとして扱うのが正しい
+  }
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+    let rec: {
+      sessionId?: unknown;
+      ts?: unknown;
+      source?: unknown;
+      subagents?: unknown;
+      countedCalls?: unknown;
+      ingestKey?: unknown;
+    };
+    try {
+      rec = JSON.parse(line) as typeof rec;
+    } catch {
+      continue; // 破損行は黙殺(readTurns と同じ規則)
+    }
+
+    let hasFingerprints = false;
+    if (Array.isArray(rec.countedCalls)) {
+      for (const fp of rec.countedCalls) {
+        if (typeof fp === "string" && fp.length > 0) {
+          index.countedCalls.add(fp);
+          hasFingerprints = true;
+        }
+      }
+    }
+    if (typeof rec.ingestKey === "string" && rec.ingestKey.length > 0) index.ingestKeys.add(rec.ingestKey);
+
+    // 指紋を持つレコードは指紋で正確に突合できるので、下限(粗い近似)には寄与させない。
+    if (hasFingerprints) continue;
+
+    const { sessionId, ts } = rec;
+    if (typeof sessionId !== "string" || sessionId.length === 0) continue;
+    if (typeof ts !== "string") continue;
+    const ms = Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    // transcript 側の ts と文字列比較するため、表記ゆれで大小が狂わないよう正規化して持つ。
+    const iso = new Date(ms).toISOString();
+    const isCodex = rec.source === "codex";
+    const scopes: FloorScope[] = isCodex ? ["codex"] : ["claude"];
+    if (!isCodex && rec.subagents !== undefined && rec.subagents !== null) scopes.push("claude-sa");
+    for (const scope of scopes) {
+      const key = floorKey(scope, sessionId);
+      const cur = index.legacyFloors.get(key);
+      if (cur === undefined || cur < iso) index.legacyFloors.set(key, iso);
+    }
+  }
+  return index;
+}
+
 /**
  * ローカルタイムゾーンで「今日」に該当する TurnRecord の costUSD 合計。
  */

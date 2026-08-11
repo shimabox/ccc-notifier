@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { notifyIngestSummary, runIngest } from "../src/ingest";
 import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
+import { callFingerprint } from "../src/counted-calls";
 import { loadCursor, readConfig, sanitizeCursor, writeMuteState } from "../src/store";
 import type { Config, TurnRecord } from "../src/types";
 
@@ -169,8 +170,7 @@ function transcriptFixture(sessionId: string, tag: string): string {
   return readFileSync(FIXTURE_TRANSCRIPT, "utf8")
     .replaceAll('"sessionId":"sess-1"', `"sessionId":"${sessionId}"`)
     .replaceAll('"msg_', `"msg_${tag}_`)
-    .replaceAll('"req_', `"req_${tag}_`)
-    .replaceAll('"requestId":"req_', `"requestId":"req_${tag}_`);
+    .replaceAll('"req_', `"req_${tag}_`);
 }
 
 /** サブエージェント fixture を、指定セッション・指定時刻に読み替えて返す。 */
@@ -179,7 +179,6 @@ function subagentFixture(sessionId: string, ts1: string, ts2: string): string {
     .replaceAll('"sessionId":"sess-1"', `"sessionId":"${sessionId}"`)
     .replaceAll('"msg_', `"msg_${sessionId}_`)
     .replaceAll('"req_', `"req_${sessionId}_`)
-    .replaceAll('"requestId":"req_', `"requestId":"req_${sessionId}_`)
     .replaceAll("2026-07-06T10:00:20.000Z", `2026-07-06T${ts1}.000Z`)
     .replaceAll("2026-07-06T10:00:21.000Z", `2026-07-06T${ts2}.000Z`);
 }
@@ -773,6 +772,174 @@ describe("runIngest", () => {
       expect(fresh).toHaveLength(1); // 3ターン目だけ
       expect(fresh[0].tokens.cacheRead).toBe(900 - 500); // 累積 900 − 既計上 500
       expect(fresh[0].tokens.output).toBe(40 - 25);
+    });
+  });
+
+  // 逆方向: 先に取り込み済みの状態でカーソルを失い、その状態で Stop hook(track)が発火する。
+  // track もカーソルの不在を「未計上」の証拠として扱わない。
+  describe("track のカーソル破壊耐性", () => {
+    it("21. Claude: カーソルを失った状態で track が走っても既計上分を再計上しない", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "track-recover.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-trackrec", "trk"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+
+      await runTrack(stdin);
+      const before = readHistory().filter((r) => r.sessionId === "sess-trackrec");
+      expect(before).toHaveLength(1);
+      expect(before[0].apiCalls).toBe(2);
+      expect(before[0].countedCalls).toHaveLength(2);
+      const historyCount = readHistory().length;
+
+      // カーソルを失った状態で同じ Stop hook がもう一度発火する。
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+      await runTrack(stdin);
+
+      expect(readHistory()).toHaveLength(historyCount); // 新しい行は増えない
+      expect(readHistory().filter((r) => r.sessionId === "sess-trackrec")).toHaveLength(1);
+      // カーソルは張り直され、次回以降は history を読まない通常経路に戻る。
+      expect(sanitizeCursor(loadCursor(trackedPath))).not.toBeNull();
+    });
+
+    it("22. Claude: カーソルを失っても、未計上の新しいターンは track が記録する", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "track-recover-new.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-tracknew", "tnw"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+      await runTrack(stdin);
+
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-tracknew", "追加の質問", "req_tnw_NEW", "msg_tnw_NEW", "2026-07-06T15:00:00.000Z"),
+        "utf8",
+      );
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+      await runTrack(stdin);
+
+      const rows = readHistory().filter((r) => r.sessionId === "sess-tracknew");
+      expect(rows).toHaveLength(2);
+      expect(rows[1].apiCalls).toBe(1); // 追記した1件だけ(ファイル全体の3ではない)
+    });
+
+    it("23. Codex: カーソルを失った状態で track が走っても既計上分を再計上しない", async () => {
+      const sessionId = "01234567-bbbb-7000-8000-000000000023";
+      const rolloutPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-track-recover.jsonl");
+      writeFileSync(
+        rolloutPath,
+        readFileSync(FIXTURE_CODEX_ROLLOUT, "utf8").replaceAll("01234567-aaaa-7000-8000-000000000001", sessionId),
+        "utf8",
+      );
+      const payload = JSON.parse(readFileSync(FIXTURE_CODEX_STOP_PAYLOAD, "utf8")) as Record<string, unknown>;
+      payload.transcript_path = rolloutPath;
+      payload.session_id = sessionId;
+      const stdin = JSON.stringify(payload);
+
+      await runTrack(stdin, { codex: true });
+      const before = readHistory().filter((r) => r.source === "codex" && r.sessionId === sessionId);
+      expect(before).toHaveLength(1);
+      expect(before[0].countedCalls).toHaveLength(1);
+      const historyCount = readHistory().length;
+
+      writeFileSync(join(tmpHome, "cursors.json"), "{}", "utf8");
+      await runTrack(stdin, { codex: true });
+
+      expect(readHistory()).toHaveLength(historyCount);
+      expect(sanitizeCursor(loadCursor(rolloutPath))).not.toBeNull(); // カーソルは張り直される
+    });
+
+    it("25. 指紋を持たない旧レコードしか無くても、カーソル欠損時の track が再計上しない", async () => {
+      // この仕組みより前に記録された history には countedCalls が無い。
+      // その場合はセッション別の ts 下限(ingest と同じ規則)で既計上分を落とす。
+      const sessionId = "sess-legacy";
+      const trackedPath = join(cliProjects, "proj-cli", `${sessionId}.jsonl`);
+      writeFileSync(trackedPath, transcriptFixture(sessionId, "lgc"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8")
+        .replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(trackedPath))
+        .replace('"sess-1"', () => JSON.stringify(sessionId));
+
+      // 旧形式のレコード(countedCalls / ingestKey を持たない)を history に置く。
+      writeFileSync(
+        join(tmpHome, "history.jsonl"),
+        JSON.stringify({
+          schemaVersion: 1,
+          ts: "2026-07-06T10:00:12.000Z", // transcript の最終行の時刻
+          sessionId,
+          project: "/tmp/proj",
+          gitBranch: "main",
+          models: ["claude-fable-5"],
+          tokens: { input: 100, output: 200, cacheWrite5m: 0, cacheWrite1h: 10000, cacheRead: 50000 },
+          sidechainTokens: null,
+          apiCalls: 2,
+          costUSD: 1,
+          costJPY: 150,
+          fxRate: 150,
+          fxSource: "fixed",
+          prompt: "",
+        }) + "\n",
+        "utf8",
+      );
+      expect(existsSync(join(tmpHome, "cursors.json"))).toBe(false); // カーソルは無い
+
+      await runTrack(stdin);
+
+      expect(readHistory().filter((r) => r.sessionId === sessionId)).toHaveLength(1); // 増えない
+      expect(sanitizeCursor(loadCursor(trackedPath))).not.toBeNull(); // カーソルは張り直される
+    });
+
+    it("24. カーソルが健全なら track は history の指紋を参照しない", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "track-no-read.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-noread", "nrd"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+      await runTrack(stdin); // 1ターン目を記録し、正常なカーソルを残す
+
+      // 2ターン目を追記したうえで、その呼び出しの指紋を「計上済み」として history に仕込む。
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-noread", "2つめ", "req_nrd_X", "msg_nrd_X", "2026-07-06T16:00:00.000Z"),
+        "utf8",
+      );
+      const poison = callFingerprint("msg_nrd_X:req_nrd_X");
+      appendFileSync(
+        join(tmpHome, "history.jsonl"),
+        JSON.stringify({ ...readHistory()[0], ts: "2026-07-06T15:59:00.000Z", countedCalls: [poison], ingestKey: "poison" }) + "\n",
+        "utf8",
+      );
+
+      // カーソルは健全なので history を読まない = 仕込んだ指紋は効かず、2ターン目が記録される。
+      await runTrack(stdin);
+      const rows = readHistory().filter((r) => r.sessionId === "sess-noread" && r.ingestKey !== "poison");
+      expect(rows).toHaveLength(2);
+      expect(rows[1].apiCalls).toBe(1);
+
+      // 逆にカーソルを失うと history を読む = 同じ指紋で除外される(参照経路の対照実験)。
+      const path3 = join(cliProjects, "proj-cli", "track-read.jsonl");
+      writeFileSync(path3, transcriptFixture("sess-read", "rdd"), "utf8");
+      appendFileSync(
+        path3,
+        claudeTurnLines("sess-read", "2つめ", "req_rdd_X", "msg_rdd_X", "2026-07-06T16:00:00.000Z"),
+        "utf8",
+      );
+      appendFileSync(
+        join(tmpHome, "history.jsonl"),
+        JSON.stringify({
+          ...readHistory()[0],
+          sessionId: "sess-read",
+          ts: "2026-07-06T15:59:00.000Z",
+          countedCalls: [callFingerprint("msg_rdd_A:req_rdd_A"), callFingerprint("msg_rdd_B:req_rdd_B"), callFingerprint("msg_rdd_X:req_rdd_X")],
+          ingestKey: "poison2",
+        }) + "\n",
+        "utf8",
+      );
+      const stdin3 = readFileSync(FIXTURE_STDIN, "utf8").replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(path3));
+      await runTrack(stdin3);
+      expect(readHistory().filter((r) => r.sessionId === "sess-read" && r.ingestKey !== "poison2")).toHaveLength(0);
     });
   });
 

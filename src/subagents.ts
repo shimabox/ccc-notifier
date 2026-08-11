@@ -131,11 +131,13 @@ export async function collectSubagentUsage(
     excludeMessageKeys?: MessageKeyFilter;
     minTimestampMs?: number | null;
     /**
-     * カーソルを持たない agent ファイルにだけ適用する下限(ms)。カーソルが無いファイルは
-     * 先頭からの読み直しになるため、history 側で計上済みと分かっている範囲を除外する。
-     * カーソルがあるファイルはカーソルの消費位置を信用する。
+     * カーソルを持たない agent ファイルにだけ適用する回収条件(遅延生成)。
+     * カーソルが無いファイルは先頭からの読み直しになるため、history 側で計上済みと
+     * 分かっている分(指紋・旧レコード向けの ts 下限)を除外する。カーソルがあるファイルは
+     * カーソルの消費位置を信用する。カーソルが1つも欠けていなければ一度も呼ばれないので、
+     * 呼び出し元はここで初めて history を読むようにできる。
      */
-    recoveryMinTimestampMs?: number | null;
+    recovery?: () => { excludeMessageKeys?: MessageKeyFilter; minTimestampMs?: number | null };
     /**
      * カーソルの読み出し口(既定は cursors.json を都度読む loadCursor)。
      * 多数のファイルをまとめて処理する呼び出し元は、1回だけ読んだ辞書を引く関数を渡して
@@ -187,11 +189,14 @@ export async function collectSubagentUsage(
         await file.close();
       }
       const cursor = opts.ignoreCursors ? null : readCursor(filePath);
-      // カーソルが無いファイルだけ、history 側で計上済みと分かっている範囲を下限で落とす。
-      const recoveryFloor = cursor === null ? (opts.recoveryMinTimestampMs ?? null) : null;
+      // カーソルが無いファイルだけ、history 側で計上済みと分かっている分を落とす。
+      const recovery = cursor === null && opts.recovery !== undefined ? opts.recovery() : undefined;
       const agg = await aggregateNewTurn(filePath, cursor, {
-        excludeMessageKeys: excludeFilter,
-        minTimestampMs: opts.minTimestampMs ?? recoveryFloor,
+        excludeMessageKeys:
+          recovery?.excludeMessageKeys === undefined
+            ? excludeFilter
+            : anyOf([excludeFilter, recovery.excludeMessageKeys]),
+        minTimestampMs: opts.minTimestampMs ?? recovery?.minTimestampMs ?? null,
         returnEmpty: true,
       });
       if (agg === null) continue; // このファイルに新規 usage なし

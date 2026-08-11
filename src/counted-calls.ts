@@ -38,17 +38,21 @@ export function callFingerprints(messageKeys: Iterable<string>): string[] {
  * Codex の 1 呼び出し(= token_count イベント1件)の指紋。
  *
  * rollout には呼び出し単位の ID が無いので、rollout 内で位置が確定している不変量から作る:
- * セッション ID + そのイベント行のファイル先頭からのバイトオフセット + そのイベントが運ぶ
- * 累積カウンタ。rollout は追記専用なので、これらはどこから読み始めても変わらない
- * (ターン境界の取り方・集計窓の広さ・取り込み経路に依存しない)。
+ * rollout ファイル名 + セッション ID + そのイベント行のファイル先頭からのバイトオフセット +
+ * そのイベントが運ぶ累積カウンタ。rollout は追記専用なので、これらはどこから読み始めても
+ * 変わらない(ターン境界の取り方・集計窓の広さ・取り込み経路に依存しない)。
+ * ファイル名を素材に含めるのは、同じ session_id を持つ別 rollout が偶然同じオフセット・
+ * 同じカウンタになったときに同一イベントと誤判定しないため。
  */
 export function codexEventFingerprint(
+  rolloutFile: string,
   sessionId: string,
   byteOffset: number,
   totals: { input: number; cached: number; output: number },
 ): string {
   const material = [
     "codex-event",
+    rolloutFile,
     sessionId,
     byteOffset,
     totals.input,

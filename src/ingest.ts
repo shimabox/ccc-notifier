@@ -26,8 +26,10 @@ import { formatIngestSummary } from "./format";
 import { computeCost, loadPriceTable } from "./pricing";
 import {
   appendTurn,
+  floorKey,
   isMuted,
   loadAllCursors,
+  loadHistoryIndex,
   logError,
   paths,
   readConfig,
@@ -35,6 +37,7 @@ import {
   saveAllCursors,
   sanitizeCursor,
 } from "./store";
+import type { FloorScope, HistoryIndex } from "./store";
 import { anyOf, callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
 import type { MessageKeyFilter } from "./counted-calls";
 import { attachSubagentGroups, splitIntoTurnDrafts } from "./sweep";
@@ -173,79 +176,6 @@ function saveIngestMtimeCache(cache: IngestMtimeCache): void {
 // history.jsonl は数千行・数MBになるので、読み込みは ingest 1回につき最大1度・遅延実行
 // (カーソルまたは指紋の突合が実際に必要になったときだけ)。全ファイルにカーソルがあり
 // mtime も動いていない定常状態では1バイトも読まない。
-
-/** claude / codex = メインターン、claude-sa = サブエージェント分を含むターン。 */
-type FloorScope = "claude" | "codex" | "claude-sa";
-
-function floorKey(scope: FloorScope, sessionId: string): string {
-  return `${scope}\u0000${sessionId}`;
-}
-
-interface HistoryIndex {
-  /** 計上済み呼び出しの指紋。 */
-  countedCalls: Set<string>;
-  /** 既に history にあるレコードの一意キー。 */
-  ingestKeys: Set<string>;
-  /** 指紋を持たない旧レコードだけから作った ts 下限(scope + sessionId → 正規化 ISO)。 */
-  legacyFloors: Map<string, string>;
-}
-
-function loadHistoryIndex(): HistoryIndex {
-  const index: HistoryIndex = { countedCalls: new Set(), ingestKeys: new Set(), legacyFloors: new Map() };
-  let raw: string;
-  try {
-    raw = readFileSync(paths().historyFile, "utf8");
-  } catch {
-    return index; // 履歴不在(初回)。すべて未取り込みとして扱うのが正しい
-  }
-  for (const line of raw.split("\n")) {
-    if (line.length === 0) continue;
-    let rec: {
-      sessionId?: unknown;
-      ts?: unknown;
-      source?: unknown;
-      subagents?: unknown;
-      countedCalls?: unknown;
-      ingestKey?: unknown;
-    };
-    try {
-      rec = JSON.parse(line) as typeof rec;
-    } catch {
-      continue; // 破損行は黙殺(readTurns と同じ規則)
-    }
-
-    let hasFingerprints = false;
-    if (Array.isArray(rec.countedCalls)) {
-      for (const fp of rec.countedCalls) {
-        if (typeof fp === "string" && fp.length > 0) {
-          index.countedCalls.add(fp);
-          hasFingerprints = true;
-        }
-      }
-    }
-    if (typeof rec.ingestKey === "string" && rec.ingestKey.length > 0) index.ingestKeys.add(rec.ingestKey);
-
-    // 指紋を持つレコードは指紋で正確に突合できるので、下限(粗い近似)には寄与させない。
-    if (hasFingerprints) continue;
-
-    const { sessionId, ts } = rec;
-    if (typeof sessionId !== "string" || sessionId.length === 0) continue;
-    if (typeof ts !== "string") continue;
-    const ms = Date.parse(ts);
-    if (!Number.isFinite(ms)) continue;
-    // transcript 側の ts と文字列比較するため、表記ゆれで大小が狂わないよう正規化して持つ。
-    const iso = new Date(ms).toISOString();
-    const isCodex = rec.source === "codex";
-    const scopes: FloorScope[] = isCodex ? ["codex"] : ["claude"];
-    if (!isCodex && rec.subagents !== undefined && rec.subagents !== null) scopes.push("claude-sa");
-    for (const scope of scopes) {
-      const key = floorKey(scope, sessionId);
-      const cur = index.legacyFloors.get(key);
-      if (cur === undefined || cur < iso) index.legacyFloors.set(key, iso);
-    }
-  }
-  return index;
-}
 
 /**
  * 記録済み ts を下限に持つ回収用カーソル。offset 0 = 先頭から読み直し、
@@ -541,7 +471,7 @@ async function processFiles(
     try {
       sa = await collectSubagentUsage(filePath, {
         excludeMessageKeys: anyOf([new Set(split.messageKeys), counted]),
-        recoveryMinTimestampMs: saFloor === null ? null : Date.parse(saFloor) + 1,
+        recovery: () => ({ minTimestampMs: saFloor === null ? null : Date.parse(saFloor) + 1 }),
         readCursor: (path) => sanitizeCursor(cursorsDict[path]),
       });
     } catch (err) {

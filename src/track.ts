@@ -9,7 +9,7 @@
 //   - ネット待ちは各モジュール内のタイムアウト(fx 1.5s×2 / Slack 3s)で構造的に有界。
 //     track 側で無限待ちの await を追加しない。
 
-import { aggregateCodexTurn } from "./codex/transcript";
+import { aggregateCodexTurn, codexConsumedCursor, codexResumePointAtTs } from "./codex/transcript";
 import { closeCodexRootContext } from "./codex/subagent-store";
 import { normalizeCodexOriginator } from "./codex/originator";
 import { determineClaudeSurface } from "./claude-roots";
@@ -24,6 +24,7 @@ import { getUsdJpy } from "./fx";
 import { notifyIngestSummary, runIngest } from "./ingest";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
+import { basename } from "node:path";
 import { computeCost, loadPriceTable } from "./pricing";
 import {
   appendTurn,
@@ -36,12 +37,15 @@ import {
   sanitizeCursor,
   saveCursor,
   todayTotalUSD,
+  floorKey,
+  loadHistoryIndex,
 } from "./store";
-import { callFingerprints, setCountedCalls } from "./counted-calls";
+import type { FloorScope, HistoryIndex } from "./store";
+import { callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
-import type { StopHookInput, TokenBuckets, TurnAggregate, TurnRecord, UsageByModel } from "./types";
+import type { Cursor, StopHookInput, TokenBuckets, TurnAggregate, TurnRecord, UsageByModel } from "./types";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -134,10 +138,61 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     // 3. 新規ターンの集計。Claude はメイン usage が無くても、遅れて完了した
     //    サブエージェント差分を回収するため、この時点では return しない。
     //    Codex 経路(opts.codex)は rollout(累積カウンタの逐次差分)を集計する。
-    let agg = isCodex
-      ? await aggregateCodexTurn(transcriptPath, cursor)
-      : await aggregateNewTurn(transcriptPath, cursor);
-    if (isCodex && agg === null) return;
+    //
+    //    カーソルが無い(消失・破損)ときは、そのファイルを先頭から読み直すことになる。
+    //    カーソルの不在は「未計上」の証拠にならないので、history に指紋として残っている
+    //    呼び出しを除外条件にする。カーソルが健全なら history は1バイトも読まない。
+    let indexCache: HistoryIndex | null = null;
+    const history = (): HistoryIndex => (indexCache ??= loadHistoryIndex());
+    const counted = (): Set<string> => history().countedCalls;
+    // 指紋を持たない旧レコードぶんのフォールバック(ingest と同じ規則)。
+    const sessionKey =
+      (typeof input.session_id === "string" && input.session_id.length > 0
+        ? input.session_id
+        : basename(transcriptPath).replace(/\.jsonl$/, ""));
+    const legacyFloorMs = (scope: FloorScope): number | null => {
+      const iso = history().legacyFloors.get(floorKey(scope, sessionKey));
+      if (iso === undefined) return null;
+      const ms = Date.parse(iso);
+      return Number.isFinite(ms) ? ms + 1 : null;
+    };
+
+    // 既計上分しか無かったときに張り直すカーソル(ゼロ件のレコードは作らない)。
+    let recoveredCursor: Cursor | null = null;
+
+    let agg: (TurnAggregate & { messageKeys?: string[] }) | null;
+    if (isCodex) {
+      let readFrom = cursor;
+      const scanOpts = cursor === null ? { excludeEvents: counted() } : {};
+      if (cursor === null) {
+        const floorIso = history().legacyFloors.get(floorKey("codex", sessionKey));
+        if (floorIso !== undefined) readFrom = await codexResumePointAtTs(transcriptPath, floorIso);
+      }
+      agg = await aggregateCodexTurn(transcriptPath, readFrom, scanOpts);
+      if (agg === null) {
+        // 新規 usage 無し。カーソルを失っていたなら、読み切った位置まで張り直して
+        // 次回以降の Stop で history を読み直さずに済むようにする。
+        if (cursor === null) {
+          const consumed = await codexConsumedCursor(transcriptPath, readFrom, scanOpts);
+          if (consumed !== null) saveCursor(transcriptPath, consumed);
+        }
+        return;
+      }
+    } else if (cursor === null) {
+      const recovered = await aggregateNewTurn(transcriptPath, null, {
+        excludeMessageKeys: messageKeyFilterOf(counted()),
+        minTimestampMs: legacyFloorMs("claude"),
+        returnEmpty: true,
+      });
+      if (recovered !== null && recovered.apiCalls === 0) {
+        recoveredCursor = recovered.newCursor; // 既計上分だけだった
+        agg = null;
+      } else {
+        agg = recovered;
+      }
+    } else {
+      agg = await aggregateNewTurn(transcriptPath, cursor);
+    }
     hasMainUsage = agg !== null;
 
     // 3a. Codex はモデルを hook payload 優先で決める(rollout 由来のキーを payload.model に組み替える)。
@@ -154,7 +209,16 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         if (agg !== null && "messageKeys" in agg) {
           for (const key of (agg as TurnAggregate & { messageKeys: string[] }).messageKeys) excluded.add(key);
         }
-        sa = await collectSubagentUsage(transcriptPath, { excludeMessageKeys: excluded });
+        sa = await collectSubagentUsage(transcriptPath, {
+          excludeMessageKeys: excluded,
+          // agent ファイル側のカーソルだけを失っている場合もあるので、そのファイルに限って
+          // history 由来の指紋と旧レコード向けの下限で弾く
+          // (すべてのカーソルが健全なら一度も呼ばれない = history を読まない)。
+          recovery: () => ({
+            excludeMessageKeys: messageKeyFilterOf(counted()),
+            minTimestampMs: legacyFloorMs("claude-sa"),
+          }),
+        });
       } catch (err) {
         logError("track:subagents", err);
         sa = null;
@@ -163,6 +227,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     if (agg === null && (sa === null || sa.apiCalls === 0)) {
       // A newly discovered file may contain only a copy of already-counted main
       // calls. Persist its consumed cursor without creating a zero-value row.
+      if (recoveredCursor !== null) saveCursor(transcriptPath, recoveredCursor);
       for (const nc of sa?.newCursors ?? []) saveCursor(nc.path, nc.cursor);
       return;
     }
