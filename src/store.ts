@@ -442,15 +442,34 @@ export function pendingAppendPath(): string {
   return join(paths().cacheDir, "pending-append.json");
 }
 
-function readPendingAppends(): Record<string, string> {
+/**
+ * マーカーの読み出し。trusted=false は「保留集合が分からない」状態
+ * (読めない・壊れている)で、呼び出し側は保留ありとして扱う(fail-closed)。
+ * ファイル不在は正常な定常状態なので trusted=true・空辞書。
+ */
+function readPendingAppends(): { dict: Record<string, string>; trusted: boolean } {
+  let raw: string;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(pendingAppendPath(), "utf8"));
-    return isPlainObject(parsed) ? (parsed as Record<string, string>) : {};
-  } catch {
-    return {}; // 不在・破損 → 保留なし
+    raw = readFileSync(pendingAppendPath(), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { dict: {}, trusted: true };
+    logError("readPendingAppends", err);
+    return { dict: {}, trusted: false }; // 読めない = 保留の有無が分からない
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) {
+      logError("readPendingAppends", new Error("pending-append.json root is not an object"));
+      return { dict: {}, trusted: false };
+    }
+    return { dict: parsed as Record<string, string>, trusted: true };
+  } catch (err) {
+    logError("readPendingAppends", err);
+    return { dict: {}, trusted: false }; // 壊れている = 同上
   }
 }
 
+/** 呼び出しごとに一意な tmp へ書いて renameSync で原子的に置換する(失敗は throw)。 */
 function writePendingAppends(dict: Record<string, string>): void {
   const file = pendingAppendPath();
   const tmp = `${file}.${randomUUID()}.tmp`;
@@ -462,26 +481,41 @@ function writePendingAppends(dict: Record<string, string>): void {
   }
 }
 
-/** 対象 transcript に「カーソル未反映かもしれない append」が残っているか。 */
+/**
+ * 対象 transcript に「カーソル未反映かもしれない append」が残っているか。
+ * マーカーが読めない・壊れているときは true(保留あり側に倒す)。実害は history を
+ * 1回余分に読むことだけで、逆に倒すと不変条件が崩れて二重計上になる。
+ */
 export function hasPendingAppend(transcriptPath: string): boolean {
-  return Object.hasOwn(readPendingAppends(), transcriptPath);
-}
-
-/** append の直前に置く。失敗しても append 自体は続行する(throw しない)。 */
-export function markPendingAppend(transcriptPath: string, ingestKey: string): void {
   try {
-    const dict = readPendingAppends();
-    dict[transcriptPath] = ingestKey;
-    writePendingAppends(dict);
+    const { dict, trusted } = readPendingAppends();
+    return !trusted || Object.hasOwn(dict, transcriptPath);
   } catch (err) {
-    logError("markPendingAppend", err);
+    logError("hasPendingAppend", err);
+    return true;
   }
 }
 
-/** カーソル保存まで済んだ後に消す。消せなくても次回 history を読むだけで実害はない。 */
+/**
+ * append の直前に置く。**失敗したら throw する**(呼び出し側は append せずに中断すること)。
+ * ここを握り潰すと「マーカーが無い = カーソルに反映済み」という不変条件が崩れ、
+ * append 後にカーソル保存が失敗したケースで二重計上になる。
+ */
+export function markPendingAppend(transcriptPath: string, ingestKey: string): void {
+  const { dict } = readPendingAppends(); // trusted でなくても、このパスの保留は必ず立てる
+  dict[transcriptPath] = ingestKey;
+  writePendingAppends(dict);
+}
+
+/**
+ * カーソル保存まで済んだ後に消す。消せなくても次回 history を読むだけで実害はない。
+ * マーカーが壊れている(trusted=false)ときは、他の transcript の保留状態を失わないよう
+ * 何もしない(fail-closed のまま置く)。
+ */
 export function clearPendingAppend(transcriptPath: string): void {
   try {
-    const dict = readPendingAppends();
+    const { dict, trusted } = readPendingAppends();
+    if (!trusted) return;
     if (!Object.hasOwn(dict, transcriptPath)) return;
     delete dict[transcriptPath];
     writePendingAppends(dict);

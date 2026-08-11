@@ -24,6 +24,7 @@ import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
 import { callFingerprint } from "../src/counted-calls";
 import {
+  hasPendingAppend,
   loadCursor,
   markPendingAppend,
   pendingAppendPath,
@@ -998,6 +999,123 @@ describe("runIngest", () => {
       expect(recordB.tokens.output).toBe(15); // 40 - 25(A の分を含まない)
       expect(recordB.tokens.cacheRead).toBe(400); // 900 - 500
       expect(after.totalUSD).toBeCloseTo(usdBefore + recordB.costUSD, 10);
+    });
+
+    it("26d. 遅延サブエージェントだけが新規のときも、メインのカーソルを張り直してから収束する", async () => {
+      // 走査ルートの外に置いて track 単体の挙動を見る(便乗り取込が古いカーソルを
+      // 直してしまうと、track 自身の欠陥が隠れるため)。
+      const outside = join(tmpHome, "outside-roots", "proj");
+      mkdirSync(outside, { recursive: true });
+      const trackedPath = join(outside, "sa-only-recover.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-saonly", "sao"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+      await runTrack(stdin); // ターン0
+      const cursorC0 = readFileSync(join(tmpHome, "cursors.json"), "utf8");
+
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-saonly", "ターンA", "req_sao_A2", "msg_sao_A2", "2026-07-06T17:00:00.000Z"),
+        "utf8",
+      );
+      await runTrack(stdin); // ターンA
+      const recordA = readHistory().at(-1)!;
+      const fingerprintA = recordA.countedCalls![0];
+      const usdBefore = countedCallStats().totalUSD;
+
+      // A の append 後にカーソル保存が失敗した状態を作る。
+      writeFileSync(join(tmpHome, "cursors.json"), cursorC0, "utf8");
+      markPendingAppend(trackedPath, recordA.ingestKey!);
+
+      // メインには新規が無く、遅れて完了したサブエージェントだけが増える。
+      const agentDir = join(outside, "sa-only-recover", "subagents");
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "agent-late.jsonl"), subagentFixture("sess-saonly", "17:00:30", "17:00:31"), "utf8");
+
+      await runTrack(stdin); // SA-only 記録。ここでメインのカーソルも張り直さないと収束しない
+      expect(readHistory().at(-1)!.subagents).toBeDefined();
+
+      // 次の Stop hook(新規なし)で A が再計上されないこと。
+      await runTrack(stdin);
+
+      const after = countedCallStats();
+      expect(after.duplicates).toEqual([]);
+      const occurrencesOfA = readHistory().reduce(
+        (n, r) => n + (r.countedCalls ?? []).filter((fp) => fp === fingerprintA).length,
+        0,
+      );
+      expect(occurrencesOfA).toBe(1);
+      const saUSD = readHistory().reduce((sum, r) => sum + (r.subagents?.costUSD ?? 0), 0);
+      expect(after.totalUSD).toBeCloseTo(usdBefore + saUSD, 10);
+    });
+
+    it("26e. 保留マーカーが壊れていたら「保留あり」として扱う(fail-closed)", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "broken-marker.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-broken", "brk"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+      await runTrack(stdin); // ターン0
+      const cursorC0 = readFileSync(join(tmpHome, "cursors.json"), "utf8");
+
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-broken", "ターンA", "req_brk_A2", "msg_brk_A2", "2026-07-06T17:00:00.000Z"),
+        "utf8",
+      );
+      await runTrack(stdin);
+      const recordA = readHistory().at(-1)!;
+      const fingerprintA = recordA.countedCalls![0];
+
+      // カーソルは古いまま、マーカーは壊れている(= 保留の有無が分からない)。
+      writeFileSync(join(tmpHome, "cursors.json"), cursorC0, "utf8");
+      writeFileSync(pendingAppendPath(), "{壊れた JSON", "utf8");
+      expect(hasPendingAppend(trackedPath)).toBe(true);
+
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-broken", "ターンB", "req_brk_B2", "msg_brk_B2", "2026-07-06T18:00:00.000Z"),
+        "utf8",
+      );
+      await runTrack(stdin);
+
+      expect(countedCallStats().duplicates).toEqual([]);
+      const occurrencesOfA = readHistory().reduce(
+        (n, r) => n + (r.countedCalls ?? []).filter((fp) => fp === fingerprintA).length,
+        0,
+      );
+      expect(occurrencesOfA).toBe(1);
+      expect(readHistory().at(-1)!.prompt).toBe("ターンB");
+    });
+
+    it("26f. 保留マーカーを作れないときは append せずに終える(例外は外に出さない)", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "marker-unwritable.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-nomarker", "nmk"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+      // マーカーのパスをディレクトリにして rename を必ず失敗させる。
+      mkdirSync(join(tmpHome, "cache"), { recursive: true });
+      mkdirSync(pendingAppendPath(), { recursive: true });
+      writeFileSync(join(pendingAppendPath(), "keep"), "x", "utf8"); // 空でないディレクトリ
+
+      await expect(runTrack(stdin)).resolves.toBeUndefined(); // 例外を外に出さない
+
+      // track 経路(ingest 印の無いレコード)では記録しない。
+      const rows = readHistory().filter((r) => r.sessionId === "sess-nomarker");
+      expect(rows.filter((r) => r.ingest === undefined)).toHaveLength(0);
+
+      // transcript は残っているので ingest が後から回収する。
+      rmSync(pendingAppendPath(), { recursive: true, force: true });
+      await runIngest({ dryRun: false, offlinePricing: true });
+      const recovered = readHistory().filter((r) => r.sessionId === "sess-nomarker");
+      expect(recovered.length).toBeGreaterThan(0);
+      expect(recovered.every((r) => r.ingest === "scan")).toBe(true);
+      expect(countedCallStats().duplicates).toEqual([]);
     });
 
     it("26c. カーソル保存に失敗すると保留マーカーが残り、成功すると消える", async () => {

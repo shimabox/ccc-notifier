@@ -338,14 +338,25 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
 
     // 7. 記録 → カーソル保存(この順序固定)。
     //    クラッシュ時は「記録済み・カーソル未更新」側に倒す。逆順にすると「カーソルだけ進んで
-    //    未記録」= 恒久的なコスト取りこぼしになる。ただし前回の append 後にカーソル保存が
-    //    失敗していると、古い有効カーソルから同じ範囲を読み直して同じレコードを作ってしまう。
-    //    直近の履歴に同じ一意キーがあれば append をスキップする(カーソルだけ張り直して収束させる)。
+    //    未記録」= 恒久的なコスト取りこぼしになる。その代わり、append の前に保留マーカーを置き、
+    //    カーソル保存が全部済んでから消す。「マーカーが無い = カーソルは append を反映済み」を
+    //    保つことで、次回の track が既計上分を再計上しない。
     //    SA のカーソルはメインより後に保存する(途中クラッシュで SA 分が再集計されても、
     //    次回 seenMessageKeys で重複排除される側に倒す)。
-    markPendingAppend(transcriptPath, record.ingestKey ?? "");
+    try {
+      markPendingAppend(transcriptPath, record.ingestKey ?? "");
+    } catch (err) {
+      // マーカーを置けないまま append すると、カーソル保存が失敗したときに検出できず
+      // 二重計上になる。このターンは記録せずに終える(transcript は残るので、
+      // history 全体の指紋索引で守られている ingest が後から回収する)。
+      logError("track:pending-marker", err);
+      return;
+    }
     appendTurn(record);
-    if (agg !== null) saveCursor(transcriptPath, agg.newCursor);
+    // メインの新規 usage が無く既計上分だけだった場合(SA-only 記録)も、読み切った位置まで
+    // カーソルを進める。ここを飛ばすと古いカーソルのままマーカーだけ消え、次回に再計上される。
+    const mainCursor = agg?.newCursor ?? recoveredCursor;
+    if (mainCursor !== null) saveCursor(transcriptPath, mainCursor);
     if (sa !== null) {
       for (const nc of sa.newCursors) {
         saveCursor(nc.path, nc.cursor);
