@@ -37,12 +37,15 @@ import {
   sanitizeCursor,
   saveCursor,
   todayTotalUSD,
+  clearPendingAppend,
   floorKey,
-  historyTailHasIngestKey,
+  hasPendingAppend,
   loadHistoryIndex,
+  markPendingAppend,
 } from "./store";
 import type { FloorScope, HistoryIndex } from "./store";
-import { callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
+import { anyOf, callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
+import type { MessageKeyFilter } from "./counted-calls";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
@@ -143,9 +146,18 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //    カーソルが無い(消失・破損)ときは、そのファイルを先頭から読み直すことになる。
     //    カーソルの不在は「未計上」の証拠にならないので、history に指紋として残っている
     //    呼び出しを除外条件にする。カーソルが健全なら history は1バイトも読まない。
+    //    さらに、前回の append 後にカーソル保存が完了していない(= マーカーが残っている)ときも
+    //    カーソルは真実を反映していない。この場合カーソル自体は有効なので窓は狭いままだが、
+    //    その窓には既計上の呼び出しが混ざる。どちらの場合も history の指紋を除外条件に重ねて、
+    //    呼び出し単位で弾く(レコード単位のキー照合では、新しいターンが加わって集計範囲が
+    //    変わった時点で別キーになり、弾けない)。
+    const cursorMayBeStale = cursor === null || hasPendingAppend(transcriptPath);
     let indexCache: HistoryIndex | null = null;
     const history = (): HistoryIndex => (indexCache ??= loadHistoryIndex());
     const counted = (): Set<string> => history().countedCalls;
+    /** 計上済み呼び出しの除外条件。カーソルが信用できるときは undefined(history を読まない)。 */
+    const countedFilter = (): MessageKeyFilter | undefined =>
+      cursorMayBeStale ? messageKeyFilterOf(counted()) : undefined;
     // 指紋を持たない旧レコードぶんのフォールバック(ingest と同じ規則)。
     const sessionKey =
       (typeof input.session_id === "string" && input.session_id.length > 0
@@ -164,25 +176,27 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     let agg: (TurnAggregate & { messageKeys?: string[] }) | null;
     if (isCodex) {
       let readFrom = cursor;
-      const scanOpts = cursor === null ? { excludeEvents: counted() } : {};
+      const scanOpts = cursorMayBeStale ? { excludeEvents: counted() } : {};
       if (cursor === null) {
         const floorIso = history().legacyFloors.get(floorKey("codex", sessionKey));
         if (floorIso !== undefined) readFrom = await codexResumePointAtTs(transcriptPath, floorIso);
       }
       agg = await aggregateCodexTurn(transcriptPath, readFrom, scanOpts);
       if (agg === null) {
-        // 新規 usage 無し。カーソルを失っていたなら、読み切った位置まで張り直して
-        // 次回以降の Stop で history を読み直さずに済むようにする。
-        if (cursor === null) {
+        // 新規 usage 無し。カーソルが信用できない状態だったなら、読み切った位置まで
+        // 張り直して次回以降の Stop で history を読み直さずに済むようにする。
+        if (cursorMayBeStale) {
           const consumed = await codexConsumedCursor(transcriptPath, readFrom, scanOpts);
           if (consumed !== null) saveCursor(transcriptPath, consumed);
+          clearPendingAppend(transcriptPath);
         }
         return;
       }
-    } else if (cursor === null) {
-      const recovered = await aggregateNewTurn(transcriptPath, null, {
+    } else if (cursorMayBeStale) {
+      const recovered = await aggregateNewTurn(transcriptPath, cursor, {
         excludeMessageKeys: messageKeyFilterOf(counted()),
-        minTimestampMs: legacyFloorMs("claude"),
+        // 指紋を持たない旧レコードぶんのフォールバックは、先頭から読み直すときだけ効かせる。
+        minTimestampMs: cursor === null ? legacyFloorMs("claude") : null,
         returnEmpty: true,
       });
       if (recovered !== null && recovered.apiCalls === 0) {
@@ -210,8 +224,9 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         if (agg !== null && "messageKeys" in agg) {
           for (const key of (agg as TurnAggregate & { messageKeys: string[] }).messageKeys) excluded.add(key);
         }
+        const staleFilter = countedFilter();
         sa = await collectSubagentUsage(transcriptPath, {
-          excludeMessageKeys: excluded,
+          excludeMessageKeys: staleFilter === undefined ? excluded : anyOf([excluded, staleFilter]),
           // agent ファイル側のカーソルだけを失っている場合もあるので、そのファイルに限って
           // history 由来の指紋と旧レコード向けの下限で弾く
           // (すべてのカーソルが健全なら一度も呼ばれない = history を読まない)。
@@ -230,6 +245,7 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       // calls. Persist its consumed cursor without creating a zero-value row.
       if (recoveredCursor !== null) saveCursor(transcriptPath, recoveredCursor);
       for (const nc of sa?.newCursors ?? []) saveCursor(nc.path, nc.cursor);
+      if (cursorMayBeStale) clearPendingAppend(transcriptPath);
       return;
     }
 
@@ -327,18 +343,16 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     //    直近の履歴に同じ一意キーがあれば append をスキップする(カーソルだけ張り直して収束させる)。
     //    SA のカーソルはメインより後に保存する(途中クラッシュで SA 分が再集計されても、
     //    次回 seenMessageKeys で重複排除される側に倒す)。
-    if (record.ingestKey !== undefined && historyTailHasIngestKey(record.ingestKey)) {
-      // 同じターンが既に記録済み。通知も再送しない(前回の append 時に済んでいる)。
-      hasMainUsage = false;
-    } else {
-      appendTurn(record);
-    }
+    markPendingAppend(transcriptPath, record.ingestKey ?? "");
+    appendTurn(record);
     if (agg !== null) saveCursor(transcriptPath, agg.newCursor);
     if (sa !== null) {
       for (const nc of sa.newCursors) {
         saveCursor(nc.path, nc.cursor);
       }
     }
+    // ここまで来たらカーソルは append を反映している。
+    clearPendingAppend(transcriptPath);
     } finally {
       commitLock.release();
     }

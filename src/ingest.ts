@@ -16,7 +16,7 @@ import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
 import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome } from "./codex/env";
 import { normalizeCodexOriginator } from "./codex/originator";
-import { codexConsumedCursor, codexResumePointAtTs, splitIntoCodexTurnDrafts } from "./codex/transcript";
+import { codexResumePointAtTs, scanCodexTurns } from "./codex/transcript";
 import { listCodexRollouts } from "./codex/sessions";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
@@ -178,16 +178,18 @@ async function claudeMtimeSignature(filePath: string): Promise<number> {
   let entries;
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true });
-  } catch {
-    return newest; // サブエージェントディレクトリが無い(大多数)
+  } catch (err) {
+    // サブエージェントディレクトリが無い(大多数)。読めない場合は判定材料が欠けるので伝播する。
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return newest;
+    throw err;
   }
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.startsWith("agent-") || !entry.name.endsWith(".jsonl")) continue;
     try {
       const m = (await fsp.stat(join(dir, entry.name))).mtimeMs;
       if (m > newest) newest = m;
-    } catch {
-      // 走査中に消えた等。他のファイルで判定を続ける
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err; // 走査中に消えた分だけ無視する
     }
   }
   return newest;
@@ -526,15 +528,17 @@ async function processFiles(
     // Codex 側は既に指紋そのものを渡してくるので、集合をそのまま述語に使う
     // (Claude 側の messageKey → 指紋の変換は挟まない)。
     const scanOpts = { excludeEvents: historyIndex().countedCalls };
-    const drafts = await splitIntoCodexTurnDrafts(filePath, cursor, scanOpts);
-    if (drafts === null) {
-      // 新規 usage 無し(または読めない)。読み切った位置までカーソルだけ進める。
-      const consumed = await codexConsumedCursor(filePath, cursor, scanOpts);
-      if (consumed === null) throw new Error(`rollout を読み込めませんでした: ${filePath}`);
-      commit(filePath, [], consumed);
+    // 分割とカーソルは1回の走査から同時に得る。別々に読むと、片方だけ失敗したときに
+    // 「usage を記録せずカーソルだけ進める」= その範囲の恒久的な取りこぼしになる。
+    const scan = await scanCodexTurns(filePath, cursor, scanOpts);
+    if (scan === null) throw new Error(`rollout を読み込めませんでした: ${filePath}`);
+    const drafts = scan.drafts;
+    if (drafts.length === 0) {
+      // 新規 usage 無し。読み切った位置までカーソルだけ進める。
+      commit(filePath, [], scan.newCursor);
       return;
     }
-    const windowCursor = drafts[drafts.length - 1].agg.newCursor;
+    const windowCursor = scan.newCursor;
 
     if (drafts[0].isSubagentRollout) {
       // Codex child rollout は利用記録のみで料金未集計という公開仕様に合わせる(sweep と同じ扱い)。
@@ -555,7 +559,7 @@ async function processFiles(
     const target =
       floor === null
         ? drafts
-        : ((await splitIntoCodexTurnDrafts(filePath, await codexResumePointAtTs(filePath, floor), scanOpts)) ?? []);
+        : ((await scanCodexTurns(filePath, await codexResumePointAtTs(filePath, floor), scanOpts))?.drafts ?? []);
     commit(filePath, target.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
   };
 
@@ -569,8 +573,14 @@ async function processFiles(
       let mtimeMs: number;
       try {
         mtimeMs = await signature(filePath);
-      } catch {
-        continue; // 発見直後に消えた等。次回の走査に委ねる
+      } catch (err) {
+        // 発見直後に消えた(ENOENT)なら次回の走査に委ねる。権限エラー等は失敗として数える
+        // (黙って飛ばすと「走査したが0件」と区別できず、取りこぼしに気付けない)。
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          result.failures += 1;
+          logError(context, err);
+        }
+        continue;
       }
       // mtime プリフィルタはカーソルがあるファイルにだけ効かせる。カーソルが無いファイルは
       // まだ取り込みが確定していない(sweep のリセット後・cursors.json の消失など)ので、

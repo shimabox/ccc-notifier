@@ -23,7 +23,14 @@ import { notifyIngestSummary, runIngest } from "../src/ingest";
 import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
 import { callFingerprint } from "../src/counted-calls";
-import { loadCursor, readConfig, sanitizeCursor, writeMuteState } from "../src/store";
+import {
+  loadCursor,
+  markPendingAppend,
+  pendingAppendPath,
+  readConfig,
+  sanitizeCursor,
+  writeMuteState,
+} from "../src/store";
 import type { Config, TurnRecord } from "../src/types";
 
 const FIXTURE_TRANSCRIPT = fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url));
@@ -891,30 +898,130 @@ describe("runIngest", () => {
       expect(sanitizeCursor(loadCursor(trackedPath))).not.toBeNull(); // カーソルは張り直される
     });
 
-    it("26. カーソル保存に失敗した後(記録済み・カーソル未更新)でも同じターンを再 append しない", async () => {
+    /** history 全体で各呼び出し指紋が1回しか現れないこと + 総コスト。 */
+    function countedCallStats(): { duplicates: string[]; totalUSD: number; rows: number } {
+      const seen = new Map<string, number>();
+      let totalUSD = 0;
+      const rows = readHistory();
+      for (const rec of rows) {
+        totalUSD += rec.costUSD + (rec.subagents?.costUSD ?? 0);
+        for (const fp of rec.countedCalls ?? []) seen.set(fp, (seen.get(fp) ?? 0) + 1);
+      }
+      return {
+        duplicates: [...seen.entries()].filter(([, n]) => n > 1).map(([fp]) => fp),
+        totalUSD,
+        rows: rows.length,
+      };
+    }
+
+    it("26. append 成功・カーソル保存失敗の後に新しいターンが来ても、既計上分を再計上しない", async () => {
       const trackedPath = join(cliProjects, "proj-cli", "crash-window.jsonl");
       writeFileSync(trackedPath, transcriptFixture("sess-crash", "csh"), "utf8");
       const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
         '"__TRANSCRIPT_PATH__"',
         () => JSON.stringify(trackedPath),
       );
-      await runTrack(stdin);
-      const cursorsAfterTurn1 = readFileSync(join(tmpHome, "cursors.json"), "utf8");
+      await runTrack(stdin); // ターン0
+      const cursorC0 = readFileSync(join(tmpHome, "cursors.json"), "utf8");
 
+      // ターンA を追記して記録する。
       appendFileSync(
         trackedPath,
-        claudeTurnLines("sess-crash", "2つめ", "req_csh_X", "msg_csh_X", "2026-07-06T17:00:00.000Z"),
+        claudeTurnLines("sess-crash", "ターンA", "req_csh_A2", "msg_csh_A2", "2026-07-06T17:00:00.000Z"),
         "utf8",
       );
       await runTrack(stdin);
-      const rows = readHistory().filter((r) => r.sessionId === "sess-crash");
-      expect(rows).toHaveLength(2);
+      const recordA = readHistory().at(-1)!;
+      expect(recordA.apiCalls).toBe(1);
+      const usdBefore = countedCallStats().totalUSD;
 
-      // appendTurn は成功したが saveCursor が失敗した状態を再現する。
-      writeFileSync(join(tmpHome, "cursors.json"), cursorsAfterTurn1, "utf8");
+      // A の append 後にカーソル保存が失敗した状態: カーソルは C0 のまま、保留マーカーが残る。
+      writeFileSync(join(tmpHome, "cursors.json"), cursorC0, "utf8");
+      markPendingAppend(trackedPath, recordA.ingestKey!);
+
+      // さらにターンB が来て次の Stop hook が発火する(集計範囲は A+B になる)。
+      appendFileSync(
+        trackedPath,
+        claudeTurnLines("sess-crash", "ターンB", "req_csh_B2", "msg_csh_B2", "2026-07-06T18:00:00.000Z"),
+        "utf8",
+      );
       await runTrack(stdin);
 
-      expect(readHistory().filter((r) => r.sessionId === "sess-crash")).toHaveLength(2);
+      const after = countedCallStats();
+      expect(after.duplicates).toEqual([]); // 各呼び出しの指紋は1回だけ
+      const recordB = readHistory().at(-1)!;
+      expect(recordB.apiCalls).toBe(1); // A+B ではなく B だけ
+      expect(recordB.prompt).toBe("ターンB");
+      expect(after.totalUSD).toBeCloseTo(usdBefore + recordB.costUSD, 10); // 総額は A+B の重複を含まない
+      expect(existsSync(pendingAppendPath()) ? readFileSync(pendingAppendPath(), "utf8") : "{}").not.toContain(
+        trackedPath,
+      );
+    });
+
+    it("26b. Codex でも、カーソル保存失敗の後に新しいターンが来て再計上しない", async () => {
+      const sessionId = "01234567-cccc-7000-8000-000000000026";
+      const rolloutPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-crash.jsonl");
+      const lines = [
+        `{"timestamp":"2026-07-12T09:00:00.000Z","type":"session_meta","payload":{"id":"${sessionId}","cwd":"/home/user/p","originator":"codex-tui","source":"cli"}}`,
+        '{"timestamp":"2026-07-12T09:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/home/user/p"}}',
+      ];
+      const turn = (mm: string, input: number, cached: number, output: number, id: string): string[] => [
+        `{"timestamp":"2026-07-12T09:${mm}:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"${id}"}}`,
+        `{"timestamp":"2026-07-12T09:${mm}:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":${input},"cached_input_tokens":${cached},"output_tokens":${output}}}}}`,
+        `{"timestamp":"2026-07-12T09:${mm}:06.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"${id}"}}`,
+      ];
+      writeFileSync(rolloutPath, [...lines, ...turn("10", 1000, 200, 10, "t0")].join("\n") + "\n", "utf8");
+
+      const payload = JSON.parse(readFileSync(FIXTURE_CODEX_STOP_PAYLOAD, "utf8")) as Record<string, unknown>;
+      payload.transcript_path = rolloutPath;
+      payload.session_id = sessionId;
+      const stdin = JSON.stringify(payload);
+
+      await runTrack(stdin, { codex: true }); // ターン0
+      const cursorC0 = readFileSync(join(tmpHome, "cursors.json"), "utf8");
+
+      appendFileSync(rolloutPath, turn("20", 2500, 500, 25, "tA").join("\n") + "\n", "utf8");
+      await runTrack(stdin, { codex: true }); // ターンA
+      const recordA = readHistory().at(-1)!;
+      expect(recordA.tokens.output).toBe(15); // 25 - 10(差分)
+      const usdBefore = countedCallStats().totalUSD;
+
+      writeFileSync(join(tmpHome, "cursors.json"), cursorC0, "utf8");
+      markPendingAppend(rolloutPath, recordA.ingestKey!);
+
+      appendFileSync(rolloutPath, turn("30", 4000, 900, 40, "tB").join("\n") + "\n", "utf8");
+      await runTrack(stdin, { codex: true });
+
+      const after = countedCallStats();
+      expect(after.duplicates).toEqual([]);
+      const recordB = readHistory().at(-1)!;
+      expect(recordB.tokens.output).toBe(15); // 40 - 25(A の分を含まない)
+      expect(recordB.tokens.cacheRead).toBe(400); // 900 - 500
+      expect(after.totalUSD).toBeCloseTo(usdBefore + recordB.costUSD, 10);
+    });
+
+    it("26c. カーソル保存に失敗すると保留マーカーが残り、成功すると消える", async () => {
+      const trackedPath = join(cliProjects, "proj-cli", "marker.jsonl");
+      writeFileSync(trackedPath, transcriptFixture("sess-marker", "mrk"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(trackedPath),
+      );
+
+      // cursors.json をディレクトリにして saveCursor を確実に失敗させる。
+      rmSync(join(tmpHome, "cursors.json"), { force: true });
+      mkdirSync(join(tmpHome, "cursors.json"), { recursive: true });
+      await runTrack(stdin); // runTrack は例外を logError に閉じ込めるので投げない
+      expect(readHistory().filter((r) => r.sessionId === "sess-marker")).toHaveLength(1); // append は済んでいる
+      expect(sanitizeCursor(loadCursor(trackedPath))).toBeNull(); // カーソルは保存できていない
+      expect(readFileSync(pendingAppendPath(), "utf8")).toContain(trackedPath); // マーカーが残る
+
+      // 書き込めるように戻して再実行すると、再計上せずマーカーが消える。
+      rmSync(join(tmpHome, "cursors.json"), { recursive: true, force: true });
+      await runTrack(stdin);
+      expect(readHistory().filter((r) => r.sessionId === "sess-marker")).toHaveLength(1);
+      expect(countedCallStats().duplicates).toEqual([]);
+      expect(readFileSync(pendingAppendPath(), "utf8")).not.toContain(trackedPath);
     });
 
     it("24. カーソルが健全なら track は history の指紋を参照しない", async () => {

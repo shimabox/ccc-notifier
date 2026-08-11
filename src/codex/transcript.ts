@@ -484,6 +484,25 @@ export async function codexConsumedCursor(
 }
 
 /**
+ * ターン分割と「消費し切った位置のカーソル」を1回の走査で同時に返す。
+ *
+ * 分割とカーソル取得を別々に呼ぶと、片方だけが読み取りに失敗したときに
+ * 「usage を記録しないままカーソルだけ進める」= その範囲の恒久的な取りこぼしが起きる。
+ * 読めなければ null(呼び出し側は失敗として扱う)。新規 usage が無ければ drafts は空。
+ */
+export async function scanCodexTurns(
+  rolloutPath: string,
+  cursor: Cursor | null,
+  opts: CodexScanOptions = {},
+): Promise<{ drafts: CodexTurnDraft[]; newCursor: Cursor } | null> {
+  const scan = await scanWindow(rolloutPath, cursor, opts);
+  if (scan === null) return null;
+  const newCursor = windowCursor(scan);
+  if (isZeroTotals(scan.acc)) return { drafts: [], newCursor };
+  return { drafts: draftsFromScan(scan), newCursor };
+}
+
+/**
  * 「timestamp が floorTs 以前の行をすべて消費し切った」状態の再開カーソルを作る。
  *
  * rollout は累積カウンタの差分(step = total − prev)で集計するため、行を読み飛ばすだけでは
@@ -554,7 +573,11 @@ export async function splitIntoCodexTurnDrafts(
 ): Promise<CodexTurnDraft[] | null> {
   const scan = await scanWindow(rolloutPath, cursor, opts);
   if (scan === null || isZeroTotals(scan.acc)) return null;
+  return draftsFromScan(scan);
+}
 
+/** 走査結果を task_complete 境界のドラフト列にする(acc が非ゼロであること)。 */
+function draftsFromScan(scan: WindowScan): CodexTurnDraft[] {
   // usage を持つ確定セグメントだけがターンになる(ゼロのセグメントは境界ごと読み捨て)。
   const picked = scan.segments.filter((s) => !isZeroTotals(s.acc));
 

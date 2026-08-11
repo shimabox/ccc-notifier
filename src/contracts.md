@@ -498,10 +498,16 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   従来どおり突合する(カーソルを持たないファイル・agent ファイルにだけ適用する)。
 - `IngestResult` の `totalUSD` / `totalJPY` / `bySurface` はサブエージェント分を含む
   (= 実際に取り込んだ金額。通知しきい値 `minNotifyUSD` の判定対象もこれ)。
-- `track`(Stop hook)も同じ原則で動く。**カーソルが健全なとき(`sanitizeCursor` が非 null)は
-  history を1バイトも読まない**。カーソルが欠損・破損しているときだけ history 由来の指紋と
-  旧レコード向けの ts 下限を除外条件にし、既計上分しか無ければレコードを作らずカーソルだけ
-  張り直す。サブエージェント側は「カーソルを持たない agent ファイルに遭遇したときだけ」
-  遅延して history を読む。
+- `track`(Stop hook)も同じ原則で動く。**カーソルが真実を反映していると分かるときは
+  history を1バイトも読まない**。反映していない可能性があるのは次の2つで、このときだけ
+  history 由来の指紋(と、先頭から読み直す場合は旧レコード向けの ts 下限)を
+  **呼び出し単位の除外条件**として重ねる。既計上分しか無ければレコードを作らずカーソルだけ張り直す。
+  - カーソルが欠損・破損している(`sanitizeCursor` が null)
+  - 保留マーカー(`cache/pending-append.json`)にその transcript が残っている
+- 保留マーカーは `appendTurn` の**前**に置き、カーソル保存が全部済んでから消す。したがって
+  「マーカーが無い = 直前の append はカーソルに反映済み」が常に成り立つ。判定は「直近何件」
+  「何バイト」といった窓に依存しないので、間に何件 append されても、集計範囲が変わって
+  `ingestKey` が別値になっても破れない。マーカーが残ったまま実際には append 前に落ちていた
+  場合は、history に指紋が無いので除外が起きず、そのターンは通常どおり記録される。
 - `doctor` は同一 `ingestKey` を持つレコードが複数あれば warn する(旧レコードは従来どおり
   同一 `sessionId` + `ts` で検知)。
