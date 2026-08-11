@@ -3,9 +3,8 @@
 // 既定は CLI 用の projectsRoot(surface=cli)1件と、macOS の場合のみ Claude デスクトップアプリの
 // サンドボックス transcript ルート(surface=desktop)。デスクトップルートは
 // `~/Library/Application Support/Claude/local-agent-mode-sessions` 配下を bounded 再帰探索して
-// `.claude/projects` ディレクトリを見つける(実機確認では
-// `local-agent-mode-sessions/<id>/<id>/local_<uuid>/.claude/projects` という深さだったが、
-// 非公開レイアウトでアプリ更新により変わり得るため、固定深さを仮定せず bounded walk にする)。
+// `.claude/projects` ディレクトリを見つける(非公開レイアウトでアプリ更新により深さが変わり得るため、
+// 固定深さを仮定せず bounded walk にする)。
 // 環境変数 CCCN_CLAUDE_DESKTOP_ROOTS(path.delimiter 区切りのリスト)が設定されていれば、
 // それを desktop ルートとして採用する(自動検出を置き換える)。
 // 存在しないルートは黙ってスキップする(呼び出し側はルートの実在を気にしなくてよい)。
@@ -41,7 +40,7 @@ async function isDirectory(path: string): Promise<boolean> {
 }
 
 /** Claude デスクトップのサンドボックス root 配下から `.claude/projects` ディレクトリを bounded 再帰探索する。 */
-async function discoverDesktopProjectRoots(sessionsRoot: string): Promise<string[]> {
+export async function discoverDesktopProjectRoots(sessionsRoot: string): Promise<string[]> {
   const found: string[] = [];
   const walk = async (dir: string, depth: number): Promise<void> => {
     if (depth > DESKTOP_DISCOVERY_MAX_DEPTH) return;
@@ -69,6 +68,11 @@ async function discoverDesktopProjectRoots(sessionsRoot: string): Promise<string
 export interface ClaudeTranscriptRootsOptions {
   /** --projects 等での明示上書き(sweep の既存 --projects オプション相当)。 */
   projectsOverride?: string | null;
+  /**
+   * デスクトップアプリのサンドボックス root(既定は macOS 固定パス)。
+   * 明示されたときは、そのパス配下の bounded 探索を platform に依らず行う。
+   */
+  desktopSessionsRoot?: string;
 }
 
 /**
@@ -90,12 +94,14 @@ export async function claudeTranscriptRoots(
     return roots;
   }
 
-  if (process.platform === "darwin") {
-    const sessionsRoot = defaultClaudeDesktopSessionsRoot();
-    if (await isDirectory(sessionsRoot)) {
-      for (const p of await discoverDesktopProjectRoots(sessionsRoot)) {
-        roots.push({ path: p, surface: "desktop" });
-      }
+  // 自動探索は macOS のみ(既定パスが macOS のサンドボックス配置に依存するため)。
+  // sessionsRoot が明示されている場合は platform を問わずそこを探索する。
+  const explicitSessionsRoot = opts.desktopSessionsRoot;
+  const sessionsRoot =
+    explicitSessionsRoot ?? (process.platform === "darwin" ? defaultClaudeDesktopSessionsRoot() : null);
+  if (sessionsRoot !== null && (await isDirectory(sessionsRoot))) {
+    for (const p of await discoverDesktopProjectRoots(sessionsRoot)) {
+      roots.push({ path: p, surface: "desktop" });
     }
   }
 

@@ -30,6 +30,7 @@ const FIXTURE_DESKTOP_TRANSCRIPT = fileURLToPath(
 const FIXTURE_CODEX_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
 const FIXTURE_CODEX_DESKTOP_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-desktop.jsonl", import.meta.url));
 const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
+const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
 
 let tmpHome: string;
 let cliProjects: string;
@@ -93,8 +94,9 @@ afterEach(() => {
 
 /**
  * cursors.json から1ファイル分のエントリだけを消す(cursors.json のリセット・sweep・
- * transcript のパス変更・別マシンからの移行で実際に起きる「history にはあるがカーソルが無い」状態)。
- * mtime プリフィルタで走査対象から外れてしまわないよう、キャッシュも一緒に落とす。
+ * transcript のパス変更・別マシンからの移行で起きる「history にはあるがカーソルが無い」状態)。
+ * mtime キャッシュはそのまま残す — カーソルの無いファイルは mtime が動いていなくても
+ * 走査対象になる、という前提ごと検証するため。
  */
 function dropCursorEntry(transcriptPath: string): void {
   const file = join(tmpHome, "cursors.json");
@@ -102,7 +104,7 @@ function dropCursorEntry(transcriptPath: string): void {
   expect(Object.hasOwn(dict, transcriptPath)).toBe(true);
   delete dict[transcriptPath];
   writeFileSync(file, JSON.stringify(dict), "utf8");
-  rmSync(join(tmpHome, "cache", "ingest-mtimes.json"), { force: true });
+  expect(existsSync(join(tmpHome, "cache", "ingest-mtimes.json"))).toBe(true);
 }
 
 /** 実ユーザープロンプト行 + assistant 行 = Claude transcript のターン1つ分。 */
@@ -158,6 +160,14 @@ function codexTurnLines(tsPrefix: string, input: number, cached: number, output:
       `{"timestamp":"${tsPrefix}:06.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"${turnId}"}}`,
     ].join("\n") + "\n"
   );
+}
+
+/** サブエージェント fixture を、指定セッション・指定時刻に読み替えて返す。 */
+function subagentFixture(sessionId: string, ts1: string, ts2: string): string {
+  return readFileSync(FIXTURE_SUBAGENT, "utf8")
+    .replaceAll('"sessionId":"sess-1"', `"sessionId":"${sessionId}"`)
+    .replaceAll("2026-07-06T10:00:20.000Z", `2026-07-06T${ts1}.000Z`)
+    .replaceAll("2026-07-06T10:00:21.000Z", `2026-07-06T${ts2}.000Z`);
 }
 
 function readHistory(): TurnRecord[] {
@@ -247,13 +257,9 @@ describe("runIngest", () => {
     expect(real.records.length).toBe(dry.records.length);
   });
 
-  // 回帰テスト(2026-08-09 本番事故): track が既に完全に処理済みの transcript を、
-  // ingest が cursor を見失ってファイル先頭から丸ごと再集計し、apiCalls/costUSD が
-  // 桁違いに水増しされた重複レコードを追加する事故が実際に発生した(既存カーソルは
-  // 存在するのに ingest 側の読み取りが効かず、cursor=null 相当の全件再集計になっていた)。
-  // track が cursor を書いた「後」に ingest が同じルートを走査しても、新規レコードは
-  // 0件でなければならない(= track と ingest は同じ cursors.json を真実源として共有する)。
-  it("6. 回帰: track が既にカーソルを保存済みの transcript を ingest が走査しても新規0件(二重計上しない)", async () => {
+  // track と ingest は同じ cursors.json を真実源として共有する。track が cursor を書いた
+  // 「後」に ingest が同じルートを走査しても、新規レコードは0件でなければならない。
+  it("6. track が既にカーソルを保存済みの transcript を ingest が走査しても新規0件(二重計上しない)", async () => {
     // 1. track が(cli ルート内の)transcript を通常どおり最初から最後まで処理し、
     //    history 1行 + cursors.json にオフセット/lastTs/seenMessageKeys 込みの正しいカーソルを残す。
     const trackedPath = join(cliProjects, "proj-cli", "already-tracked-by-hook.jsonl");
@@ -288,11 +294,10 @@ describe("runIngest", () => {
   });
 
   // カーソルの有無は「取り込み済みか」の証拠にならない。cursors.json のリセット・sweep・
-  // パス変更・別マシンからの移行で「history には記録済みだがカーソルだけ無い」状態が生まれ、
-  // その状態の集計はファイル全体を1ターンとして読む。history 側の ts と突合しない限り、
-  // 記録済みのターンがそのまま重複レコードになる(2026-08-09 の本番事故の形)。
-  // テスト6はカーソルを残したままなのでこの経路を通らない。
-  it("7. 回帰: history に記録済みで cursors にエントリが無い Claude transcript を丸ごと再取り込みしない", async () => {
+  // パス変更・別マシンからの移行では「history には記録済みだがカーソルだけ無い」状態になる。
+  // その状態の集計はファイル全体を読むため、history 側の ts と突合しない限り記録済みのターンが
+  // そのまま重複レコードになる。テスト6はカーソルを残したままなのでこの経路を通らない。
+  it("7. history に記録済みで cursors にエントリが無い Claude transcript を丸ごと再取り込みしない", async () => {
     const lostPath = join(cliProjects, "proj-cli", "cursor-lost.jsonl");
     writeFileSync(
       lostPath,
@@ -349,7 +354,7 @@ describe("runIngest", () => {
     expect(fresh[0].apiCalls).toBe(1); // 追記した1件だけ(ファイル全体の 3 ではない)
   });
 
-  it("8. 回帰: history に記録済みで cursors にエントリが無い Codex rollout を丸ごと再取り込みしない", async () => {
+  it("8. history に記録済みで cursors にエントリが無い Codex rollout を丸ごと再取り込みしない", async () => {
     const rolloutPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-cli.jsonl");
     const sessionId = "01234567-aaaa-7000-8000-000000000001";
 
@@ -497,6 +502,78 @@ describe("runIngest", () => {
     expect(retried.skippedByMtime).toBe(0); // 前回失敗分は mtime プリフィルタで飛ばさない
     expect(retried.records.length).toBeGreaterThan(0);
     expect(retried.failures).toBe(0);
+  });
+
+  // mtime キャッシュはカーソルのあるファイルにしか効かせない。sweep が history / cursors を
+  // 消した後は、transcript の mtime が動いていなくても再取り込みの対象になる。
+  it("13. cursors.json を失ったファイルは mtime が変わっていなくても走査対象になる", async () => {
+    await runIngest({ dryRun: false, offlinePricing: true });
+    const cached = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(cached.scannedFiles).toBe(0); // カーソルがある間は mtime プリフィルタが効く
+
+    // sweep 相当のリセット(history / cursors だけを消し、mtime キャッシュは残す)。
+    rmSync(join(tmpHome, "history.jsonl"), { force: true });
+    rmSync(join(tmpHome, "cursors.json"), { force: true });
+    expect(existsSync(join(tmpHome, "cache", "ingest-mtimes.json"))).toBe(true);
+
+    const rebuilt = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(rebuilt.scannedFiles).toBeGreaterThan(0);
+    expect(rebuilt.records.length).toBeGreaterThan(0);
+  });
+
+  // サブエージェント(<transcript>/subagents/agent-*.jsonl)は親ターンへ合算する。
+  // hook 経路(track)と同じ回収をしないと、取り込み経路によって同じセッションの金額が変わる。
+  it("14. scan 由来のレコードにもサブエージェント分が合算される(二重計上しない)", async () => {
+    const parentPath = join(cliProjects, "proj-cli", "with-subagents.jsonl");
+    writeFileSync(
+      parentPath,
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-sa"'),
+      "utf8",
+    );
+    const agentDir = join(cliProjects, "proj-cli", "with-subagents", "subagents");
+    mkdirSync(agentDir, { recursive: true });
+    // 親の最終ターン(10:00:12)より前に完了した agent = その親ターンへ合算される。
+    writeFileSync(join(agentDir, "agent-aaa.jsonl"), subagentFixture("sess-sa", "10:00:09", "10:00:10"), "utf8");
+
+    const first = await runIngest({ dryRun: false, offlinePricing: true });
+    const withSa = first.records.filter((r) => r.sessionId === "sess-sa" && r.subagents !== undefined);
+    expect(withSa).toHaveLength(1);
+    expect(withSa[0].subagents!.apiCalls).toBeGreaterThan(0);
+    expect(withSa[0].subagents!.agentFiles).toBe(1);
+    expect(withSa[0].subagents!.costUSD).toBeGreaterThan(0);
+    // メインの costUSD には SA 分を足さない(通知額を変えない既存仕様)。
+    expect(withSa[0].costUSD).toBeGreaterThan(0);
+
+    // 2回目は SA 側にも新規が無く、二重計上されない。
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.sessionId === "sess-sa")).toHaveLength(0);
+    const saRows = readHistory().filter((r) => r.sessionId === "sess-sa" && r.subagents !== undefined);
+    expect(saRows).toHaveLength(1);
+  });
+
+  it("15. カーソルを失っても、記録済みのサブエージェント分を二重計上しない", async () => {
+    const parentPath = join(cliProjects, "proj-cli", "sa-cursor-lost.jsonl");
+    writeFileSync(
+      parentPath,
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8").replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-sa-lost"'),
+      "utf8",
+    );
+    const agentDir = join(cliProjects, "proj-cli", "sa-cursor-lost", "subagents");
+    mkdirSync(agentDir, { recursive: true });
+    const agentPath = join(agentDir, "agent-bbb.jsonl");
+    writeFileSync(agentPath, subagentFixture("sess-sa-lost", "10:00:09", "10:00:10"), "utf8");
+
+    await runIngest({ dryRun: false, offlinePricing: true });
+    const before = readHistory().filter((r) => r.sessionId === "sess-sa-lost");
+    expect(before.filter((r) => r.subagents !== undefined)).toHaveLength(1);
+
+    // 親も agent 側もカーソルを失った状態(cursors.json のリセット相当)。
+    dropCursorEntry(parentPath);
+    dropCursorEntry(agentPath);
+
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.sessionId === "sess-sa-lost")).toHaveLength(0);
+    expect(readHistory().filter((r) => r.sessionId === "sess-sa-lost")).toHaveLength(before.length);
   });
 });
 

@@ -35,8 +35,10 @@ import {
   saveAllCursors,
   sanitizeCursor,
 } from "./store";
-import { splitIntoTurnDrafts } from "./sweep";
+import { attachSubagentGroups, splitIntoTurnDrafts } from "./sweep";
 import type { TurnDraft } from "./sweep";
+import { collectSubagentUsage } from "./subagents";
+import type { SubagentUsage } from "./subagents";
 import type {
   Config,
   Cursor,
@@ -159,14 +161,22 @@ function saveIngestMtimeCache(cache: IngestMtimeCache): void {
 // 「history に記録済みなのにカーソルが無い」状態になる。カーソル不在のファイルは、history 側の
 // 「そのセッションで記録済みの最後の ts」を下限にして、それより後だけを取り込む。
 //
+// サブエージェント分の下限は別に持つ。SA は親ターンへ合算されるため、親ターンが記録済みでも
+// その時点で SA が回収されていたとは限らない(agent ファイルが親の最後の Stop より後に
+// 書かれた場合など)。親の下限で切ると未記録の SA まで落ちるので、SA については
+// 「subagents ブロックを持つレコードの最後の ts」を下限にする。
+//
 // history.jsonl は数千行・数MBになるので、読み込みは遅延1回(カーソル不在のファイルを実際に
 // 処理したときだけ)。全ファイルにカーソルがある定常状態では1バイトも読まない。
 
-/** key = source + sessionId、value = そのセッションで記録済みの最後の ts(正規化 ISO)。 */
+/** key = scope + sessionId、value = そのセッションで記録済みの最後の ts(正規化 ISO)。 */
 type HistoryFloors = Map<string, string>;
 
-function floorKey(source: "claude" | "codex", sessionId: string): string {
-  return `${source}\u0000${sessionId}`;
+/** claude / codex = メインターン、claude-sa = サブエージェント分を含むターン。 */
+type FloorScope = "claude" | "codex" | "claude-sa";
+
+function floorKey(scope: FloorScope, sessionId: string): string {
+  return `${scope}\u0000${sessionId}`;
 }
 
 function loadHistorySessionFloors(): HistoryFloors {
@@ -179,7 +189,7 @@ function loadHistorySessionFloors(): HistoryFloors {
   }
   for (const line of raw.split("\n")) {
     if (line.length === 0) continue;
-    let rec: { sessionId?: unknown; ts?: unknown; source?: unknown };
+    let rec: { sessionId?: unknown; ts?: unknown; source?: unknown; subagents?: unknown };
     try {
       rec = JSON.parse(line) as typeof rec;
     } catch {
@@ -192,9 +202,14 @@ function loadHistorySessionFloors(): HistoryFloors {
     if (!Number.isFinite(ms)) continue;
     // transcript 側の ts と文字列比較するため、表記ゆれで大小が狂わないよう正規化して持つ。
     const iso = new Date(ms).toISOString();
-    const key = floorKey(rec.source === "codex" ? "codex" : "claude", sessionId);
-    const cur = floors.get(key);
-    if (cur === undefined || cur < iso) floors.set(key, iso);
+    const isCodex = rec.source === "codex";
+    const keys: FloorScope[] = isCodex ? ["codex"] : ["claude"];
+    if (!isCodex && rec.subagents !== undefined && rec.subagents !== null) keys.push("claude-sa");
+    for (const scope of keys) {
+      const key = floorKey(scope, sessionId);
+      const cur = floors.get(key);
+      if (cur === undefined || cur < iso) floors.set(key, iso);
+    }
   }
   return floors;
 }
@@ -394,17 +409,27 @@ async function processFiles(
   let cursorsChanged = false;
 
   let floors: HistoryFloors | null = null;
-  const recordedFloor = (source: "claude" | "codex", sessionId: string): string | null => {
+  const recordedFloor = (scope: FloorScope, sessionId: string): string | null => {
     if (sessionId.length === 0) return null; // セッション不明のファイルは突合できない
     floors ??= loadHistorySessionFloors();
-    return floors.get(floorKey(source, sessionId)) ?? null;
+    return floors.get(floorKey(scope, sessionId)) ?? null;
   };
 
-  /** 取り込んだレコード群を history へ書き、カーソルを1回だけ進める(1ターン1行)。 */
-  const commit = (filePath: string, records: TurnRecord[], newCursor: Cursor): void => {
+  /**
+   * 取り込んだレコード群を history へ書き、カーソルを進める(1ターン1行)。
+   * 記録が先・カーソルが後(track / sweep と同じ順序)。サブエージェント側のカーソルは
+   * メインより後に進める(途中で落ちても次回 seenMessageKeys で重複排除される側に倒す)。
+   */
+  const commit = (
+    filePath: string,
+    records: TurnRecord[],
+    newCursor: Cursor,
+    subagentCursors: Array<{ path: string; cursor: Cursor }> = [],
+  ): void => {
     if (!dryRun) {
       for (const rec of records) appendTurn(rec);
       cursorsDict[filePath] = newCursor;
+      for (const nc of subagentCursors) cursorsDict[nc.path] = nc.cursor;
       cursorsChanged = true;
     }
     for (const rec of records) addRecord(result, rec);
@@ -422,27 +447,39 @@ async function processFiles(
     // カーソルが無いファイルは history 側の記録済み ts を下限にして読み直す。
     // 下限の引き当てに sessionId が要るので、まず素の分割で sessionId を得る。
     let split = await splitIntoTurnDrafts(filePath, cursor);
+    // sessionId は「下限で切る前」の分割から採る(下限適用後は0ターンになり得るため)。
+    const sessionId = sessionIdOfDrafts(split.drafts);
     let floor: string | null = null;
     if (cursor === null) {
-      floor = recordedFloor("claude", sessionIdOfDrafts(split.drafts));
+      floor = recordedFloor("claude", sessionId);
       if (floor !== null) split = await splitIntoTurnDrafts(filePath, recoveryCursor(floor));
     }
     const newCursor = carryCursor(split.newCursor, cursor, floor);
+    const surface = surfaceForClaudePath(filePath, claudeRoots);
+    const records = split.drafts.map((draft) =>
+      buildClaudeDraftRecord(draft, draft.lastTs ?? new Date().toISOString(), table, fx, surface),
+    );
 
-    if (split.drafts.length === 0) {
-      // 記録済み分しか無いと分かっているときだけカーソルを進め、次回から増分読みに戻す。
-      if (floor !== null) commit(filePath, [], newCursor);
-      return;
+    // サブエージェント(<transcript>/subagents/agent-*.jsonl)は親ターンへ合算する。
+    // hook 経路(track)・sweep と同じ回収をしないと、取り込み経路によって同じセッションの
+    // 金額が変わる。カーソルが無いときだけ、SA 用の下限で既記録分を除外する。
+    const saFloor = cursor === null ? recordedFloor("claude-sa", sessionId) : null;
+    let sa: SubagentUsage | null = null;
+    try {
+      sa = await collectSubagentUsage(filePath, {
+        excludeMessageKeys: new Set(split.messageKeys),
+        minTimestampMs: saFloor === null ? null : Date.parse(saFloor) + 1,
+        readCursor: (path) => sanitizeCursor(cursorsDict[path]),
+      });
+    } catch (err) {
+      logError("ingest:subagents", err);
+      sa = null;
+    }
+    if (sa !== null && sa.apiCalls > 0) {
+      attachSubagentGroups(records, sa, table, fx, surface, "scan");
     }
 
-    const surface = surfaceForClaudePath(filePath, claudeRoots);
-    commit(
-      filePath,
-      split.drafts.map((draft) =>
-        buildClaudeDraftRecord(draft, draft.lastTs ?? new Date().toISOString(), table, fx, surface),
-      ),
-      newCursor,
-    );
+    commit(filePath, records, newCursor, sa?.newCursors ?? []);
   };
 
   const processCodexFile = async (filePath: string): Promise<void> => {
@@ -486,8 +523,11 @@ async function processFiles(
       } catch {
         continue; // 発見直後に消えた等。次回の走査に委ねる
       }
+      // mtime プリフィルタはカーソルがあるファイルにだけ効かせる。カーソルが無いファイルは
+      // まだ取り込みが確定していない(sweep のリセット後・cursors.json の消失など)ので、
+      // mtime が動いていなくても必ず走査して history 側と突合する。
       const cached = mtimeCache[filePath];
-      if (cached !== undefined && cached >= mtimeMs) {
+      if (cached !== undefined && cached >= mtimeMs && cursorsDict[filePath] !== undefined) {
         result.skippedByMtime += 1;
         continue;
       }

@@ -1,9 +1,8 @@
 // src/codex/originator.ts — Codex rollout の session_meta.originator を surface へ正規化する。
 //
-// 実機での originator 分布(2026-07-23 調査時点): codex-tui 217 / "Codex Desktop" 43 /
-// "Claude Code" 17 / codex_exec 3 / codex-chrome-extension-sidepanel 2 / codex_work_desktop 1。
-// マップの粒度は実装者判断でよい契約(request.md 未確定事項)だが、生の originator 値は
-// 別フィールド(TurnRecord.originator)に必ず保持する。未知値は "other" へフォールバックする。
+// 実機で観測される originator: codex-tui / "Codex Desktop" / "Claude Code" / codex_exec /
+// codex-chrome-extension-sidepanel / codex_work_desktop など。生の originator 値は別フィールド
+// (TurnRecord.originator)に必ず保持する。未知値は "other" へフォールバックする。
 
 import type { Surface } from "../types";
 

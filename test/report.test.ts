@@ -71,6 +71,16 @@ describe("runReport — サーフェス別内訳", () => {
     expect(logs.join("\n")).not.toContain("サーフェス別 (By surface)");
   });
 
+  it("2b. 単一 surface でも cli 以外(デスクトップ専業)なら表形式に出す", async () => {
+    appendTurn(makeTurn({ costUSD: 0.1, costJPY: 15, surface: "desktop" }));
+    appendTurn(makeTurn({ costUSD: 0.2, costJPY: 30, surface: "desktop" }));
+    const code = await runReport(["--days", "9999"]);
+    expect(code).toBe(0);
+    const out = logs.join("\n");
+    expect(out).toContain("サーフェス別 (By surface)");
+    expect(out).toContain("デスクトップアプリ");
+  });
+
   it("3. --json は bySurface を含む", async () => {
     appendTurn(makeTurn({ costUSD: 0.1, costJPY: 15, surface: "cli" }));
     appendTurn(makeTurn({ costUSD: 0.2, costJPY: 30, surface: "desktop" }));

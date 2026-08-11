@@ -7,6 +7,7 @@ import {
   claudeTranscriptRoots,
   defaultClaudeDesktopSessionsRoot,
   determineClaudeSurface,
+  discoverDesktopProjectRoots,
   surfaceForClaudePath,
 } from "../src/claude-roots";
 
@@ -76,20 +77,46 @@ describe("claudeTranscriptRoots", () => {
     expect(surfaceForClaudePath("/unrelated/x.jsonl", roots)).toBe("cli");
   });
 
-  it("5. bounded 再帰探索: local-agent-mode-sessions 配下の任意の深さの .claude/projects を見つける", async () => {
-    // 実機確認(2026-07-23)では local-agent-mode-sessions/<id>/<id>/local_<uuid>/.claude/projects と
-    // request.md が想定した深さ0(local-agent-mode-sessions/local_<uuid>/.claude/projects)が異なって
-    // いたため、固定深さを仮定しない bounded walk で発見できることを確認する。
+  // デスクトップルートの自動発見(CCCN_CLAUDE_DESKTOP_ROOTS 未設定時の既定動作)。
+  // 深さは非公開レイアウトに依存するため、bounded walk が任意の深さで見つけることを確かめる。
+  it("5. bounded 再帰探索: sessions root 配下の任意の深さの .claude/projects を desktop ルートとして発見する", async () => {
     const sessionsRoot = join(dir, "local-agent-mode-sessions");
     const deepProjects = join(sessionsRoot, "id1", "id2", "local_abc", ".claude", "projects");
+    const shallowProjects = join(sessionsRoot, "local_xyz", ".claude", "projects");
     mkdirSync(deepProjects, { recursive: true });
+    mkdirSync(shallowProjects, { recursive: true });
+    // .claude 配下の projects 以外は掘らない(誤検出しないこと)。
+    mkdirSync(join(sessionsRoot, "id1", ".claude", "other", "projects"), { recursive: true });
+    delete process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
 
-    const found = await claudeTranscriptRoots({ projectsOverride: join(dir, "unused-cli-root") });
-    // このテストは macOS 限定の auto-discovery なので、非 darwin では desktop ルートが増えない。
-    if (process.platform !== "darwin") {
-      expect(found.filter((r) => r.surface === "desktop")).toHaveLength(0);
-      return;
-    }
+    const roots = await claudeTranscriptRoots({
+      projectsOverride: join(dir, "cli-root"),
+      desktopSessionsRoot: sessionsRoot,
+    });
+
+    expect(roots[0]).toEqual({ path: join(dir, "cli-root"), surface: "cli" });
+    const desktop = roots.filter((r) => r.surface === "desktop").map((r) => r.path).sort();
+    expect(desktop).toEqual([deepProjects, shallowProjects].sort());
+    // 発見したルート配下の transcript は desktop として判定される。
+    expect(surfaceForClaudePath(join(deepProjects, "proj", "x.jsonl"), roots)).toBe("desktop");
+    expect(surfaceForClaudePath(join(dir, "cli-root", "proj", "x.jsonl"), roots)).toBe("cli");
+  });
+
+  it("5b. sessions root が存在しなければ desktop ルートは増えない(エラーにしない)", async () => {
+    delete process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+    const roots = await claudeTranscriptRoots({
+      projectsOverride: join(dir, "cli-root"),
+      desktopSessionsRoot: join(dir, "no-such-sessions-root"),
+    });
+    expect(roots.filter((r) => r.surface === "desktop")).toHaveLength(0);
+  });
+
+  it("5c. discoverDesktopProjectRoots は探索深さの上限を超えたところは見に行かない", async () => {
+    const sessionsRoot = join(dir, "sessions-deep");
+    // depth 0 から数えて 8 を超える位置に置いた .claude/projects は対象外。
+    const tooDeep = join(sessionsRoot, "a", "b", "c", "d", "e", "f", "g", "h", "i", ".claude", "projects");
+    mkdirSync(tooDeep, { recursive: true });
+    expect(await discoverDesktopProjectRoots(sessionsRoot)).toEqual([]);
   });
 });
 

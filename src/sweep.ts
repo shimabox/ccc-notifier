@@ -459,6 +459,87 @@ function mergeUnknownModels(rec: TurnRecord, extra: string[]): void {
   rec.unknownModels = merged;
 }
 
+/**
+ * サブエージェント usage を親ターンへ合算する(sweep / ingest 共通)。
+ *
+ * agent ファイル1つ = 時刻を持つ1グループとして扱い、そのグループの完了時刻以降に完了した
+ * 最初の親ターンへ付ける(セッション全体を最後の親へ寄せない)。時刻が分かるのに以後の親が
+ * 無い場合は、誤った日/月へ載せないよう SA のみのレコードを新しく作って records へ足す。
+ * 時刻不明のグループだけは最後の親へ寄せる。戻り値は付加した SA コストの合計 USD。
+ */
+export function attachSubagentGroups(
+  records: TurnRecord[],
+  sa: SubagentUsage,
+  table: PriceTable,
+  fx: FxResult,
+  surface: Surface,
+  ingest: "sweep" | "scan",
+): number {
+  const parentRecords = [...records];
+  let addedUSD = 0;
+
+  for (const group of sa.groups) {
+    const saBreakdown = computeCost(group.perModel, {}, table);
+    addedUSD += saBreakdown.usd;
+    const saBlock: NonNullable<TurnRecord["subagents"]> = {
+      costUSD: saBreakdown.usd,
+      costByModel: { ...saBreakdown.byModel },
+      tokens: sumBuckets(group.perModel),
+      apiCalls: group.apiCalls,
+      agentFiles: 1,
+    };
+
+    const groupMs = group.lastTs === null ? NaN : Date.parse(group.lastTs);
+    let target: TurnRecord | undefined;
+    if (Number.isFinite(groupMs)) {
+      target = parentRecords.find((rec) => {
+        const recMs = Date.parse(rec.ts);
+        return Number.isFinite(recMs) && recMs >= groupMs;
+      });
+    } else {
+      target = parentRecords[parentRecords.length - 1];
+    }
+
+    if (target === undefined) {
+      target = {
+        schemaVersion: 1,
+        ts: group.lastTs ?? sa.lastTs ?? new Date().toISOString(),
+        sessionId: sa.sessionId,
+        project: sa.cwd ?? "",
+        gitBranch: sa.gitBranch,
+        models: collectModels(group.perModel, {}),
+        tokens: emptyBuckets(),
+        sidechainTokens: null,
+        apiCalls: 0,
+        costUSD: 0,
+        costByModel: {},
+        costJPY: 0,
+        fxRate: fx.rate,
+        fxSource: fx.source,
+        prompt: "",
+        ingest,
+        surface,
+      };
+      records.push(target);
+    }
+
+    if (target.subagents === undefined) {
+      target.subagents = saBlock;
+    } else {
+      target.subagents.costUSD += saBlock.costUSD;
+      target.subagents.apiCalls += saBlock.apiCalls;
+      target.subagents.agentFiles += 1;
+      addToBuckets(target.subagents.tokens, saBlock.tokens);
+      for (const [model, usd] of Object.entries(saBlock.costByModel)) {
+        target.subagents.costByModel[model] = (target.subagents.costByModel[model] ?? 0) + usd;
+      }
+    }
+    mergeUnknownModels(target, saBreakdown.unknownModels);
+  }
+
+  return addedUSD;
+}
+
 // ============ 1 transcript の処理 ============
 
 async function processTranscriptLocked(
@@ -505,74 +586,9 @@ async function processTranscriptLocked(
     logError("sweep:subagents", err);
     sa = null;
   }
-  const saHasUsage = sa !== null && sa.apiCalls > 0;
-  if (saHasUsage) {
-    // Each agent file is kept as a time-bearing group. Attach it to the first
-    // parent turn that completes at/after the agent, rather than assigning the
-    // whole session to its last turn. --days filtering already happened while
-    // parsing each assistant row, so old and recent agent costs are not mixed.
-    const parentRecords = [...records];
-    for (const group of sa!.groups) {
-      const saBreakdown = computeCost(group.perModel, {}, table);
-      summary.subagentsUSD += saBreakdown.usd;
-      const saBlock: NonNullable<TurnRecord["subagents"]> = {
-        costUSD: saBreakdown.usd,
-        costByModel: { ...saBreakdown.byModel },
-        tokens: sumBuckets(group.perModel),
-        apiCalls: group.apiCalls,
-        agentFiles: 1,
-      };
-
-      const groupMs = group.lastTs === null ? NaN : Date.parse(group.lastTs);
-      let target: TurnRecord | undefined;
-      if (Number.isFinite(groupMs)) {
-        target = parentRecords.find((rec) => {
-          const recMs = Date.parse(rec.ts);
-          return Number.isFinite(recMs) && recMs >= groupMs;
-        });
-      } else {
-        // 時刻不明の場合だけ従来どおり最後の親へ寄せる。時刻が分かり、
-        // それ以後の親が無い場合は誤った日/月へ載せずSA-onlyにする。
-        target = parentRecords[parentRecords.length - 1];
-      }
-
-      if (target === undefined) {
-        target = {
-          schemaVersion: 1,
-          ts: group.lastTs ?? sa!.lastTs ?? new Date().toISOString(),
-          sessionId: sa!.sessionId,
-          project: sa!.cwd ?? "",
-          gitBranch: sa!.gitBranch,
-          models: collectModels(group.perModel, {}),
-          tokens: emptyBuckets(),
-          sidechainTokens: null,
-          apiCalls: 0,
-          costUSD: 0,
-          costByModel: {},
-          costJPY: 0,
-          fxRate: fx.rate,
-          fxSource: fx.source,
-          prompt: "",
-          ingest: "sweep",
-          surface,
-        };
-        records.push(target);
-      }
-
-      if (target.subagents === undefined) {
-        target.subagents = saBlock;
-      } else {
-        target.subagents.costUSD += saBlock.costUSD;
-        target.subagents.apiCalls += saBlock.apiCalls;
-        target.subagents.agentFiles += 1;
-        addToBuckets(target.subagents.tokens, saBlock.tokens);
-        for (const [model, usd] of Object.entries(saBlock.costByModel)) {
-          target.subagents.costByModel[model] = (target.subagents.costByModel[model] ?? 0) + usd;
-        }
-      }
-      mergeUnknownModels(target, saBreakdown.unknownModels);
-    }
-    summary.agentFiles += sa!.agentFiles;
+  if (sa !== null && sa.apiCalls > 0) {
+    summary.subagentsUSD += attachSubagentGroups(records, sa, table, fx, surface, "sweep");
+    summary.agentFiles += sa.agentFiles;
   }
 
   // サマリ集計(totalUSD / byModel はメイン基準。SA は含めない = GOLDEN 準拠）。

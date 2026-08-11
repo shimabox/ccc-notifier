@@ -1231,12 +1231,14 @@ function computeSurfaceBreakdown(turns: TurnRecord[]): SurfaceAgg[] {
 }
 
 /**
- * サーフェス別内訳セクション(最小限: サマリーへの行追加程度)。単一 surface のみ(全件 cli 等)なら
- * 追加情報が無いため何も出さない(既存の cli 専業ユーザーの見た目を変えない)。
+ * サーフェス別内訳セクション(最小限: サマリーへの行追加程度)。
+ * 全件が cli(= 既定のサーフェス)のときだけ、追加情報が無いので何も出さない。
+ * デスクトップ専業など cli 以外の単一サーフェスでは「どこの利用か」が情報になるため表示する。
  */
 function surfaceSection(turns: TurnRecord[]): string {
   const rows = computeSurfaceBreakdown(turns);
-  if (rows.length <= 1) return "";
+  if (rows.length === 0) return "";
+  if (rows.length === 1 && rows[0].surface === "cli") return "";
   const trs = rows
     .map(
       (r) =>

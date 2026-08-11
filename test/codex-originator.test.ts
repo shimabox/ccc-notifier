@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeCodexOriginator } from "../src/codex/originator";
 
 describe("normalizeCodexOriginator", () => {
-  it("1. 実機で確認された originator 分布(2026-07-23調査)をすべて正規化する", () => {
+  it("1. 実機で観測される originator をすべて正規化する", () => {
     expect(normalizeCodexOriginator("codex-tui")).toBe("cli");
     expect(normalizeCodexOriginator("codex_cli_rs")).toBe("cli");
     expect(normalizeCodexOriginator("codex_exec")).toBe("cli");

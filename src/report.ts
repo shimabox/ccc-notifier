@@ -285,9 +285,9 @@ function printTable(result: Aggregated, days: number): void {
   }
   console.log("※ 複数モデルを使ったターンは各モデルの行に1ずつ計上します(ターン数の合計は総ターン数を超えることがあります)。");
 
-  // サーフェス別内訳: cli のみ(単一)なら追加情報が無いため表示しない。
+  // サーフェス別内訳: 全件が cli(= 既定のサーフェス)のときだけ、追加情報が無いので表示しない。
   const surfaceEntries = Object.entries(result.bySurface);
-  if (surfaceEntries.length > 1) {
+  if (surfaceEntries.length > 1 || (surfaceEntries.length === 1 && surfaceEntries[0][0] !== "cli")) {
     console.log("");
     console.log("サーフェス別 (By surface):");
     console.log("サーフェス".padEnd(20) + "ターン".padStart(8) + "USD".padStart(10) + "JPY".padStart(12));

@@ -126,6 +126,12 @@ export async function collectSubagentUsage(
     includeAllFiles?: boolean;
     excludeMessageKeys?: ReadonlySet<string>;
     minTimestampMs?: number | null;
+    /**
+     * カーソルの読み出し口(既定は cursors.json を都度読む loadCursor)。
+     * 多数のファイルをまとめて処理する呼び出し元は、1回だけ読んだ辞書を引く関数を渡して
+     * agent ファイル数ぶんの再読み込みを避ける。
+     */
+    readCursor?: (path: string) => Cursor | null;
   } = {},
 ): Promise<SubagentUsage | null> {
   const dir = subagentsDirOf(mainTranscriptPath);
@@ -153,10 +159,11 @@ export async function collectSubagentUsage(
   // Start with the parent window and every already-consumed agent cursor. This
   // prevents a call copied into another agent file on a later turn from being
   // charged again. The cursor ring is intentionally bounded by transcript.ts.
+  const readCursor = opts.readCursor ?? ((path: string) => sanitizeCursor(loadCursor(path)));
   const excluded = new Set(opts.excludeMessageKeys ?? []);
   if (!opts.ignoreCursors) {
     for (const filePath of files) {
-      const prior = sanitizeCursor(loadCursor(filePath));
+      const prior = readCursor(filePath);
       for (const key of prior?.seenMessageKeys ?? []) excluded.add(key);
     }
   }
@@ -167,7 +174,7 @@ export async function collectSubagentUsage(
         const file = await fs.open(filePath, "r");
         await file.close();
       }
-      const cursor = opts.ignoreCursors ? null : sanitizeCursor(loadCursor(filePath));
+      const cursor = opts.ignoreCursors ? null : readCursor(filePath);
       const agg = await aggregateNewTurn(filePath, cursor, {
         excludeMessageKeys: excluded,
         minTimestampMs: opts.minTimestampMs,

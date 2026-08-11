@@ -1,4 +1,4 @@
-// test/doctor-duplicate-history.test.ts — doctor の重複ターン検知(2026-08-09 本番事故の回帰確認)。
+// test/doctor-duplicate-history.test.ts — doctor の重複ターン検知。
 //
 // runDoctor() を直接 import して呼ぶ(dist/cli.js は使わない)。他のチェック(hook 登録・通知等)は
 // 失敗・警告してもよく、ここでは「history.jsonl に同一 sessionId+ts の重複ターンがあるとき、
@@ -75,9 +75,8 @@ function makeTurn(overrides: Partial<TurnRecord> = {}): TurnRecord {
 }
 
 describe("doctor: duplicate history turn detection", () => {
-  it("同一 sessionId+ts が複数行あると warn で検知する(2026-08-09 本番事故の再現形)", async () => {
-    // 事故の実形: track の正規レコード(apiCalls=3) + ingest がカーソルを見失って
-    // ファイル先頭から丸ごと再集計した重複レコード(apiCalls=406、ts は完全一致)。
+  it("同一 sessionId+ts が複数行あると warn で検知する", async () => {
+    // 同一ターンの重複は「同じ sessionId・同じ ts で apiCalls だけが大きく違う」形で現れる。
     appendTurn(makeTurn({ apiCalls: 3, costUSD: 2.549929 }));
     appendTurn(makeTurn({ apiCalls: 406, costUSD: 250.572689, ingest: "scan" }));
 
