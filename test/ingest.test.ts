@@ -1091,6 +1091,66 @@ describe("runIngest", () => {
       expect(readHistory().at(-1)!.prompt).toBe("ターンB");
     });
 
+    it("26g. マーカー破損からの復旧が、別 transcript の保留状態を消さない", async () => {
+      // 走査ルートの外に置いて track 単体の挙動を見る(便乗り取込が古いカーソルを直すと隠れる)。
+      const outside = join(tmpHome, "outside-multi");
+      mkdirSync(outside, { recursive: true });
+      const pathA = join(outside, "sess-mA.jsonl");
+      const pathB = join(outside, "sess-mB.jsonl");
+      writeFileSync(pathA, transcriptFixture("sess-mA", "mta"), "utf8");
+      writeFileSync(pathB, transcriptFixture("sess-mB", "mtb"), "utf8");
+      const stdinFor = (p: string): string =>
+        readFileSync(FIXTURE_STDIN, "utf8").replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(p));
+
+      await runTrack(stdinFor(pathA)); // A ターン0
+      await runTrack(stdinFor(pathB)); // B ターン0
+      const cursorsBase = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+
+      // A・B ともに1ターン追記して記録し、そのカーソル保存が失敗した状態を作る。
+      appendFileSync(pathA, claudeTurnLines("sess-mA", "A1", "req_mta_1", "msg_mta_1", "2026-07-06T17:00:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathA));
+      const recordA = readHistory().at(-1)!;
+      appendFileSync(pathB, claudeTurnLines("sess-mB", "B1", "req_mtb_1", "msg_mtb_1", "2026-07-06T17:10:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathB));
+      const recordB = readHistory().at(-1)!;
+      const fingerprintB = recordB.countedCalls![0];
+      const usdBefore = countedCallStats().totalUSD;
+
+      // 両方のカーソルを記録前へ戻し、両方に保留を立てる。
+      const rolledBack = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+      rolledBack[pathA] = cursorsBase[pathA];
+      rolledBack[pathB] = cursorsBase[pathB];
+      writeFileSync(join(tmpHome, "cursors.json"), JSON.stringify(rolledBack), "utf8");
+      markPendingAppend(pathA, recordA.ingestKey!);
+      markPendingAppend(pathB, recordB.ingestKey!);
+
+      // ここでマーカーが壊れる。
+      writeFileSync(pendingAppendPath(), "{壊れた", "utf8");
+
+      // A 側だけ track を通す(A の保留は解消される)。
+      appendFileSync(pathA, claudeTurnLines("sess-mA", "A2", "req_mta_2", "msg_mta_2", "2026-07-06T18:00:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathA));
+
+      // B の保留が失われていないこと。
+      expect(hasPendingAppend(pathB)).toBe(true);
+
+      // B を track しても、記録済みの B1 が再計上されないこと。
+      appendFileSync(pathB, claudeTurnLines("sess-mB", "B2", "req_mtb_2", "msg_mtb_2", "2026-07-06T18:10:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathB));
+
+      const after = countedCallStats();
+      expect(after.duplicates).toEqual([]);
+      const occurrencesOfB = readHistory().reduce(
+        (n, r) => n + (r.countedCalls ?? []).filter((fp) => fp === fingerprintB).length,
+        0,
+      );
+      expect(occurrencesOfB).toBe(1);
+      const added = readHistory().slice(-2); // A2 と B2
+      expect(added.map((r) => r.prompt)).toEqual(["A2", "B2"]);
+      expect(added.every((r) => r.apiCalls === 1)).toBe(true);
+      expect(after.totalUSD).toBeCloseTo(usdBefore + added[0].costUSD + added[1].costUSD, 10);
+    });
+
     it("26f. 保留マーカーを作れないときは append せずに終える(例外は外に出さない)", async () => {
       const trackedPath = join(cliProjects, "proj-cli", "marker-unwritable.jsonl");
       writeFileSync(trackedPath, transcriptFixture("sess-nomarker", "nmk"), "utf8");

@@ -482,14 +482,24 @@ function writePendingAppends(dict: Record<string, string>): void {
 }
 
 /**
+ * 「保留集合が分からない」ことを表す予約キー。transcript パスは絶対パスなので衝突しない。
+ * マーカーが壊れた時点で、どの transcript に保留があったのか復元できない。その状態を
+ * 「全 transcript が保留」として永続化し、以後の読み書きで失わないようにする。
+ * 自動では解除しない(解除条件は下の clearPendingAppend のコメント参照)。
+ */
+const PENDING_ALL = "*";
+
+/**
  * 対象 transcript に「カーソル未反映かもしれない append」が残っているか。
- * マーカーが読めない・壊れているときは true(保留あり側に倒す)。実害は history を
- * 1回余分に読むことだけで、逆に倒すと不変条件が崩れて二重計上になる。
+ * マーカーが読めない・壊れている、あるいは全体保留の予約キーが立っているときは true
+ * (保留あり側に倒す)。実害は history を1回余分に読むことだけで、逆に倒すと
+ * 不変条件が崩れて二重計上になる。
  */
 export function hasPendingAppend(transcriptPath: string): boolean {
   try {
     const { dict, trusted } = readPendingAppends();
-    return !trusted || Object.hasOwn(dict, transcriptPath);
+    if (!trusted) return true;
+    return Object.hasOwn(dict, PENDING_ALL) || Object.hasOwn(dict, transcriptPath);
   } catch (err) {
     logError("hasPendingAppend", err);
     return true;
@@ -500,17 +510,28 @@ export function hasPendingAppend(transcriptPath: string): boolean {
  * append の直前に置く。**失敗したら throw する**(呼び出し側は append せずに中断すること)。
  * ここを握り潰すと「マーカーが無い = カーソルに反映済み」という不変条件が崩れ、
  * append 後にカーソル保存が失敗したケースで二重計上になる。
+ *
+ * 壊れたマーカーを読めなかった場合は、自分の保留を足すついでにファイルを正常化してしまうと
+ * 他 transcript の保留情報を捨てることになる(その transcript は次回カーソルを信用して
+ * 再計上する)。そのため全体保留の予約キーを必ず一緒に書き、壊れる前の意味を残す。
  */
 export function markPendingAppend(transcriptPath: string, ingestKey: string): void {
-  const { dict } = readPendingAppends(); // trusted でなくても、このパスの保留は必ず立てる
+  const { dict, trusted } = readPendingAppends();
+  if (!trusted) dict[PENDING_ALL] = "unreadable-marker";
   dict[transcriptPath] = ingestKey;
   writePendingAppends(dict);
 }
 
 /**
  * カーソル保存まで済んだ後に消す。消せなくても次回 history を読むだけで実害はない。
- * マーカーが壊れている(trusted=false)ときは、他の transcript の保留状態を失わないよう
- * 何もしない(fail-closed のまま置く)。
+ * 消すのは自分の transcript の分だけで、他 transcript の保留も全体保留の予約キーも残す。
+ * マーカーが壊れている(trusted=false)ときは何もしない。
+ *
+ * 全体保留の予約キーは自動解除しない。解除には「全 transcript のカーソルが history を
+ * 反映している」ことの証明が要るが、hook でしか触らない(走査ルート外の)transcript も
+ * あり得るため、track/ingest からは証明できない。立ったままでも track は動き続け、
+ * 毎回 history を読む(実測 0.06秒 → 0.12秒)だけで正しさは保たれる。解除したい場合は
+ * cache/pending-append.json を削除する(= 全 transcript を「保留なし」と宣言する操作)。
  */
 export function clearPendingAppend(transcriptPath: string): void {
   try {
@@ -521,6 +542,16 @@ export function clearPendingAppend(transcriptPath: string): void {
     writePendingAppends(dict);
   } catch (err) {
     logError("clearPendingAppend", err);
+  }
+}
+
+/** 全体保留の予約キーが立っているか(doctor の案内用)。 */
+export function hasUnresolvedPendingMarker(): boolean {
+  try {
+    const { dict, trusted } = readPendingAppends();
+    return !trusted || Object.hasOwn(dict, PENDING_ALL);
+  } catch {
+    return true;
   }
 }
 

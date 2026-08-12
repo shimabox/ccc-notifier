@@ -24,7 +24,16 @@ import { CODEX_HOOK_EVENTS } from "./codex/setup";
 import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
 import { findLatestCodexRollout, listCodexRollouts } from "./codex/sessions";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
-import { cursorPaths, isMuted, paths, readConfig, readMuteState, readTurns } from "./store";
+import {
+  cursorPaths,
+  hasUnresolvedPendingMarker,
+  isMuted,
+  paths,
+  pendingAppendPath,
+  readConfig,
+  readMuteState,
+  readTurns,
+} from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
@@ -745,6 +754,27 @@ async function checkDesktopScan(): Promise<boolean> {
   return true;
 }
 
+// ---- 9a. 保留マーカーの全体保留(壊れたマーカーからの復旧痕跡) ----
+//
+// cache/pending-append.json が壊れると、どの transcript に「カーソル未反映の append」が
+// あったのか復元できない。安全側として全 transcript を保留扱いにする予約キーが立ち、
+// track は毎回 history を参照するようになる(正しさは保たれるが応答は遅くなる)。
+// 自動解除はできないので、状態と解除方法を案内する。
+function checkPendingAppendMarker(): boolean {
+  if (!hasUnresolvedPendingMarker()) {
+    log("ok", "取り込み保留マーカーは正常です");
+    return true;
+  }
+  log(
+    "warn",
+    "取り込み保留マーカー(cache/pending-append.json)が壊れた形跡があります。" +
+      "安全側で全セッションを保留扱いにしているため、Stop hook のたびに history を読み直します" +
+      "(二重計上は起きません)。解消するにはファイルを削除してください: " +
+      pendingAppendPath(),
+  );
+  return true;
+}
+
 // ---- 9. history.jsonl 内の完全重複ターン検知(同一 sessionId + ts が複数行) ----
 //
 // 同じ transcript を track(通常の増分)と ingest(scan / 便乗り取込)の双方が異なる範囲認識で
@@ -834,6 +864,7 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("claude-recent-session", () => checkClaudeRecentSessionTotal(latestTranscript)));
   results.push(await safeRun("codex-recent-session", () => checkCodexRecentSessionTotal(codexStopConfigured)));
   results.push(await safeRun("desktop-scan", () => checkDesktopScan()));
+  results.push(await safeRun("pending-append", () => Promise.resolve(checkPendingAppendMarker())));
   results.push(await safeRun("duplicate-history", () => Promise.resolve(checkDuplicateHistoryTurns())));
 
   const hasFailure = results.some((ok) => ok === false);

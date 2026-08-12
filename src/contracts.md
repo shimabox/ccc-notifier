@@ -512,6 +512,12 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   通常どおり記録される。
 - 不変条件を保つため、マーカーは両方向に fail-closed で扱う。
   - **読めない・壊れている**ときは「保留あり」とみなす(実害は history を1回余分に読むだけ)。
+    壊れたマーカーに上書きするときは、全 transcript が保留であることを表す予約キー `"*"` を
+    必ず一緒に書く。自分の分だけ書いて正常な JSON に戻すと、他 transcript の保留情報が消え、
+    その transcript は次回カーソルを信用して二重計上する。予約キーは自動解除しない
+    (「全 transcript のカーソルが history を反映している」ことを track/ingest からは証明
+    できないため)。立っている間も track は動き続け、毎回 history を読むだけ。解除は
+    `cache/pending-append.json` の削除で行い、`doctor` がその案内を出す。
   - **マーカーを置けない**ときは append せずにそのターンを見送る。記録を落とすのはコストの
     取りこぼしだが、transcript は残るので history 全体の指紋索引で守られている ingest が
     後から回収する。二重計上を作るよりこちらに倒す。`runTrack` は例外を外に出さない契約のまま。
