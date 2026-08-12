@@ -15,6 +15,17 @@ npx ccc-notifier doctor
 - 通知なしモード(`notify.os: false` かつ `notify.slack: null`)になっている → `doctor` が「通知なし・ダッシュボードのみモード」と明示します。通知を使いたければ `init` を再実行してチャネルを選び直してください(詳細は [設定 / 通知なしモード](configuration.md#通知なしモード記録ダッシュボードのみ--dashboard-only-mode))
 - そのターンの金額が `minNotifyUSD` 未満 → 通知は来ませんが、履歴(`report`)には記録されています
 
+**デスクトップアプリ(Claude / ChatGPT)で使ったのに記録されない**
+
+計測できるのは**手元のログにトークン数が残る使い方だけ**です。次は原理的に計測できません(実装の未対応ではなく、データがローカルに存在しません)。
+
+- Claude デスクトップアプリの**ホームタブ通常チャット**、claude.ai の Web チャット
+- **ChatGPT の通常チャット**、Codex の**クラウド実行**(Web / GitHub / Slack / クラウド委任)
+
+一方、Claude デスクトップアプリの**Code タブ(ローカルエージェントモード)**と **Codex Desktop** は取り込めます(macOS。`ccc-notifier scan`、または応答完了時の自動便乗り取込)。対応表は[計測できるもの・できないもの](how-it-works.md#計測できるものできないもの--what-is-and-isnt-measured)を参照してください。
+
+なお Codex Desktop は、rollout にモデル名が記録されていない場合があり、そのときは**トークン数だけ履歴に載って金額は0**になります([詳細](codex.md#codex-desktop統合chatgptアプリのcodexモード))。
+
 **Codex の通知が来ない**
 
 Codex CLI 側の**信頼承認**がまだの可能性があります。`ccc-notifier init --codex`(または対話で Yes)を実行しただけでは hook は動かず、次回 `codex` 起動時に表示される「Hooks need review」で「Trust all and continue」を選ぶまで**サイレントに何も起きません**。

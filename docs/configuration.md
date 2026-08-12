@@ -20,7 +20,7 @@
 | `dashboard.autoReloadSec` | number | `30` | 生成 HTML の自動リロード間隔(秒)。`0` で自動リロードを無効化 |
 | `dashboard.days` | number | `30` | 自動生成と引数なしの手動 `dashboard` で作る `report.html` の対象期間(正の整数・日数)。不正値は安全に `30` へフォールバック。`report-all.html` には影響しない |
 
-補足: データ保存先(既定 `~/.ccc-notifier`)は環境変数 `CCCN_HOME` で上書きできます。Claude デスクトップアプリのスキャンルート(既定は macOS の `~/Library/Application Support/Claude/local-agent-mode-sessions` 配下を自動探索)は環境変数 `CCCN_CLAUDE_DESKTOP_ROOTS`(パス区切り文字で複数指定可)で追加・上書きできます。詳しくは[仕組み](how-it-works.md)の「hook非依存の増分取り込み」を参照してください。
+補足: データ保存先(既定 `~/.ccc-notifier`)は環境変数 `CCCN_HOME` で上書きできます。Claude デスクトップアプリの Code タブ(ローカルエージェントモード)のスキャンルート(既定は macOS の `~/Library/Application Support/Claude/local-agent-mode-sessions` 配下を自動探索。ホームタブの通常チャットは[計測対象外](how-it-works.md#計測できるものできないもの--what-is-and-isnt-measured))は環境変数 `CCCN_CLAUDE_DESKTOP_ROOTS`(パス区切り文字で複数指定可)で追加・上書きできます。詳しくは[仕組み](how-it-works.md)の「hook非依存の増分取り込み」を参照してください。
 
 ## 為替レートとフォールバック / Exchange Rate Fallback
 

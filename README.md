@@ -23,7 +23,8 @@ in 1.2k(cache 40%) / out 480 · 📁 my-app · 今日: $1.85
 - 月予算を設定し、今月の使用率を確認できます
 - 通知を一時停止しても、履歴の記録は続けられます
 - Codex CLIも任意で追加し、Claude Codeと同じダッシュボードで確認できます
-- Claude デスクトップアプリ・Codex Desktopの利用分も`scan`コマンド（または応答完了時の自動便乗り取込）でローカルログから取り込めます（macOS。詳しくは[仕組み](docs/how-it-works.md)を参照）
+- Claude デスクトップアプリの**Code タブ（ローカルエージェントモード）**での作業と、Codex Desktop の利用分も`scan`コマンド（または応答完了時の自動便乗り取込）でローカルログから取り込めます（macOS）
+  - **ホームタブの通常チャット（および claude.ai / ChatGPT の通常チャット）は対象外です。**トークン数がローカルに残らないため原理的に計測できません。対応表は[計測できるもの・できないもの](docs/how-it-works.md#計測できるものできないもの--what-is-and-isnt-measured)を参照してください
 
 ## 必要なもの
 
@@ -132,8 +133,8 @@ ccc-notifier init
 | `ccc-notifier unmute` | 通知を再開する |
 | `ccc-notifier sweep --dry-run [--days N]` | 履歴を作り直した場合の件数と概算を確認する |
 | `ccc-notifier sweep [--days N]` | 残っている利用データから履歴を作り直す |
-| `ccc-notifier scan --dry-run` | hook非依存の増分取り込み（デスクトップアプリ等の取りこぼし回収）の予定件数・金額を確認する |
-| `ccc-notifier scan` | 未追跡分（Claude デスクトップ、Codex Desktop等）を履歴へ取り込む |
+| `ccc-notifier scan --dry-run` | hook非依存の増分取り込み（Claude デスクトップの Code タブ・Codex Desktop 等の取りこぼし回収）の予定件数・金額を確認する |
+| `ccc-notifier scan` | 未追跡分（Claude デスクトップの Code タブ、Codex Desktop 等）を履歴へ取り込む |
 | `ccc-notifier reset-cursors` | 取り込み位置を捨てて次回に全再走査させる（履歴は保持。`doctor`が案内したときに使う） |
 
 > [!CAUTION]
