@@ -131,7 +131,7 @@ backupは作りません。元JSONLの消失・移動・破損行は復元でき
 - 4hookの一部が未信頼・無効・失敗した場合や、親Stop後に初めて届いた未知agentなど関連先が曖昧な場合は、別turnへの誤表示を避けるため利用表示を省略します。active中に割当済みの既知agentのlate Stopだけは元turnへ反映されます。次の通常ターンによる再生成、または手動`report` / `dashboard`で表示が更新されます
 - 旧v1利用記録は完全一致する既存Historyだけを引き続き表示します。すでに親/child ID不一致で結び付かなかった記録は、時刻から別turnへ推測移行しません。料金・History行数・月予算・通知額はmigrationで変わりません
 - **reasoning トークンは output トークンに含まれて課金されます**。これは ccc-notifier 側の仕様ではなく OpenAI の課金仕様そのもので、Codex の `token_count` イベントが運ぶ `output_tokens` にはもともと `reasoning_output_tokens` が含まれています
-- **クラウド実行(Web / GitHub / Slack / クラウド委任)は取り込めません。** 実行が手元で行われず`~/.codex/sessions`にrolloutが残らないためで、実装の未対応ではなく**データが存在しないため原理的に不可**です。ChatGPTの通常チャットも同じ理由で対象外です。全体の対応表は[仕組み](how-it-works.md#計測できるものできないもの--what-is-and-isnt-measured)を参照してください
+- **クラウド実行(Web / GitHub / Slack / クラウド委任)は取り込めません。** 実行がクラウド側で行われ、`~/.codex/sessions`にrolloutが残らないためです(2026-08-12時点)。ccc-notifier側に機能を足せば済む話ではなく、**集計の材料が手元に無い**状態です。ChatGPTの通常チャットも同じ理由で対象外です。全体の対応表は[仕組み](how-it-works.md#計測できるものできないもの--what-is-and-isnt-measured)を参照してください
 
 ## トラブルシュート / Troubleshooting
 
