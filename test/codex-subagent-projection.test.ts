@@ -79,6 +79,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete process.env.CCCN_HOME;
@@ -157,6 +158,8 @@ describe("Codex subagent activity projection", () => {
   });
 
   it("activityが最後まで無いvalid親turnはkeyだけを持ち、report/dashboardへ利用表示を出さない", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 15, 12, 0, 0, 0));
     const rollout = join(home, "rollout-unused.jsonl");
     copyFileSync(ROLLOUT, rollout);
     await runTrack(JSON.stringify(parentPayload({ transcript_path: rollout })), { codex: true });

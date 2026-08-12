@@ -52,6 +52,7 @@ const FIXTURE_CODEX_ROLLOUT_MULTITURN = fileURLToPath(
   new URL("./fixtures/codex/rollout-multiturn.jsonl", import.meta.url),
 );
 const FIXTURE_CODEX_STOP_PAYLOAD = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
+const FIXTURE_FAKE_NOW_SHIM = fileURLToPath(new URL("./fixtures/fake-now.cjs", import.meta.url));
 
 const FIXED_FX_RATE = 150;
 
@@ -244,6 +245,15 @@ function readHistory(cccnHome: string): TurnRecord[] {
 
 function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/** runCli の子プロセスへ NODE_OPTIONS 経由で test/fixtures/fake-now.cjs を preload し、Date を iso 相当へ固定する env を返す。 */
+function withFakeNow(env: NodeJS.ProcessEnv, iso: string): NodeJS.ProcessEnv {
+  const requireFlag = FIXTURE_FAKE_NOW_SHIM.includes(" ")
+    ? `--require "${FIXTURE_FAKE_NOW_SHIM}"`
+    : `--require ${FIXTURE_FAKE_NOW_SHIM}`;
+  const nodeOptions = env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ${requireFlag}` : requireFlag;
+  return { ...env, CCCN_TEST_FAKE_NOW: iso, NODE_OPTIONS: nodeOptions };
 }
 
 function findBackups(settingsPath: string): string[] {
@@ -622,7 +632,8 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(rec.subagents!.agentFiles).toBe(1);
 
     // dashboard を生成すると、SA のモデル(Sonnet 4.6)と「うちサブエージェント」が HTML に現れる。
-    const dash = await runCli(["dashboard", "--no-open"], { env: sb.env });
+    const fakeNowEnv = withFakeNow(sb.env, "2026-07-15T12:00:00.000Z");
+    const dash = await runCli(["dashboard", "--no-open"], { env: fakeNowEnv });
     expect(dash.code).toBe(0);
     expect(dash.stdout).toContain(join(sb.cccnHome, "report.html"));
     const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
@@ -630,7 +641,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(html).toContain("うちサブエージェント");
 
     // 明示した --all だけが canonical 全履歴版と日次stateを更新する。
-    const fullDash = await runCli(["dashboard", "--all", "--no-open"], { env: sb.env });
+    const fullDash = await runCli(["dashboard", "--all", "--no-open"], { env: fakeNowEnv });
     expect(fullDash.code).toBe(0);
     expect(fullDash.stdout).toContain(join(sb.cccnHome, "report-all.html"));
     expect(readFileSync(join(sb.cccnHome, "report-all.html"), "utf8")).toContain("全履歴版 / Full history");
