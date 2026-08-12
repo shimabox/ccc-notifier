@@ -62,14 +62,27 @@ function addTotals(target: CodexTotals, d: CodexTotals): void {
   target.output += d.output;
 }
 
-/** total_token_usage / last_token_usage を3成分に読む。record でなければ null(欠損扱い)。 */
+/**
+ * total_token_usage / last_token_usage を3成分に読む。record でなければ null(欠損扱い)。
+ *
+ * 成分がすべて 0 なのに total_tokens だけ正のイベントがある(実データでは Codex Desktop の
+ * 一部ビルドが該当。43件中34件が該当し、内訳を書かずに合計だけを残す)。成分だけを見ると
+ * 使用量ゼロと判定して丸ごと取りこぼすため、total_tokens を内訳不明の使用量として拾う。
+ * 内訳が分からない以上どのバケットに置くかは仮定になるので、実データで最も支配的で、かつ
+ * 単価が最も低いキャッシュ読みとして扱う(過大計上を作らない側)。健全なイベントでは
+ * total_tokens === input_tokens + output_tokens が実データ171,945件すべてで成立しており、
+ * この分岐には入らない。
+ */
 function readTotals(v: unknown): CodexTotals | null {
   if (!isRecord(v)) return null;
-  return {
-    input: numOf(v.input_tokens),
-    cached: numOf(v.cached_input_tokens),
-    output: numOf(v.output_tokens),
-  };
+  const input = numOf(v.input_tokens);
+  const cached = numOf(v.cached_input_tokens);
+  const output = numOf(v.output_tokens);
+  if (input === 0 && cached === 0 && output === 0) {
+    const total = numOf(v.total_tokens);
+    if (total > 0) return { input: total, cached: total, output: 0 };
+  }
+  return { input, cached, output };
 }
 
 /**

@@ -408,6 +408,51 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
     expect(drafts?.every((d) => d.isSubagentRollout)).toBe(true);
   });
 
+  // 15. 実データの Codex Desktop 一部ビルドは、成分(input/cached/output)を 0 のまま
+  //     total_tokens だけに合計を書く。成分だけを見ると使用量ゼロと判定して丸ごと落ちる。
+  it("15. 成分0・total_tokens のみの token_count でも使用量を拾う", async () => {
+    const f = join(dir, "total-only.jsonl");
+    const lines = [
+      { timestamp: "2026-05-03T04:30:23.000Z", type: "session_meta", payload: { id: "total-only-1", cwd: "/proj", originator: "Codex Desktop", source: "cli" } },
+      { timestamp: "2026-05-03T04:30:24.000Z", type: "event_msg", payload: { type: "user_message", message: "q" } },
+      { timestamp: "2026-05-03T04:30:25.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 16660 }, last_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 16660 }, model_context_window: null } } },
+      { timestamp: "2026-05-03T04:30:26.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    ];
+    writeFileSync(f, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+    const r = await aggregateCodexTurn(f, null);
+    expect(r).not.toBeNull();
+    if (r === null) return;
+    // 内訳が分からないので、実データで支配的かつ単価が最も低いキャッシュ読みとして扱う。
+    expect(r.main).toEqual({ unknown: buckets(0, 16660, 0) });
+    expect(r.apiCalls).toBe(1);
+    expect(r.sessionId).toBe("total-only-1");
+
+    // 成分が入っているイベントは従来どおり(この分岐に入らない)。
+    const healthy = join(dir, "healthy.jsonl");
+    const healthyLines = [
+      { timestamp: "2026-05-03T04:30:23.000Z", type: "session_meta", payload: { id: "healthy-1", cwd: "/proj", originator: "codex-tui", source: "cli" } },
+      { timestamp: "2026-05-03T04:30:24.000Z", type: "turn_context", payload: { model: "gpt-5.5", cwd: "/proj" } },
+      { timestamp: "2026-05-03T04:30:25.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 5000, cached_input_tokens: 1000, output_tokens: 50, total_tokens: 5050 } } } },
+      { timestamp: "2026-05-03T04:30:26.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    ];
+    writeFileSync(healthy, `${healthyLines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    const h = await aggregateCodexTurn(healthy, null);
+    expect(h?.main).toEqual({ "gpt-5.5": buckets(4000, 1000, 50) });
+  });
+
+  // 16. 合計が 0 のイベント(使用量なし)は従来どおり記録しない。
+  it("16. total_tokens も 0 の token_count は使用量なしのまま", async () => {
+    const f = join(dir, "all-zero.jsonl");
+    const lines = [
+      { timestamp: "2026-05-03T04:30:23.000Z", type: "session_meta", payload: { id: "all-zero-1", cwd: "/proj", originator: "Codex Desktop", source: "cli" } },
+      { timestamp: "2026-05-03T04:30:25.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 0 } } } },
+      { timestamp: "2026-05-03T04:30:26.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    ];
+    writeFileSync(f, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    expect(await aggregateCodexTurn(f, null)).toBeNull();
+  });
+
   // 14. codexResumePointAtTs: 記録済み ts までを消費した再開点を返す。ターンの途中に下限が
   //     あっても、累積カウンタ(prev)をそこまで進めるので残りが正しい差分として出る。
   it("14. codexResumePointAtTs はターン途中の下限からでも残りの差分だけを返す", async () => {

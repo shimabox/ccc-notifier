@@ -528,3 +528,22 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
     進めてからマーカーを消す(進めないと古いカーソルのままマーカーだけ消え、次回再計上になる)。
 - `doctor` は同一 `ingestKey` を持つレコードが複数あれば warn する(旧レコードは従来どおり
   同一 `sessionId` + `ts` で検知)。
+
+## 2026-08-12 追加: token_count の成分欠損(合計だけが入るケース)
+
+- Codex rollout の `event_msg/token_count` は通常 `total_token_usage` に
+  `input_tokens` / `cached_input_tokens` / `output_tokens` / `reasoning_output_tokens` /
+  `total_tokens` を持ち、実データ 171,945 件すべてで
+  `total_tokens === input_tokens + output_tokens` が成立する(cached は input の、
+  reasoning は output の内数)。
+- ただし Codex Desktop の一部ビルドは**成分をすべて 0 のまま `total_tokens` だけに合計を書く**
+  (実データ: Codex Desktop の親 rollout 43件中 34件)。成分だけを読むと使用量ゼロと判定され、
+  そのセッションが丸ごと履歴に現れない。
+- そのため `readTotals` は「成分がすべて 0 かつ `total_tokens` > 0」のときだけ、
+  合計を内訳不明の使用量として拾う。内訳が無い以上どのバケットに置くかは仮定になるので、
+  実データで支配的(input の 97.5% がキャッシュ読み)かつ単価が最も低いキャッシュ読みとして扱う
+  = 過大計上を作らない側に倒す。`total_tokens` も 0 のイベントは従来どおり使用量なし。
+- 該当 rollout は `turn_context` も持たないため model が不明で、単価が引けず費用は 0 になる
+  (`unknownModels` と同じ扱い)。ターン・時刻・トークン数は履歴に現れる。
+- Claude 経路には同種の欠損は無い(実データ 33,170 行の assistant usage を確認。
+  読んでいない数値フィールドに使用量が入っているケースは 0 件)。

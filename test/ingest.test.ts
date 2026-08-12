@@ -716,6 +716,34 @@ describe("runIngest", () => {
 
     const rolloutDir = () => join(codexHomeDir, "sessions", "2026", "08", "01");
 
+    it("17b. 成分0・total_tokens のみの rollout(Codex Desktop)も取り込む", async () => {
+      const sessionId = "019dec1a-0e64-7c10-afaa-30ece1e8fc99";
+      const rolloutPath = join(rolloutDir(), `rollout-2026-05-03T04-30-23-${sessionId}.jsonl`);
+      writeFileSync(
+        rolloutPath,
+        [
+          `{"timestamp":"2026-05-03T04:30:23.000Z","type":"session_meta","payload":{"id":"${sessionId}","cwd":"/proj","originator":"Codex Desktop","source":"cli"}}`,
+          '{"timestamp":"2026-05-03T04:30:24.000Z","type":"event_msg","payload":{"type":"user_message","message":"q"}}',
+          '{"timestamp":"2026-05-03T04:30:25.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":16660},"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"total_tokens":16660},"model_context_window":null}}}',
+          '{"timestamp":"2026-05-03T04:30:26.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}',
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const result = await runIngest({ dryRun: false, offlinePricing: true });
+      const recs = result.records.filter((r) => r.sessionId === sessionId);
+      expect(recs).toHaveLength(1);
+      expect(recs[0].surface).toBe("desktop");
+      expect(recs[0].originator).toBe("Codex Desktop");
+      expect(recs[0].tokens.cacheRead).toBe(16660);
+      expect(recs[0].apiCalls).toBe(1);
+
+      // 2回目は再計上しない(指紋で弾く)。
+      const again = await runIngest({ dryRun: false, offlinePricing: true });
+      expect(again.records.filter((r) => r.sessionId === sessionId)).toHaveLength(0);
+    });
+
     it("18. track が複数ターンをまとめて記録した後にカーソルを失っても、再分割で二重計上しない", async () => {
       const sessionId = "01234567-eeee-7000-8000-000000000018";
       const rolloutPath = join(rolloutDir(), "rollout-multiturn-track.jsonl");
