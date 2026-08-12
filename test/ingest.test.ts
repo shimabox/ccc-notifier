@@ -6,7 +6,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
-  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -18,6 +17,22 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// 既定(unreadablePath === null)は完全パススルー。テストごとに対象パスだけを指定する。
+const fsFault = vi.hoisted(() => ({ unreadablePath: null as string | null }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (fsFault.unreadablePath !== null && String(args[0]) === fsFault.unreadablePath) {
+        throw Object.assign(new Error("simulated permission error"), { code: "EACCES" });
+      }
+      return actual.readFile(...args);
+    }) as typeof actual.readFile,
+  };
+});
 
 import { notifyIngestSummary, runIngest } from "../src/ingest";
 import { runResetCursors } from "../src/reset-cursors";
@@ -89,6 +104,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsFault.unreadablePath = null;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
@@ -983,9 +999,7 @@ describe("runIngest", () => {
       expect(recordB.apiCalls).toBe(1); // A+B ではなく B だけ
       expect(recordB.prompt).toBe("ターンB");
       expect(after.totalUSD).toBeCloseTo(usdBefore + recordB.costUSD, 10); // 総額は A+B の重複を含まない
-      expect(existsSync(pendingAppendPath()) ? readFileSync(pendingAppendPath(), "utf8") : "{}").not.toContain(
-        trackedPath,
-      );
+      expect(hasPendingAppend(trackedPath)).toBe(false);
     });
 
     it("26b. Codex でも、カーソル保存失敗の後に新しいターンが来て再計上しない", async () => {
@@ -1317,14 +1331,14 @@ describe("runIngest", () => {
       await runTrack(stdin); // runTrack は例外を logError に閉じ込めるので投げない
       expect(readHistory().filter((r) => r.sessionId === "sess-marker")).toHaveLength(1); // append は済んでいる
       expect(sanitizeCursor(loadCursor(trackedPath))).toBeNull(); // カーソルは保存できていない
-      expect(readFileSync(pendingAppendPath(), "utf8")).toContain(trackedPath); // マーカーが残る
+      expect(hasPendingAppend(trackedPath)).toBe(true); // マーカーが残る
 
       // 書き込めるように戻して再実行すると、再計上せずマーカーが消える。
       rmSync(join(tmpHome, "cursors.json"), { recursive: true, force: true });
       await runTrack(stdin);
       expect(readHistory().filter((r) => r.sessionId === "sess-marker")).toHaveLength(1);
       expect(countedCallStats().duplicates).toEqual([]);
-      expect(readFileSync(pendingAppendPath(), "utf8")).not.toContain(trackedPath);
+      expect(hasPendingAppend(trackedPath)).toBe(false);
     });
 
     it("24. カーソルが健全なら track は history の指紋を参照しない", async () => {
@@ -1414,13 +1428,14 @@ describe("runIngest", () => {
   it("28. transcript を読めなかったファイルは失敗として数え、mtime キャッシュに載せない", async () => {
     const lockedPath = join(cliProjects, "proj-cli", "unreadable.jsonl");
     writeFileSync(lockedPath, transcriptFixture("sess-locked", "lck"), "utf8");
-    chmodSync(lockedPath, 0o000);
+
+    fsFault.unreadablePath = lockedPath;
     try {
       const blocked = await runIngest({ dryRun: false, offlinePricing: true });
       expect(blocked.failures).toBeGreaterThan(0);
       expect(blocked.records.filter((r) => r.sessionId === "sess-locked")).toHaveLength(0);
     } finally {
-      chmodSync(lockedPath, 0o644);
+      fsFault.unreadablePath = null;
     }
 
     // 権限が戻れば(mtime が変わっていなくても)取り込める。

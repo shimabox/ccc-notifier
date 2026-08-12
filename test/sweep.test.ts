@@ -568,8 +568,10 @@ describe("runSweep (codex)", () => {
     const output = log.mock.calls.flat().join(" ");
     expect(code).toBe(1);
     expect(existsSync(historyFile())).toBe(false);
-    const cursors = existsSync(cursorsFile()) ? readFileSync(cursorsFile(), "utf8") : "";
-    expect(cursors).not.toContain(rollout);
+    const cursors = existsSync(cursorsFile())
+      ? (JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>)
+      : {};
+    expect(cursors[rollout]).toBeUndefined();
   });
 
   it("uses one global lock for Claude and Codex instead of locking each target", async () => {
