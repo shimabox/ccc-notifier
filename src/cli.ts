@@ -35,6 +35,11 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
     en: "Generate and open the HTML dashboard",
   },
   {
+    cmd: "reset-cursors",
+    ja: "取り込み位置を捨てて次回に全再走査させる(履歴は保持。保留マーカーの解除にも使う)",
+    en: "Discard ingest cursors so the next run rescans everything (history is kept)",
+  },
+  {
     cmd: "sweep [--dry-run] [--days N]",
     ja: "履歴と取り込み位置を捨て、元JSONLから概算を再生成(--dry-runはpreview)",
     en: "Reset and rebuild estimates from source JSONL (--dry-run previews)",
@@ -230,6 +235,10 @@ export async function main(argv: string[]): Promise<number> {
       case "scan": {
         const { runScan } = await import("./scan");
         return await runScan(rest);
+      }
+      case "reset-cursors": {
+        const { runResetCursors } = await import("./reset-cursors");
+        return await runResetCursors(rest);
       }
       case "history": {
         const { runHistory } = await import("./history");

@@ -530,8 +530,11 @@ export function markPendingAppend(transcriptPath: string, ingestKey: string): vo
  * 全体保留の予約キーは自動解除しない。解除には「全 transcript のカーソルが history を
  * 反映している」ことの証明が要るが、hook でしか触らない(走査ルート外の)transcript も
  * あり得るため、track/ingest からは証明できない。立ったままでも track は動き続け、
- * 毎回 history を読む(実測 0.06秒 → 0.12秒)だけで正しさは保たれる。解除したい場合は
- * cache/pending-append.json を削除する(= 全 transcript を「保留なし」と宣言する操作)。
+ * 毎回 history を読むだけで正しさは保たれる。
+ * 解除は `ccc-notifier reset-cursors`(src/reset-cursors.ts)で行う。証明する代わりに
+ * 全カーソルを捨ててから予約キーを消すので、次回は必ず history と突合する状態になる。
+ * マーカーファイルだけを消すと、まだ回復していない transcript が古いカーソルを信用して
+ * 再計上するため、その操作は案内しない。
  */
 export function clearPendingAppend(transcriptPath: string): void {
   try {

@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { notifyIngestSummary, runIngest } from "../src/ingest";
+import { runResetCursors } from "../src/reset-cursors";
 import { runSweep } from "../src/sweep";
 import { runTrack } from "../src/track";
 import { callFingerprint } from "../src/counted-calls";
@@ -1149,6 +1150,102 @@ describe("runIngest", () => {
       expect(added.map((r) => r.prompt)).toEqual(["A2", "B2"]);
       expect(added.every((r) => r.apiCalls === 1)).toBe(true);
       expect(after.totalUSD).toBeCloseTo(usdBefore + added[0].costUSD + added[1].costUSD, 10);
+    });
+
+    it("26h. 案内された解除操作(reset-cursors)は、未回復の transcript を再計上させない", async () => {
+      const outside = join(tmpHome, "outside-release");
+      mkdirSync(outside, { recursive: true });
+      const pathA = join(outside, "sess-rA.jsonl");
+      const pathB = join(outside, "sess-rB.jsonl");
+      writeFileSync(pathA, transcriptFixture("sess-rA", "rla"), "utf8");
+      writeFileSync(pathB, transcriptFixture("sess-rB", "rlb"), "utf8");
+      const stdinFor = (p: string): string =>
+        readFileSync(FIXTURE_STDIN, "utf8").replace('"__TRANSCRIPT_PATH__"', () => JSON.stringify(p));
+
+      await runTrack(stdinFor(pathA));
+      await runTrack(stdinFor(pathB));
+      const cursorsBase = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+
+      appendFileSync(pathA, claudeTurnLines("sess-rA", "A1", "req_rla_1", "msg_rla_1", "2026-07-06T17:00:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathA));
+      const recordA = readHistory().at(-1)!;
+      appendFileSync(pathB, claudeTurnLines("sess-rB", "B1", "req_rlb_1", "msg_rlb_1", "2026-07-06T17:10:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathB));
+      const recordB = readHistory().at(-1)!;
+      const fingerprintB = recordB.countedCalls![0];
+
+      // A・B ともカーソルが古く、両方に保留がある状態でマーカーが壊れる。
+      const rolledBack = JSON.parse(readFileSync(join(tmpHome, "cursors.json"), "utf8")) as Record<string, unknown>;
+      rolledBack[pathA] = cursorsBase[pathA];
+      rolledBack[pathB] = cursorsBase[pathB];
+      writeFileSync(join(tmpHome, "cursors.json"), JSON.stringify(rolledBack), "utf8");
+      markPendingAppend(pathA, recordA.ingestKey!);
+      markPendingAppend(pathB, recordB.ingestKey!);
+      writeFileSync(pendingAppendPath(), "{壊れた", "utf8");
+
+      // A だけが回復する(B は未回復のまま)。
+      appendFileSync(pathA, claudeTurnLines("sess-rA", "A2", "req_rla_2", "msg_rla_2", "2026-07-06T18:00:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathA));
+      const usdBefore = countedCallStats().totalUSD;
+
+      // doctor が案内する解除操作。
+      expect(await runResetCursors([])).toBe(0);
+      expect(existsSync(join(tmpHome, "cursors.json"))).toBe(false); // カーソルを先に捨てる
+      expect(existsSync(pendingAppendPath())).toBe(false); // その後にマーカーを消す
+
+      // 未回復だった B を track しても再計上しない。
+      appendFileSync(pathB, claudeTurnLines("sess-rB", "B2", "req_rlb_2", "msg_rlb_2", "2026-07-06T18:10:00.000Z"), "utf8");
+      await runTrack(stdinFor(pathB));
+
+      const after = countedCallStats();
+      expect(after.duplicates).toEqual([]);
+      const occurrencesOfB = readHistory().reduce(
+        (n, r) => n + (r.countedCalls ?? []).filter((fp) => fp === fingerprintB).length,
+        0,
+      );
+      expect(occurrencesOfB).toBe(1);
+      const added = readHistory().at(-1)!;
+      expect(added.prompt).toBe("B2");
+      expect(added.apiCalls).toBe(1);
+      expect(after.totalUSD).toBeCloseTo(usdBefore + added.costUSD, 10);
+    });
+
+    it("26i. 解除操作がカーソル破棄後・マーカー削除前で中断しても再計上しない", async () => {
+      const outside = join(tmpHome, "outside-partial");
+      mkdirSync(outside, { recursive: true });
+      const pathB = join(outside, "sess-pB.jsonl");
+      writeFileSync(pathB, transcriptFixture("sess-pB", "plb"), "utf8");
+      const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+        '"__TRANSCRIPT_PATH__"',
+        () => JSON.stringify(pathB),
+      );
+      await runTrack(stdin);
+      const cursorsBase = readFileSync(join(tmpHome, "cursors.json"), "utf8");
+
+      appendFileSync(pathB, claudeTurnLines("sess-pB", "B1", "req_plb_1", "msg_plb_1", "2026-07-06T17:00:00.000Z"), "utf8");
+      await runTrack(stdin);
+      const recordB = readHistory().at(-1)!;
+      const fingerprintB = recordB.countedCalls![0];
+      writeFileSync(join(tmpHome, "cursors.json"), cursorsBase, "utf8");
+      markPendingAppend(pathB, recordB.ingestKey!);
+      writeFileSync(pendingAppendPath(), "{壊れた", "utf8");
+      const usdBefore = countedCallStats().totalUSD;
+
+      // カーソルは捨てたが、マーカーを消す前に落ちた状態。
+      rmSync(join(tmpHome, "cursors.json"), { force: true });
+      expect(hasPendingAppend(pathB)).toBe(true); // 保留は残ったまま(安全側)
+
+      appendFileSync(pathB, claudeTurnLines("sess-pB", "B2", "req_plb_2", "msg_plb_2", "2026-07-06T18:10:00.000Z"), "utf8");
+      await runTrack(stdin);
+
+      const after = countedCallStats();
+      expect(after.duplicates).toEqual([]);
+      const occurrencesOfB = readHistory().reduce(
+        (n, r) => n + (r.countedCalls ?? []).filter((fp) => fp === fingerprintB).length,
+        0,
+      );
+      expect(occurrencesOfB).toBe(1);
+      expect(after.totalUSD).toBeCloseTo(usdBefore + readHistory().at(-1)!.costUSD, 10);
     });
 
     it("26f. 保留マーカーを作れないときは append せずに終える(例外は外に出さない)", async () => {

@@ -29,7 +29,6 @@ import {
   hasUnresolvedPendingMarker,
   isMuted,
   paths,
-  pendingAppendPath,
   readConfig,
   readMuteState,
   readTurns,
@@ -769,8 +768,9 @@ function checkPendingAppendMarker(): boolean {
     "warn",
     "取り込み保留マーカー(cache/pending-append.json)が壊れた形跡があります。" +
       "安全側で全セッションを保留扱いにしているため、Stop hook のたびに history を読み直します" +
-      "(二重計上は起きません)。解消するにはファイルを削除してください: " +
-      pendingAppendPath(),
+      "(二重計上は起きません)。解消するには ccc-notifier reset-cursors を実行してください" +
+      "(取り込み位置を捨ててから解除します。履歴は保持され、次回の取り込みだけ全再走査で時間がかかります)。" +
+      "マーカーファイル単独の削除では、まだ回復していないセッションが再計上され得ます",
   );
   return true;
 }
@@ -829,7 +829,8 @@ function checkDuplicateHistoryTurns(): boolean {
   log(
     "warn",
     `history.jsonl に同一 sessionId+ts の重複ターンを検出しました(${dupGroups.length}組・${totalDupRows}行)。` +
-      `二重計上の可能性があります。例: ${sample.join(", ")}。history redact/clear での手動整理を検討してください`,
+      `二重計上の可能性があります。例: ${sample.join(", ")}。` +
+      "元 JSONL から作り直すなら ccc-notifier sweep、個別に消すなら history clear を検討してください",
   );
   return true;
 }

@@ -517,7 +517,10 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
     その transcript は次回カーソルを信用して二重計上する。予約キーは自動解除しない
     (「全 transcript のカーソルが history を反映している」ことを track/ingest からは証明
     できないため)。立っている間も track は動き続け、毎回 history を読むだけ。解除は
-    `cache/pending-append.json` の削除で行い、`doctor` がその案内を出す。
+    `ccc-notifier reset-cursors`(全カーソルを破棄してから予約キーを消す。順序はこの向きで固定し、
+    途中で落ちても「カーソル無し + 予約キー残存」= 安全側に倒す)。マーカーファイル単独の削除は
+    案内しない — まだ回復していない transcript が古いカーソルを信用して再計上するため。
+    `doctor` はこの手順を案内する。
   - **マーカーを置けない**ときは append せずにそのターンを見送る。記録を落とすのはコストの
     取りこぼしだが、transcript は残るので history 全体の指紋索引で守られている ingest が
     後から回収する。二重計上を作るよりこちらに倒す。`runTrack` は例外を外に出さない契約のまま。
