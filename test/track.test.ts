@@ -51,6 +51,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   rmSync(tmpHome, { recursive: true, force: true });
@@ -360,6 +361,8 @@ describe("runTrack", () => {
   });
 
   it("8a2. regenerates recent every new turn but full only once on the same local day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 15, 12, 0, 0, 0));
     const stdin = stdinFor(transcriptPath);
     await runTrack(stdin);
     const fullBefore = readFileSync(join(tmpHome, "report-all.html"), "utf8");
