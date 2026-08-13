@@ -14,12 +14,26 @@ export interface TokenBuckets {
 
 export type UsageByModel = Record<string, TokenBuckets>; // key: message.model (例 "claude-fable-5")
 
+// history レコードの利用元識別子。既定は cli(旧レコード後方互換の解釈も含む)。
+// desktop = Claude/Codex デスクトップアプリ、vscode = Codex VS Code 拡張、
+// claude-code = Codex rollout に originator "Claude Code" が記録されたケース、
+// chrome-extension = Codex Chrome 拡張、other = 未知の originator。
+export type Surface = "cli" | "desktop" | "vscode" | "claude-code" | "chrome-extension" | "other";
+
 export interface Cursor {
   offset: number;             // 処理済みバイトオフセット
   lastUuid: string | null;    // 整合性検証用
   lastTs: string | null;      // フルリスキャン時の下限(これ以前の行はスキップ)
   seenMessageKeys: string[];  // 直近の "messageId:requestId"(最大500・リングバッファ)
   codexTotals?: { input: number; cached: number; output: number }; // Codex rollout の total_token_usage 累積スナップショット(逐次差分集計用)。Claude transcript では常に undefined。
+  // Codex rollout の session_meta.originator(生値)。session_meta はファイル先頭にしか現れないため、
+  // 2回目以降の増分読み(offset > 0 からの再開)でも失わないようカーソル越しに持ち回る。
+  // Claude transcript では常に undefined。
+  codexOriginator?: string | null;
+  // Codex rollout の直近 turn_context.model。ターン境界より後ろから再開した窓には turn_context が
+  // 無く、モデル不明(単価不明=0円)になってしまうためカーソル越しに持ち回る。
+  // Claude transcript では常に undefined。
+  codexModel?: string | null;
 }
 
 export interface TurnAggregate {
@@ -33,6 +47,12 @@ export interface TurnAggregate {
   firstTs: string | null;
   lastTs: string | null;
   newCursor: Cursor;
+  /** Codex rollout の session_meta.originator(生値)。Claude 経路では常に undefined。 */
+  originator?: string | null;
+  /** session_meta.payload.source.subagent を持つ child rollout か。Claude 経路では常に undefined。 */
+  isSubagentRollout?: boolean;
+  /** この集計で計上した token_count イベントの指紋(Codex 経路のみ)。Claude では常に undefined。 */
+  codexEventKeys?: string[];
 }
 
 export interface ModelPrice {  // 単位: USD / 100万トークン
@@ -66,8 +86,12 @@ export interface TurnRecord {
   fxRate: number;
   fxSource: 'live' | 'cache' | 'fixed';
   prompt: string;            // 全文(ローカルのみ)。null 時は ""
-  ingest?: 'sweep';          // sweep(過去分の一括回収)由来の記録の目印。hook 経由は付与しない(undefined)
+  ingest?: 'sweep' | 'scan'; // sweep(全リセット再構築)/ scan(hook非依存の増分取り込み)由来の記録の目印。hook 経由は付与しない(undefined)
   source?: 'codex';          // 無し = Claude Code(後方互換)。ingest と同じ流儀
+  /** 利用元。欠損(旧レコード) = cli として読み取り側で解釈する(マイグレーション不要)。 */
+  surface?: Surface;
+  /** Codex rollout の session_meta.originator 生値。surface 正規化前の値を保持する(Claude では常に undefined)。 */
+  originator?: string;
   /** valid Codex親turnと将来到着しうる検出台帳activityを結ぶ匿名HMAC key。UIへ表示しない。 */
   activityProjectionKey?: string;
   /** readerが検出台帳からpure mergeするruntime-only値。historyへは保存しない。 */
@@ -77,6 +101,14 @@ export interface TurnRecord {
     agentTypes: string[];
     usageStatus: 'partial' | 'unavailable';
   };
+  /**
+   * このレコードで計上した API 呼び出しの指紋(src/counted-calls.ts)。親ターン分と
+   * サブエージェント分の両方を含む。取り込み側はこれを除外条件にして、カーソルが壊れても
+   * 同じ呼び出しを二度計上しない。欠損 = この仕組みより前のレコード(ts による識別へフォールバック)。
+   */
+  countedCalls?: string[];
+  /** countedCalls から決まるレコードの一意キー。呼び出しを計上していないレコードには付かない。 */
+  ingestKey?: string;
   unknownModels?: string[];
   subagents?: {              // サブエージェント枠(旧レコード後方互換のため optional)
     costUSD: number;                     // サブエージェント合計(丸めない)

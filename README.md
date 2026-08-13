@@ -23,6 +23,8 @@ in 1.2k(cache 40%) / out 480 · 📁 my-app · 今日: $1.85
 - 月予算を設定し、今月の使用率を確認できます
 - 通知を一時停止しても、履歴の記録は続けられます
 - Codex CLIも任意で追加し、Claude Codeと同じダッシュボードで確認できます
+- Claude デスクトップアプリの**Code タブ（ローカルエージェントモード）**での作業と、Codex Desktop の利用分も`scan`コマンド（または応答完了時の自動便乗り取込）でローカルログから取り込めます（macOS）
+  - **ホームタブの通常チャット（および claude.ai / ChatGPT の通常チャット）は対象外です。**これらは手元のログにトークン数が残らないため（2026-08-12時点の実測）、現在の方式では計測できません。対応表は[計測できるもの・できないもの](docs/how-it-works.md#計測できるものできないもの--what-is-and-isnt-measured)を参照してください
 
 ## 必要なもの
 
@@ -131,6 +133,9 @@ ccc-notifier init
 | `ccc-notifier unmute` | 通知を再開する |
 | `ccc-notifier sweep --dry-run [--days N]` | 履歴を作り直した場合の件数と概算を確認する |
 | `ccc-notifier sweep [--days N]` | 残っている利用データから履歴を作り直す |
+| `ccc-notifier scan --dry-run` | hook非依存の増分取り込み（Claude デスクトップの Code タブ・Codex Desktop 等の取りこぼし回収）の予定件数・金額を確認する |
+| `ccc-notifier scan` | 未追跡分（Claude デスクトップの Code タブ、Codex Desktop 等）を履歴へ取り込む |
+| `ccc-notifier reset-cursors` | 取り込み位置を捨てて次回に全再走査させる（履歴は保持。`doctor`が案内したときに使う） |
 
 > [!CAUTION]
 > **`sweep`は履歴を作り直すコマンドです。** 保存済みの履歴をいったん消し、Claude Code / Codex CLIに残っているデータから再作成します。設定や通知は消えませんが、履歴のバックアップは作りません。以前に削除・伏せ字にした履歴も、Claude Code / Codex CLI側の元データに残っていれば再び入ります。また、再作成した時点の単価と為替を使うため、以前の金額から変わることがあります。先に`--dry-run`で確認してください。詳しくは[履歴の再生成](docs/sweep.md)を参照してください。

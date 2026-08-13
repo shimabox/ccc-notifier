@@ -153,3 +153,29 @@ export function formatSummary(record: TurnRecord, cfg: Config, todayUSD?: number
 
   return { title, body: `${line1}\n${line2}` };
 }
+
+// ============ ingest(scan / 便乗り取込)まとめ通知の整形 ============
+
+export interface IngestSummaryInput {
+  recordCount: number;
+  totalUSD: number;
+  totalJPY: number;
+  bySurface: Record<string, { turns: number; usd: number }>;
+}
+
+/**
+ * scan(手動実行)/ track 便乗り取込が新規に取り込んだターン群のまとめ通知を整形する。
+ * ターン単位の formatSummary とは別物(サーフェス・件数・合計 USD/JPY を表記する)。
+ */
+export function formatIngestSummary(input: IngestSummaryInput, cfg: Config): FormattedSummary {
+  const label = cfg.costLabel === "api_equivalent" ? "API換算 " : "";
+  const title = `💰 ${label}${formatUSD(input.totalUSD)}(${formatJPY(input.totalJPY)})| hook非依存の取り込み ${input.recordCount}件`;
+
+  const bySurfaceLine = Object.entries(input.bySurface)
+    .sort((a, b) => b[1].usd - a[1].usd)
+    .map(([surface, v]) => `${surface}: ${v.turns}件 ${formatUSD(v.usd)}`)
+    .join(" / ");
+
+  const body = `${bySurfaceLine}\nhook 非依存の増分取り込み(scan)による新規分です`;
+  return { title, body };
+}

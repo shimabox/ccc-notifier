@@ -8,6 +8,7 @@
 // broken cursors must never crash and must never double-count.
 
 import { readFile } from 'node:fs/promises';
+import type { MessageKeyFilter } from './counted-calls';
 import type { Cursor, TokenBuckets, TurnAggregate, UsageByModel } from './types';
 
 const NEWLINE = 0x0a; // '\n'
@@ -109,7 +110,8 @@ export async function aggregateNewTurn(
   transcriptPath: string,
   cursor: Cursor | null,
   opts: {
-    excludeMessageKeys?: ReadonlySet<string>;
+    /** 既に計上済みの messageKey を弾く述語(Set でも可)。弾いた行はカーソルには消費させる。 */
+    excludeMessageKeys?: MessageKeyFilter;
     minTimestampMs?: number | null;
     returnEmpty?: boolean;
   } = {},

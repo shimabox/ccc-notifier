@@ -965,3 +965,41 @@ describe("runDashboard — Codex と月予算カード", () => {
     expect(html).not.toContain('<p class="note">全ソース合算');
   });
 });
+
+describe("runDashboard — サーフェス別内訳 (desktop-cost-tracking)", () => {
+  it("複数 surface が存在すればサーフェス別内訳セクションが表示される", async () => {
+    appendTurn(makeTurn({ costUSD: 0.1, costJPY: 15, surface: "cli" }));
+    appendTurn(makeTurn({ costUSD: 0.2, costJPY: 30, surface: "desktop" }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("サーフェス別内訳 / By surface");
+    expect(html).toContain("デスクトップアプリ");
+    expect(html).toContain(formatUSD(0.2));
+  });
+
+  it("単一 surface のみ(cli 専業)ならサーフェス別内訳セクションは出さない", async () => {
+    appendTurn(makeTurn({ costUSD: 0.1, costJPY: 15, surface: "cli" }));
+    appendTurn(makeTurn({ costUSD: 0.2, costJPY: 30 })); // surface 欠損 = cli 相当
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).not.toContain("サーフェス別内訳 / By surface");
+  });
+
+  it("単一 surface でも cli 以外(デスクトップ専業)なら内訳を出す", async () => {
+    appendTurn(makeTurn({ costUSD: 0.1, costJPY: 15, surface: "desktop" }));
+    appendTurn(makeTurn({ costUSD: 0.2, costJPY: 30, surface: "desktop" }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("サーフェス別内訳 / By surface");
+    expect(html).toContain("デスクトップアプリ");
+  });
+
+  it("surface 欠損の旧レコードは cli として扱われる(後方互換)", async () => {
+    appendTurn(makeTurn({ costUSD: 0.1, costJPY: 15 })); // surface 無し(旧レコード)
+    appendTurn(makeTurn({ costUSD: 0.2, costJPY: 30, surface: "desktop" }));
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("サーフェス別内訳 / By surface");
+    expect(html).toContain("CLI");
+  });
+});

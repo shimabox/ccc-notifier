@@ -14,9 +14,10 @@
 import { readFile } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 
 import { extractBucket, promptCandidate } from "./transcript";
+import { addCountedCalls, anyOf, callFingerprints, setCountedCalls } from "./counted-calls";
+import type { MessageKeyFilter } from "./counted-calls";
 import { computeCost, loadPriceTable } from "./pricing";
 import { getUsdJpy } from "./fx";
 import {
@@ -36,10 +37,13 @@ import type { SubagentUsage } from "./subagents";
 import { codexHome } from "./codex/env";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
 import type { CodexTurnDraft } from "./codex/transcript";
+import { normalizeCodexOriginator } from "./codex/originator";
 import { listCodexRollouts } from "./codex/sessions";
 import type { CodexRolloutDiscovery } from "./codex/sessions";
+import { claudeTranscriptRoots, surfaceForClaudePath } from "./claude-roots";
+import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { formatJPY, formatUSD, modelDisplayName } from "./format";
-import type { Cursor, FxResult, PriceTable, TokenBuckets, TurnRecord, UsageByModel } from "./types";
+import type { Cursor, FxResult, PriceTable, Surface, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 import { waitForDataLock, type DataLockHandle } from "./data-lock";
 import { writeDashboardHtml } from "./dashboard";
 import {
@@ -139,6 +143,8 @@ export interface TurnDraft {
   mainPerModel: UsageByModel;
   sidechainPerModel: UsageByModel;
   apiCalls: number;
+  /** このターンで計上した messageKey(history へ指紋として残し、再計上を防ぐ)。 */
+  messageKeys: string[];
   firstTs: string | null;
   lastTs: string | null;
   cwd: string | null;
@@ -254,12 +260,15 @@ async function readAll(path: string): Promise<Buffer | null> {
 export async function splitIntoTurnDrafts(
   transcriptPath: string,
   cursor: Cursor | null,
-): Promise<{ drafts: TurnDraft[]; newCursor: Cursor; messageKeys: string[] }> {
+  opts: { excludeMessageKeys?: MessageKeyFilter } = {},
+): Promise<{ drafts: TurnDraft[]; newCursor: Cursor; messageKeys: string[]; unreadable?: true }> {
   const buffer = await readAll(transcriptPath);
   if (buffer === null) {
     // 読めない場合は何も消費しない(既存カーソルがあればそのまま、無ければゼロ)。
+    // 「読めなかった」と「新規 usage が無かった」を呼び出し側が区別できるよう印を付ける
+    // (読み取り失敗を処理済みとして扱うと、権限が戻っても mtime が同じ限り拾えなくなる)。
     const nc: Cursor = cursor ?? { offset: 0, lastUuid: null, lastTs: null, seenMessageKeys: [] };
-    return { drafts: [], newCursor: nc, messageKeys: [] };
+    return { drafts: [], newCursor: nc, messageKeys: [], unreadable: true };
   }
   const fileSize = buffer.length;
 
@@ -279,7 +288,9 @@ export async function splitIntoTurnDrafts(
     rescan = cursor !== null;
   }
 
-  const priorSeen = new Set<string>(cursor?.seenMessageKeys ?? []); // グローバル seen(過去に計上済み)
+  // グローバル seen(過去に計上済み)= カーソルのリング + 呼び出し元が渡した除外条件
+  // (history 由来の「計上済み指紋」など。カーソルが失われていても再計上させない)。
+  const priorSeen = anyOf([new Set<string>(cursor?.seenMessageKeys ?? []), opts.excludeMessageKeys]);
   const tsFloor = cursor?.lastTs ?? null;
 
   const drafts: TurnDraft[] = [];
@@ -294,9 +305,11 @@ export async function splitIntoTurnDrafts(
     if (cur.pending.size === 0) return; // assistant usage が無いバッファはターンにしない
     const mainPerModel: UsageByModel = {};
     const sidechainPerModel: UsageByModel = {};
+    const draftKeys: string[] = [];
     for (const [key, pm] of cur.pending) {
       runSeen.add(key);
       newKeys.push(key);
+      draftKeys.push(key);
       if (pm.isSidechain) addToModel(sidechainPerModel, pm.model, pm.bucket);
       else addToModel(mainPerModel, pm.model, pm.bucket);
     }
@@ -305,6 +318,7 @@ export async function splitIntoTurnDrafts(
       mainPerModel,
       sidechainPerModel,
       apiCalls: cur.pending.size,
+      messageKeys: draftKeys,
       firstTs: cur.firstTs,
       lastTs: cur.lastTs,
       cwd: cur.cwd,
@@ -417,7 +431,13 @@ export async function splitIntoTurnDrafts(
 
 // ============ レコード化 ============
 
-function draftToRecord(draft: TurnDraft, ts: string, table: PriceTable, fx: FxResult): TurnRecord {
+function draftToRecord(
+  draft: TurnDraft,
+  ts: string,
+  table: PriceTable,
+  fx: FxResult,
+  surface: Surface,
+): TurnRecord {
   const breakdown = computeCost(draft.mainPerModel, draft.sidechainPerModel, table);
   const sidechainHasModels = Object.keys(draft.sidechainPerModel).length > 0;
 
@@ -438,8 +458,10 @@ function draftToRecord(draft: TurnDraft, ts: string, table: PriceTable, fx: FxRe
     fxSource: fx.source,
     prompt: draft.prompt,
     ingest: "sweep",
+    surface,
   };
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, callFingerprints(draft.messageKeys));
   return rec;
 }
 
@@ -448,6 +470,88 @@ function mergeUnknownModels(rec: TurnRecord, extra: string[]): void {
   const merged = rec.unknownModels ? [...rec.unknownModels] : [];
   for (const m of extra) if (!merged.includes(m)) merged.push(m);
   rec.unknownModels = merged;
+}
+
+/**
+ * サブエージェント usage を親ターンへ合算する(sweep / ingest 共通)。
+ *
+ * agent ファイル1つ = 時刻を持つ1グループとして扱い、そのグループの完了時刻以降に完了した
+ * 最初の親ターンへ付ける(セッション全体を最後の親へ寄せない)。時刻が分かるのに以後の親が
+ * 無い場合は、誤った日/月へ載せないよう SA のみのレコードを新しく作って records へ足す。
+ * 時刻不明のグループだけは最後の親へ寄せる。戻り値は付加した SA コストの合計 USD。
+ */
+export function attachSubagentGroups(
+  records: TurnRecord[],
+  sa: SubagentUsage,
+  table: PriceTable,
+  fx: FxResult,
+  surface: Surface,
+  ingest: "sweep" | "scan",
+): number {
+  const parentRecords = [...records];
+  let addedUSD = 0;
+
+  for (const group of sa.groups) {
+    const saBreakdown = computeCost(group.perModel, {}, table);
+    addedUSD += saBreakdown.usd;
+    const saBlock: NonNullable<TurnRecord["subagents"]> = {
+      costUSD: saBreakdown.usd,
+      costByModel: { ...saBreakdown.byModel },
+      tokens: sumBuckets(group.perModel),
+      apiCalls: group.apiCalls,
+      agentFiles: 1,
+    };
+
+    const groupMs = group.lastTs === null ? NaN : Date.parse(group.lastTs);
+    let target: TurnRecord | undefined;
+    if (Number.isFinite(groupMs)) {
+      target = parentRecords.find((rec) => {
+        const recMs = Date.parse(rec.ts);
+        return Number.isFinite(recMs) && recMs >= groupMs;
+      });
+    } else {
+      target = parentRecords[parentRecords.length - 1];
+    }
+
+    if (target === undefined) {
+      target = {
+        schemaVersion: 1,
+        ts: group.lastTs ?? sa.lastTs ?? new Date().toISOString(),
+        sessionId: sa.sessionId,
+        project: sa.cwd ?? "",
+        gitBranch: sa.gitBranch,
+        models: collectModels(group.perModel, {}),
+        tokens: emptyBuckets(),
+        sidechainTokens: null,
+        apiCalls: 0,
+        costUSD: 0,
+        costByModel: {},
+        costJPY: 0,
+        fxRate: fx.rate,
+        fxSource: fx.source,
+        prompt: "",
+        ingest,
+        surface,
+      };
+      records.push(target);
+    }
+
+    addCountedCalls(target, callFingerprints(group.messageKeys));
+    if (target.subagents === undefined) {
+      target.subagents = saBlock;
+    } else {
+      target.subagents.costUSD += saBlock.costUSD;
+      target.subagents.apiCalls += saBlock.apiCalls;
+      target.subagents.agentFiles += 1;
+      addToBuckets(target.subagents.tokens, saBlock.tokens);
+      for (const [model, usd] of Object.entries(saBlock.costByModel)) {
+        target.subagents.costByModel[model] = (target.subagents.costByModel[model] ?? 0) + usd;
+      }
+    }
+    mergeUnknownModels(target, saBreakdown.unknownModels);
+  }
+
+  return addedUSD;
 }
 
 // ============ 1 transcript の処理 ============
@@ -459,12 +563,14 @@ async function processTranscriptLocked(
   daysCutoff: number | null,
   dryRun: boolean,
   summary: SweepSummary,
+  roots: ClaudeTranscriptRoot[],
   opts: { ignoreCursors?: boolean; strictRead?: boolean } = {},
 ): Promise<void> {
   if (opts.strictRead) {
     const file = await fsp.open(mainPath, "r");
     await file.close();
   }
+  const surface = surfaceForClaudePath(mainPath, roots);
   const cursor = opts.ignoreCursors ? null : sanitizeCursor(loadCursor(mainPath));
   const { drafts, newCursor, messageKeys } = await splitIntoTurnDrafts(mainPath, cursor);
 
@@ -476,7 +582,7 @@ async function processTranscriptLocked(
       const tsMs = Date.parse(ts);
       if (!Number.isFinite(tsMs) || tsMs < daysCutoff) continue; // 古い → 捨てる
     }
-    records.push(draftToRecord(draft, ts, table, fx));
+    records.push(draftToRecord(draft, ts, table, fx, surface));
   }
 
   // サブエージェント回収。
@@ -494,73 +600,9 @@ async function processTranscriptLocked(
     logError("sweep:subagents", err);
     sa = null;
   }
-  const saHasUsage = sa !== null && sa.apiCalls > 0;
-  if (saHasUsage) {
-    // Each agent file is kept as a time-bearing group. Attach it to the first
-    // parent turn that completes at/after the agent, rather than assigning the
-    // whole session to its last turn. --days filtering already happened while
-    // parsing each assistant row, so old and recent agent costs are not mixed.
-    const parentRecords = [...records];
-    for (const group of sa!.groups) {
-      const saBreakdown = computeCost(group.perModel, {}, table);
-      summary.subagentsUSD += saBreakdown.usd;
-      const saBlock: NonNullable<TurnRecord["subagents"]> = {
-        costUSD: saBreakdown.usd,
-        costByModel: { ...saBreakdown.byModel },
-        tokens: sumBuckets(group.perModel),
-        apiCalls: group.apiCalls,
-        agentFiles: 1,
-      };
-
-      const groupMs = group.lastTs === null ? NaN : Date.parse(group.lastTs);
-      let target: TurnRecord | undefined;
-      if (Number.isFinite(groupMs)) {
-        target = parentRecords.find((rec) => {
-          const recMs = Date.parse(rec.ts);
-          return Number.isFinite(recMs) && recMs >= groupMs;
-        });
-      } else {
-        // 時刻不明の場合だけ従来どおり最後の親へ寄せる。時刻が分かり、
-        // それ以後の親が無い場合は誤った日/月へ載せずSA-onlyにする。
-        target = parentRecords[parentRecords.length - 1];
-      }
-
-      if (target === undefined) {
-        target = {
-          schemaVersion: 1,
-          ts: group.lastTs ?? sa!.lastTs ?? new Date().toISOString(),
-          sessionId: sa!.sessionId,
-          project: sa!.cwd ?? "",
-          gitBranch: sa!.gitBranch,
-          models: collectModels(group.perModel, {}),
-          tokens: emptyBuckets(),
-          sidechainTokens: null,
-          apiCalls: 0,
-          costUSD: 0,
-          costByModel: {},
-          costJPY: 0,
-          fxRate: fx.rate,
-          fxSource: fx.source,
-          prompt: "",
-          ingest: "sweep",
-        };
-        records.push(target);
-      }
-
-      if (target.subagents === undefined) {
-        target.subagents = saBlock;
-      } else {
-        target.subagents.costUSD += saBlock.costUSD;
-        target.subagents.apiCalls += saBlock.apiCalls;
-        target.subagents.agentFiles += 1;
-        addToBuckets(target.subagents.tokens, saBlock.tokens);
-        for (const [model, usd] of Object.entries(saBlock.costByModel)) {
-          target.subagents.costByModel[model] = (target.subagents.costByModel[model] ?? 0) + usd;
-        }
-      }
-      mergeUnknownModels(target, saBreakdown.unknownModels);
-    }
-    summary.agentFiles += sa!.agentFiles;
+  if (sa !== null && sa.apiCalls > 0) {
+    summary.subagentsUSD += attachSubagentGroups(records, sa, table, fx, surface, "sweep");
+    summary.agentFiles += sa.agentFiles;
   }
 
   // サマリ集計(totalUSD / byModel はメイン基準。SA は含めない = GOLDEN 準拠）。
@@ -624,8 +666,11 @@ function codexDraftToRecord(
     prompt: draft.agg.prompt ?? "",
     ingest: "sweep",
     source: "codex",
+    surface: normalizeCodexOriginator(draft.agg.originator),
   };
+  if (typeof draft.agg.originator === "string") rec.originator = draft.agg.originator;
   if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, draft.agg.codexEventKeys ?? []);
   return rec;
 }
 
@@ -720,11 +765,6 @@ async function discoverCodexSweepSource(): Promise<CodexSweepSource | null> {
 }
 
 // ============ 走査 ============
-
-function projectsRoot(override: string | null): string {
-  if (override) return override;
-  return process.env.CCCN_CLAUDE_PROJECTS || join(homedir(), ".claude", "projects");
-}
 
 interface SweepFlags {
   dryRun: boolean;
@@ -853,6 +893,7 @@ async function scanAllSources(
   dryRun: boolean,
   summary: SweepSummary,
   progress: SweepProgressReporter,
+  claudeRoots: ClaudeTranscriptRoot[],
 ): Promise<void> {
   const codexRollouts = codexSource?.discovery.rollouts.length ?? 0;
   progress({
@@ -879,7 +920,7 @@ async function scanAllSources(
   for (const mainPath of transcriptPaths) {
     summary.transcripts += 1;
     try {
-      await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, {
+      await processTranscriptLocked(mainPath, table, fx, daysCutoff, dryRun, summary, claudeRoots, {
         ignoreCursors: true,
         strictRead: true,
       });
@@ -944,19 +985,40 @@ export async function runSweep(
   }
   const flags = parsed.flags;
   const progress = createSweepProgressReporter();
-  const root = projectsRoot(flags.projects);
+  const claudeRoots = await claudeTranscriptRoots({ projectsOverride: flags.projects });
+  const cliRoot = claudeRoots.find((r) => r.surface === "cli")!;
 
-  // Claude ルート不在でも、Codex 側が走査可能なら警告1行を出して Codex 走査だけ続行する
-  // (Codex 専用ユーザーの全再生成を成立させるため)。両方走査不能ならreset前にエラー終了。
-  const projectDirs = await listProjectDirs(root);
+  const cliProjectDirs = await listProjectDirs(cliRoot.path);
   const codexSource = await discoverCodexSweepSource();
-  if (projectDirs === null) {
-    if (codexSource === null || codexSource.discovery.unreadableDirs > 0) {
-      console.log(`走査ルートが見つかりません: ${root}`);
+
+  // デスクトップルート(surface=desktop)は不在・読み込み失敗を黙ってスキップする
+  // (非公開レイアウトでアプリ更新により壊れ得るため、本体機能に影響させない)。
+  const desktopProjectDirs: string[] = [];
+  for (const root of claudeRoots) {
+    if (root.surface !== "desktop") continue;
+    const dirs = await listProjectDirs(root.path);
+    if (dirs !== null) desktopProjectDirs.push(...dirs);
+  }
+
+  // CLI ルート不在でも、デスクトップまたは Codex が走査可能なら続行する
+  // (デスクトップ専業・Codex 専業ユーザーの全再生成を成立させるため)。
+  // すべての source が走査不能なときだけ reset 前にエラー終了する。
+  if (cliProjectDirs === null) {
+    const codexUsable = codexSource !== null && codexSource.discovery.unreadableDirs === 0;
+    if (!codexUsable && desktopProjectDirs.length === 0) {
+      console.log(`走査ルートが見つかりません: ${cliRoot.path}`);
       return 1;
     }
-    console.log(`Claude の走査ルートが見つかりません: ${root}(Codex のみ走査します)`);
+    const remaining = [
+      desktopProjectDirs.length > 0 ? "デスクトップ" : null,
+      codexUsable ? "Codex" : null,
+    ].filter((v): v is string => v !== null);
+    console.log(`Claude CLI の走査ルートが見つかりません: ${cliRoot.path}(${remaining.join(" / ")} のみ走査します)`);
   }
+  const projectDirs =
+    cliProjectDirs === null && desktopProjectDirs.length === 0
+      ? null
+      : [...(cliProjectDirs ?? []), ...desktopProjectDirs];
 
   // 実行時に一度だけ: 設定 / 単価表(オンライン可・失敗時は内蔵へフォールバック) / 為替。
   progress({ type: "preparing", dryRun: flags.dryRun });
@@ -990,7 +1052,7 @@ export async function runSweep(
 
   if (flags.dryRun) {
     try {
-      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary, progress);
+      await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, true, summary, progress, claudeRoots);
     } catch (err) {
       reportSourceFailure(summary, true, "sweep:dry-run", err);
     }
@@ -1015,7 +1077,7 @@ export async function runSweep(
   try {
     invalidateCanonicalDashboards();
     resetHistoryAndCursors();
-    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary, progress);
+    await scanAllSources(projectDirs, codexSource, table, fx, daysCutoff, false, summary, progress, claudeRoots);
     try {
       // scan前の古いHTMLだけでなく、writerが作り得るplaceholderも一度消してから同じsnapshotで再生成する。
       invalidateCanonicalDashboards();

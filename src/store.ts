@@ -13,6 +13,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { Config, Cursor, DEFAULT_CONFIG, TurnRecord } from "./types";
@@ -282,6 +283,23 @@ export function loadCursor(transcriptPath: string): Cursor | null {
 }
 
 /**
+ * cursors.json に登録済みの全パス(キー)を返す(doctor の追跡漏れ検知用)。
+ * 不在/破損時は空 Set(loadCursor と同じ規則: 破損時のみ logError)。
+ */
+export function cursorPaths(): Set<string> {
+  const p = paths();
+  if (!existsSync(p.cursorsFile)) return new Set();
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(p.cursorsFile, "utf8"));
+    if (!isPlainObject(parsed)) return new Set();
+    return new Set(Object.keys(parsed));
+  } catch (err) {
+    logError("cursorPaths", err);
+    return new Set();
+  }
+}
+
+/**
  * loadCursor の戻り値を「形全体」で検証する。
  * cursors.json は理論上手で編集されうるため、文字列だけの seenMessageKeys フィルタでは足りない。
  * offset が有限数値 / lastUuid が string|null / lastTs が string|null / seenMessageKeys が string 配列 —
@@ -291,7 +309,7 @@ export function loadCursor(transcriptPath: string): Cursor | null {
  */
 export function sanitizeCursor(raw: unknown): Cursor | null {
   if (!isPlainObject(raw)) return null;
-  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals } = raw;
+  const { offset, lastUuid, lastTs, seenMessageKeys, codexTotals, codexOriginator, codexModel } = raw;
   if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
   if (lastUuid !== null && typeof lastUuid !== "string") return null;
   if (lastTs !== null && typeof lastTs !== "string") return null;
@@ -318,12 +336,63 @@ export function sanitizeCursor(raw: unknown): Cursor | null {
     }
   }
 
+  // codexOriginator / codexModel は string|null のときのみ採用する
+  // (Claude 側カーソルには常にこれらのキーが存在しない)。
+  if (Object.hasOwn(raw, "codexOriginator")) {
+    if (codexOriginator === null || typeof codexOriginator === "string") {
+      cursor.codexOriginator = codexOriginator;
+    }
+  }
+  if (Object.hasOwn(raw, "codexModel")) {
+    if (codexModel === null || typeof codexModel === "string") {
+      cursor.codexModel = codexModel;
+    }
+  }
+
   return cursor;
 }
 
 /**
+ * cursors.json 全体を1回の読み込みで返す(生の辞書。値は sanitizeCursor に通す前)。
+ * ingest(src/ingest.ts)のように多数のファイルのカーソルをまとめて参照する呼び出し元向け。
+ * 呼び出し元は同じ data lock を保持したまま読み → 処理 → saveAllCursors で1回だけ書き戻すこと。
+ * 不在 → 空辞書。壊れている → logError して空辞書(loadCursor と同じ規則)。
+ */
+export function loadAllCursors(): Record<string, unknown> {
+  const p = paths();
+  if (!existsSync(p.cursorsFile)) return {};
+  try {
+    const raw = readFileSync(p.cursorsFile, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) {
+      logError("loadAllCursors", new Error("cursors.json root is not an object"));
+      return {};
+    }
+    return parsed;
+  } catch (err) {
+    logError("loadAllCursors", err);
+    return {};
+  }
+}
+
+/**
+ * cursors.json 全体を1回の書き込みで置換する(loadAllCursors とペアで使う)。
+ * 呼び出しごとに一意な tmp ファイルへ書いて renameSync することで原子的に置換する。
+ */
+export function saveAllCursors(dict: Record<string, unknown>): void {
+  const p = paths();
+  const tmpFile = `${p.cursorsFile}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpFile, JSON.stringify(dict), "utf8");
+    renameSync(tmpFile, p.cursorsFile);
+  } finally {
+    rmSync(tmpFile, { force: true });
+  }
+}
+
+/**
  * cursors.json に transcriptPath -> Cursor を保存する。
- * 読み込み→更新→ cursors.json.tmp に書いて renameSync することで原子的に置換する。
+ * 読み込み→更新→一意な tmp ファイルに書いて renameSync することで原子的に置換する。
  * 既存 cursors.json が壊れている場合は(復旧不能なため)空辞書から作り直す。
  */
 export function saveCursor(transcriptPath: string, c: Cursor): void {
@@ -344,9 +413,149 @@ export function saveCursor(transcriptPath: string, c: Cursor): void {
 
   dict[transcriptPath] = c;
 
-  const tmpFile = `${p.cursorsFile}.tmp`;
-  writeFileSync(tmpFile, JSON.stringify(dict), "utf8");
-  renameSync(tmpFile, p.cursorsFile);
+  const tmpFile = `${p.cursorsFile}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpFile, JSON.stringify(dict), "utf8");
+    renameSync(tmpFile, p.cursorsFile);
+  } finally {
+    rmSync(tmpFile, { force: true });
+  }
+}
+
+/**
+ * 「append したがカーソル保存がまだ済んでいない」ことを示すマーカー。
+ *
+ * append と saveCursor は原子的に行えないので、その間で落ちるとカーソルだけが古いまま残る。
+ * カーソルが古いと、次回は同じ範囲を読み直して既計上の呼び出しを再び計上してしまう。
+ * マーカーは append の「前」に置き、カーソル保存が全部済んでから消す。したがって
+ *
+ *   マーカーが無い = 直前の append はカーソルに反映済み
+ *
+ * が常に成り立つ。マーカーがあるときだけ history と突合すればよく、健全時は history を読まない。
+ * 判定を「直近何件」「何バイト」といった窓に頼らないので、間に何件 append されようと破れない。
+ * 逆に「マーカーがあるが実際には append 前に落ちていた」場合は、history に指紋が無いので
+ * 除外は起きず、そのターンは通常どおり記録される(取りこぼさない側に倒れる)。
+ *
+ * transcript パスごとに持つ(別セッションの hook がマーカーを消し合わないため)。
+ */
+export function pendingAppendPath(): string {
+  return join(paths().cacheDir, "pending-append.json");
+}
+
+/**
+ * マーカーの読み出し。trusted=false は「保留集合が分からない」状態
+ * (読めない・壊れている)で、呼び出し側は保留ありとして扱う(fail-closed)。
+ * ファイル不在は正常な定常状態なので trusted=true・空辞書。
+ */
+function readPendingAppends(): { dict: Record<string, string>; trusted: boolean } {
+  let raw: string;
+  try {
+    raw = readFileSync(pendingAppendPath(), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { dict: {}, trusted: true };
+    logError("readPendingAppends", err);
+    return { dict: {}, trusted: false }; // 読めない = 保留の有無が分からない
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) {
+      logError("readPendingAppends", new Error("pending-append.json root is not an object"));
+      return { dict: {}, trusted: false };
+    }
+    return { dict: parsed as Record<string, string>, trusted: true };
+  } catch (err) {
+    logError("readPendingAppends", err);
+    return { dict: {}, trusted: false }; // 壊れている = 同上
+  }
+}
+
+/** 呼び出しごとに一意な tmp へ書いて renameSync で原子的に置換する(失敗は throw)。 */
+function writePendingAppends(dict: Record<string, string>): void {
+  const file = pendingAppendPath();
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(dict), "utf8");
+    renameSync(tmp, file);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * 「保留集合が分からない」ことを表す予約キー。transcript パスは絶対パスなので衝突しない。
+ * マーカーが壊れた時点で、どの transcript に保留があったのか復元できない。その状態を
+ * 「全 transcript が保留」として永続化し、以後の読み書きで失わないようにする。
+ * 自動では解除しない(解除条件は下の clearPendingAppend のコメント参照)。
+ */
+const PENDING_ALL = "*";
+
+/**
+ * 対象 transcript に「カーソル未反映かもしれない append」が残っているか。
+ * マーカーが読めない・壊れている、あるいは全体保留の予約キーが立っているときは true
+ * (保留あり側に倒す)。実害は history を1回余分に読むことだけで、逆に倒すと
+ * 不変条件が崩れて二重計上になる。
+ */
+export function hasPendingAppend(transcriptPath: string): boolean {
+  try {
+    const { dict, trusted } = readPendingAppends();
+    if (!trusted) return true;
+    return Object.hasOwn(dict, PENDING_ALL) || Object.hasOwn(dict, transcriptPath);
+  } catch (err) {
+    logError("hasPendingAppend", err);
+    return true;
+  }
+}
+
+/**
+ * append の直前に置く。**失敗したら throw する**(呼び出し側は append せずに中断すること)。
+ * ここを握り潰すと「マーカーが無い = カーソルに反映済み」という不変条件が崩れ、
+ * append 後にカーソル保存が失敗したケースで二重計上になる。
+ *
+ * 壊れたマーカーを読めなかった場合は、自分の保留を足すついでにファイルを正常化してしまうと
+ * 他 transcript の保留情報を捨てることになる(その transcript は次回カーソルを信用して
+ * 再計上する)。そのため全体保留の予約キーを必ず一緒に書き、壊れる前の意味を残す。
+ */
+export function markPendingAppend(transcriptPath: string, ingestKey: string): void {
+  const { dict, trusted } = readPendingAppends();
+  if (!trusted) dict[PENDING_ALL] = "unreadable-marker";
+  dict[transcriptPath] = ingestKey;
+  writePendingAppends(dict);
+}
+
+/**
+ * カーソル保存まで済んだ後に消す。消せなくても次回 history を読むだけで実害はない。
+ * 消すのは自分の transcript の分だけで、他 transcript の保留も全体保留の予約キーも残す。
+ * マーカーが壊れている(trusted=false)ときは何もしない。
+ *
+ * 全体保留の予約キーは自動解除しない。解除には「全 transcript のカーソルが history を
+ * 反映している」ことの証明が要るが、hook でしか触らない(走査ルート外の)transcript も
+ * あり得るため、track/ingest からは証明できない。立ったままでも track は動き続け、
+ * 毎回 history を読むだけで正しさは保たれる。
+ * 解除は `ccc-notifier reset-cursors`(src/reset-cursors.ts)で行う。証明する代わりに
+ * 全カーソルを捨ててから予約キーを消すので、次回は必ず history と突合する状態になる。
+ * マーカーファイルだけを消すと、まだ回復していない transcript が古いカーソルを信用して
+ * 再計上するため、その操作は案内しない。
+ */
+export function clearPendingAppend(transcriptPath: string): void {
+  try {
+    const { dict, trusted } = readPendingAppends();
+    if (!trusted) return;
+    if (!Object.hasOwn(dict, transcriptPath)) return;
+    delete dict[transcriptPath];
+    writePendingAppends(dict);
+  } catch (err) {
+    logError("clearPendingAppend", err);
+  }
+}
+
+/** 全体保留の予約キーが立っているか(doctor の案内用)。 */
+export function hasUnresolvedPendingMarker(): boolean {
+  try {
+    const { dict, trusted } = readPendingAppends();
+    return !trusted || Object.hasOwn(dict, PENDING_ALL);
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -428,6 +637,79 @@ export function readTurns(days?: number): TurnRecord[] {
     if (activity !== undefined) rec.subagentActivity = activity;
   }
   return result;
+}
+
+/** claude / codex = メインターン、claude-sa = サブエージェント分を含むターン。 */
+export type FloorScope = "claude" | "codex" | "claude-sa";
+
+export function floorKey(scope: FloorScope, sessionId: string): string {
+  return `${scope}\u0000${sessionId}`;
+}
+
+export interface HistoryIndex {
+  /** 計上済み呼び出しの指紋。 */
+  countedCalls: Set<string>;
+  /** 既に history にあるレコードの一意キー。 */
+  ingestKeys: Set<string>;
+  /** 指紋を持たない旧レコードだけから作った ts 下限(scope + sessionId → 正規化 ISO)。 */
+  legacyFloors: Map<string, string>;
+}
+
+export function loadHistoryIndex(): HistoryIndex {
+  const index: HistoryIndex = { countedCalls: new Set(), ingestKeys: new Set(), legacyFloors: new Map() };
+  let raw: string;
+  try {
+    raw = readFileSync(paths().historyFile, "utf8");
+  } catch {
+    return index; // 履歴不在(初回)。すべて未取り込みとして扱うのが正しい
+  }
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+    let rec: {
+      sessionId?: unknown;
+      ts?: unknown;
+      source?: unknown;
+      subagents?: unknown;
+      countedCalls?: unknown;
+      ingestKey?: unknown;
+    };
+    try {
+      rec = JSON.parse(line) as typeof rec;
+    } catch {
+      continue; // 破損行は黙殺(readTurns と同じ規則)
+    }
+
+    let hasFingerprints = false;
+    if (Array.isArray(rec.countedCalls)) {
+      for (const fp of rec.countedCalls) {
+        if (typeof fp === "string" && fp.length > 0) {
+          index.countedCalls.add(fp);
+          hasFingerprints = true;
+        }
+      }
+    }
+    if (typeof rec.ingestKey === "string" && rec.ingestKey.length > 0) index.ingestKeys.add(rec.ingestKey);
+
+    // 指紋を持つレコードは指紋で正確に突合できるので、下限(粗い近似)には寄与させない。
+    if (hasFingerprints) continue;
+
+    const { sessionId, ts } = rec;
+    if (typeof sessionId !== "string" || sessionId.length === 0) continue;
+    if (typeof ts !== "string") continue;
+    const ms = Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    // transcript 側の ts と文字列比較するため、表記ゆれで大小が狂わないよう正規化して持つ。
+    const iso = new Date(ms).toISOString();
+    const isCodex = rec.source === "codex";
+    const scopes: FloorScope[] = isCodex ? ["codex"] : ["claude"];
+    if (!isCodex && rec.subagents !== undefined && rec.subagents !== null) scopes.push("claude-sa");
+    for (const scope of scopes) {
+      const key = floorKey(scope, sessionId);
+      const cur = index.legacyFloors.get(key);
+      if (cur === undefined || cur < iso) index.legacyFloors.set(key, iso);
+    }
+  }
+  return index;
 }
 
 /**

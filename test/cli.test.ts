@@ -132,6 +132,7 @@ describe("main", () => {
     expect(output).toContain("Usage");
     expect(output).toContain("dashboard [--all|--days N]");
     expect(output).toContain("sweep [--dry-run] [--days N]");
+    expect(output).toContain("scan [--dry-run] [--json]");
   });
 });
 
@@ -527,6 +528,63 @@ describe("main sweep", () => {
       .map((l) => JSON.parse(l) as TurnRecord);
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.ingest === "sweep")).toBe(true);
+  });
+});
+
+// ============ main scan 配線 ============
+// main() が "scan" を runScan に配線し、rest 引数(--dry-run / --json)を渡すことを検証する。
+
+describe("main scan", () => {
+  let tmpHome: string;
+  let projectsRoot: string;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-cli-test-scan-"));
+    projectsRoot = mkdtempSync(join(tmpdir(), "cccn-cli-test-scan-proj-"));
+    process.env.CCCN_HOME = tmpHome;
+    process.env.CCCN_CLAUDE_PROJECTS = projectsRoot;
+    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = join(tmpHome, "no-desktop-roots");
+    process.env.CCCN_CODEX_HOME = join(tmpHome, "no-codex");
+    process.env.CCCN_DRY_RUN = "1";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+
+    mkdirSync(join(projectsRoot, "projA"), { recursive: true });
+    copyFileSync(
+      fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url)),
+      join(projectsRoot, "projA", "t1.jsonl"),
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.CCCN_HOME;
+    delete process.env.CCCN_CLAUDE_PROJECTS;
+    delete process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+    delete process.env.CCCN_CODEX_HOME;
+    delete process.env.CCCN_DRY_RUN;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(projectsRoot, { recursive: true, force: true });
+  });
+
+  it("main(['scan','--dry-run']) は 0 を返しプレビューを表示するが history を書かない", async () => {
+    const { main } = await import("../src/cli");
+    const { code, output } = await captureLogs(() => main(["scan", "--dry-run"]));
+    expect(code).toBe(0);
+    expect(output).toContain("dry-run");
+    expect(existsSync(join(tmpHome, "history.jsonl"))).toBe(false);
+  });
+
+  it("main(['scan']) は rest を runScan に渡し history に ingest:'scan' を書く", async () => {
+    const { main } = await import("../src/cli");
+    const { code } = await captureLogs(() => main(["scan"]));
+    expect(code).toBe(0);
+    const rows = readFileSync(join(tmpHome, "history.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as TurnRecord);
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows.every((r) => r.ingest === "scan")).toBe(true);
   });
 });
 

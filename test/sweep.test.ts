@@ -568,8 +568,10 @@ describe("runSweep (codex)", () => {
     const output = log.mock.calls.flat().join(" ");
     expect(code).toBe(1);
     expect(existsSync(historyFile())).toBe(false);
-    const cursors = existsSync(cursorsFile()) ? readFileSync(cursorsFile(), "utf8") : "";
-    expect(cursors).not.toContain(rollout);
+    const cursors = existsSync(cursorsFile())
+      ? (JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>)
+      : {};
+    expect(cursors[rollout]).toBeUndefined();
   });
 
   it("uses one global lock for Claude and Codex instead of locking each target", async () => {
@@ -775,6 +777,27 @@ describe("runSweep (codex)", () => {
     expect(output).toContain("Codex のみ走査します");
     expect(output).toContain("Codex: 3 ターン");
     expect(readHistory()).toHaveLength(3);
+  });
+
+  // 8b. デスクトップ transcript しか無い環境でも sweep できる(CLI ルート不在・Codex 不在)。
+  //     ルート列挙より前に終了していると、デスクトップ専業ユーザーが全再生成できない。
+  it("8b. sweeps desktop-only when the CLI root and Codex are both missing", async () => {
+    const prevDesktop = process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+    const desktopRoot = join(tmpHome, "desktop-root");
+    mkdirSync(join(desktopRoot, "proj"), { recursive: true });
+    copyFileSync(FIXTURE_MULTITURN, join(desktopRoot, "proj", "desktop-session.jsonl"));
+    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = desktopRoot;
+    rmSync(projectsRoot, { recursive: true, force: true }); // CLI ルート不在を模す
+    try {
+      const { code, output } = await sweep([]);
+      expect(code).toBe(0);
+      expect(output).toContain("デスクトップ のみ走査します");
+      expect(readHistory().length).toBeGreaterThan(0);
+      expect(readHistory().every((r) => r.surface === "desktop")).toBe(true);
+    } finally {
+      if (prevDesktop === undefined) delete process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+      else process.env.CCCN_CLAUDE_DESKTOP_ROOTS = prevDesktop;
+    }
   });
 
   // 9. Claude ルートも Codex も走査不能なら従来どおりエラーメッセージ + exit 1。

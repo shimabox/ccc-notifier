@@ -4,6 +4,7 @@
 
 import { formatJPY, formatTokens, formatUSD } from "./format";
 import { readTurns } from "./store";
+import { effectiveSurface, surfaceLabel } from "./surface";
 import type { TurnRecord } from "./types";
 
 const DEFAULT_DAYS = 30;
@@ -119,6 +120,12 @@ interface ModelAgg {
   costJPY: number;
 }
 
+interface SurfaceAgg {
+  turns: number;
+  costUSD: number;
+  costJPY: number;
+}
+
 interface TotalAgg {
   turns: number;
   inputTokens: number;
@@ -137,6 +144,7 @@ interface TotalAgg {
 interface Aggregated {
   daily: DailyAgg[];
   byModel: Record<string, ModelAgg>;
+  bySurface: Record<string, SurfaceAgg>;
   total: TotalAgg;
 }
 
@@ -146,6 +154,8 @@ function aggregate(turns: TurnRecord[]): Aggregated {
   // 先頭モデル(主要モデル)にターン全体を帰属させるフォールバックになる。複数モデルのターンは
   // 各モデルの行に1ずつ計上する(参加カウント)ため、turns の合計は総ターン数を超えうる。
   const modelMap = new Map<string, ModelAgg>();
+  // サーフェス別集計は1ターン1カウント(モデル別と違い分割しない)。
+  const surfaceMap = new Map<string, SurfaceAgg>();
 
   const total: TotalAgg = {
     turns: 0,
@@ -189,6 +199,14 @@ function aggregate(turns: TurnRecord[]): Aggregated {
       modelMap.set(model, m);
     }
 
+    // サーフェス別(SA 込み総額。1ターン1カウント)。
+    const surface = effectiveSurface(rec);
+    const s = surfaceMap.get(surface) ?? { turns: 0, costUSD: 0, costJPY: 0 };
+    s.turns += 1;
+    s.costUSD += totalUsd;
+    s.costJPY += totalJpy;
+    surfaceMap.set(surface, s);
+
     total.turns += 1;
     total.inputTokens += inTok;
     total.outputTokens += outTok;
@@ -209,8 +227,10 @@ function aggregate(turns: TurnRecord[]): Aggregated {
   const daily = [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date));
   const byModel: Record<string, ModelAgg> = {};
   for (const [model, agg] of modelMap) byModel[model] = agg;
+  const bySurface: Record<string, SurfaceAgg> = {};
+  for (const [surface, agg] of surfaceMap) bySurface[surface] = agg;
 
-  return { daily, byModel, total };
+  return { daily, byModel, bySurface, total };
 }
 
 function printTable(result: Aggregated, days: number): void {
@@ -265,6 +285,22 @@ function printTable(result: Aggregated, days: number): void {
   }
   console.log("※ 複数モデルを使ったターンは各モデルの行に1ずつ計上します(ターン数の合計は総ターン数を超えることがあります)。");
 
+  // サーフェス別内訳: 全件が cli(= 既定のサーフェス)のときだけ、追加情報が無いので表示しない。
+  const surfaceEntries = Object.entries(result.bySurface);
+  if (surfaceEntries.length > 1 || (surfaceEntries.length === 1 && surfaceEntries[0][0] !== "cli")) {
+    console.log("");
+    console.log("サーフェス別 (By surface):");
+    console.log("サーフェス".padEnd(20) + "ターン".padStart(8) + "USD".padStart(10) + "JPY".padStart(12));
+    for (const [surface, s] of surfaceEntries.sort((a, b) => b[1].costUSD - a[1].costUSD)) {
+      console.log(
+        surfaceLabel(surface as Parameters<typeof surfaceLabel>[0]).padEnd(20) +
+          String(s.turns).padStart(8) +
+          formatUSD(s.costUSD).padStart(10) +
+          formatJPY(s.costJPY).padStart(12),
+      );
+    }
+  }
+
   console.log("");
   console.log(`合計 (Total): ${formatUSD(result.total.costUSD)} (${formatJPY(result.total.costJPY)}) / ${result.total.turns} turns`);
 }
@@ -281,7 +317,13 @@ export async function runReport(argv: string[]): Promise<number> {
   const result = aggregate(turns);
 
   if (json) {
-    console.log(JSON.stringify({ days, daily: result.daily, byModel: result.byModel, total: result.total }, null, 2));
+    console.log(
+      JSON.stringify(
+        { days, daily: result.daily, byModel: result.byModel, bySurface: result.bySurface, total: result.total },
+        null,
+        2,
+      ),
+    );
     return 0;
   }
 

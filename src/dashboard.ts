@@ -26,6 +26,7 @@ import {
   writeFullDashboardStateAtomic,
 } from "./dashboard-state";
 import { waitForDataLock } from "./data-lock";
+import { effectiveSurface, surfaceLabel } from "./surface";
 import type { TokenBuckets, TurnRecord } from "./types";
 
 const PROMPT_MAX = 10000;
@@ -1208,6 +1209,56 @@ function statCard(label: string, sub: string, totals: PeriodTotals): string {
   );
 }
 
+interface SurfaceAgg {
+  surface: string;
+  turns: number;
+  usd: number;
+  jpy: number;
+}
+
+/** サーフェス別内訳(SA 込み総額)。turns は埋め込み対象期間分(kpi と同じ turns 配列)。 */
+function computeSurfaceBreakdown(turns: TurnRecord[]): SurfaceAgg[] {
+  const map = new Map<string, SurfaceAgg>();
+  for (const rec of turns) {
+    const surface = effectiveSurface(rec);
+    const agg = map.get(surface) ?? { surface, turns: 0, usd: 0, jpy: 0 };
+    agg.turns += 1;
+    agg.usd += turnTotalUSD(rec);
+    agg.jpy += turnTotalJPY(rec);
+    map.set(surface, agg);
+  }
+  return [...map.values()].sort((a, b) => b.usd - a.usd);
+}
+
+/**
+ * サーフェス別内訳セクション(最小限: サマリーへの行追加程度)。
+ * 全件が cli(= 既定のサーフェス)のときだけ、追加情報が無いので何も出さない。
+ * デスクトップ専業など cli 以外の単一サーフェスでは「どこの利用か」が情報になるため表示する。
+ */
+function surfaceSection(turns: TurnRecord[]): string {
+  const rows = computeSurfaceBreakdown(turns);
+  if (rows.length === 0) return "";
+  if (rows.length === 1 && rows[0].surface === "cli") return "";
+  const trs = rows
+    .map(
+      (r) =>
+        `<tr><td>${esc(surfaceLabel(r.surface as Parameters<typeof surfaceLabel>[0]))}</td>` +
+        `<td class="c-num">${r.turns}</td>` +
+        `<td class="c-num">${esc(formatUSD(r.usd))}</td>` +
+        `<td class="c-num">${esc(formatJPY(r.jpy))}</td></tr>`,
+    )
+    .join("");
+  return (
+    `<section class="card">` +
+    `<h2>サーフェス別内訳 / By surface</h2>` +
+    `<p class="note">CLI 以外(デスクトップアプリ等)からの利用分の内訳(埋め込み対象期間・SA 込み総額)。</p>` +
+    `<div class="table-wrap"><table class="turns"><thead><tr>` +
+    `<th>サーフェス</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th>` +
+    `</tr></thead><tbody>${trs}</tbody></table></div>` +
+    `</section>`
+  );
+}
+
 function renderLegend(slots: SlotDef[]): string {
   if (slots.length < 2) return "";
   const items = slots
@@ -1501,7 +1552,17 @@ function renderDashboard(
     `</tr></thead><tbody id="turn-body"></tbody></table></div>` +
     `</section>`;
 
-  return head + header + kpiSection + budgetSection + chartSection + breakdownSection + historySection + foot;
+  return (
+    head +
+    header +
+    kpiSection +
+    budgetSection +
+    chartSection +
+    breakdownSection +
+    surfaceSection(turns) +
+    historySection +
+    foot
+  );
 }
 
 // ============ ブラウザ起動 ============

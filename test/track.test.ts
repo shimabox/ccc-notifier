@@ -937,3 +937,114 @@ describe("runTrack — codex", () => {
     expect(rows[0].models).toEqual(["claude-fable-5", "claude-haiku-4-5"]);
   });
 });
+
+// ============================================================================
+// desktop-cost-tracking(2026-07-23 追加): surface/originator の記録と ingest 便乗り取込。
+// ============================================================================
+
+const FIXTURE_CODEX_DESKTOP_ROLLOUT = fileURLToPath(
+  new URL("./fixtures/codex/rollout-desktop.jsonl", import.meta.url),
+);
+
+describe("runTrack: surface / originator recording", () => {
+  it("1. Claude 経路(CCCN_CLAUDE_DESKTOP_ROOTS 未設定)は surface=cli を記録する", async () => {
+    await runTrack(stdinFor(transcriptPath));
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].surface).toBe("cli");
+  });
+
+  it("2. Codex 経路は originator を正規化した surface と生の originator を記録する(cli)", async () => {
+    const rollout = placeCodexRollout();
+    await runTrack(codexStdinFor(rollout), { codex: true });
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].surface).toBe("cli");
+    expect(rows[0].originator).toBe("codex-tui");
+  });
+
+  it("3. Codex 経路(originator = Codex Desktop)は surface=desktop を記録する", async () => {
+    const rollout = join(tmpHome, "rollout-desktop.jsonl");
+    copyFileSync(FIXTURE_CODEX_DESKTOP_ROLLOUT, rollout);
+    await runTrack(codexStdinFor(rollout), { codex: true });
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].surface).toBe("desktop");
+    expect(rows[0].originator).toBe("Codex Desktop");
+  });
+
+  it("4. CCCN_CLAUDE_DESKTOP_ROOTS 配下の transcript は surface=desktop を記録する", async () => {
+    const prevDesktopRoots = process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+    const desktopRoot = join(tmpHome, "desktop-root");
+    const desktopTranscript = join(desktopRoot, "transcript.jsonl");
+    mkdirSync(desktopRoot, { recursive: true });
+    copyFileSync(FIXTURE_TRANSCRIPT, desktopTranscript);
+    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = desktopRoot;
+    try {
+      await runTrack(stdinFor(desktopTranscript));
+    } finally {
+      if (prevDesktopRoots === undefined) delete process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+      else process.env.CCCN_CLAUDE_DESKTOP_ROOTS = prevDesktopRoots;
+    }
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].surface).toBe("desktop");
+  });
+});
+
+describe("runTrack: ingest piggyback (best-effort, hook 非依存の取りこぼし回収)", () => {
+  it("5. track 実行時に CCCN_CLAUDE_PROJECTS 配下の未追跡ファイルも便乗り取込される", async () => {
+    const prevProjects = process.env.CCCN_CLAUDE_PROJECTS;
+    const prevDesktopRoots = process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+    const projects = join(tmpHome, "claude-projects");
+    mkdirSync(join(projects, "proj"), { recursive: true });
+    // transcriptPath(track の直接対象)とは別セッションの、便乗り取込だけが拾うはずのファイル。
+    // sessionId は必ず変える: ingest は「history に記録済みの ts」を下限に既取り込み分を弾くため、
+    // 同一 sessionId のコピーは(パスが違っても)同じセッションの再取り込みとして正しく抑止される。
+    writeFileSync(
+      join(projects, "proj", "other-session.jsonl"),
+      readFileSync(FIXTURE_TRANSCRIPT, "utf8")
+        .replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-other"')
+        .replaceAll('"msg_', '"msg_other_')
+        .replaceAll('"req_', '"req_other_')
+        .replaceAll('"requestId":"req_', '"requestId":"req_other_'),
+      "utf8",
+    );
+    process.env.CCCN_CLAUDE_PROJECTS = projects;
+    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = join(tmpHome, "no-desktop-roots");
+    try {
+      await runTrack(stdinFor(transcriptPath));
+    } finally {
+      if (prevProjects === undefined) delete process.env.CCCN_CLAUDE_PROJECTS;
+      else process.env.CCCN_CLAUDE_PROJECTS = prevProjects;
+      if (prevDesktopRoots === undefined) delete process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
+      else process.env.CCCN_CLAUDE_DESKTOP_ROOTS = prevDesktopRoots;
+    }
+
+    const rows = readHistory();
+    // メイン(transcriptPath)1件 + 便乗り取込(other-session.jsonl)1件。
+    expect(rows).toHaveLength(2);
+    const ingested = rows.find((r) => r.ingest === "scan");
+    expect(ingested).toBeDefined();
+    expect(ingested?.sessionId).toBe("sess-other");
+    const main = rows.find((r) => r.ingest === undefined);
+    expect(main).toBeDefined();
+  });
+
+  it("6. 便乗り取込が失敗しても track 本来の記録は成功する(CCCN_CLAUDE_PROJECTS がファイル=読めない)", async () => {
+    const prevProjects = process.env.CCCN_CLAUDE_PROJECTS;
+    const brokenProjects = join(tmpHome, "not-a-directory");
+    writeFileSync(brokenProjects, "not a directory", "utf8");
+    process.env.CCCN_CLAUDE_PROJECTS = brokenProjects;
+    try {
+      await runTrack(stdinFor(transcriptPath));
+    } finally {
+      if (prevProjects === undefined) delete process.env.CCCN_CLAUDE_PROJECTS;
+      else process.env.CCCN_CLAUDE_PROJECTS = prevProjects;
+    }
+
+    const rows = readHistory();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].costUSD).toBeCloseTo(0.267, 10);
+  });
+});

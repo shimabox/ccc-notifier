@@ -9,8 +9,10 @@
 //   - ネット待ちは各モジュール内のタイムアウト(fx 1.5s×2 / Slack 3s)で構造的に有界。
 //     track 側で無限待ちの await を追加しない。
 
-import { aggregateCodexTurn } from "./codex/transcript";
+import { aggregateCodexTurn, codexConsumedCursor, codexResumePointAtTs } from "./codex/transcript";
 import { closeCodexRootContext } from "./codex/subagent-store";
+import { normalizeCodexOriginator } from "./codex/originator";
+import { determineClaudeSurface } from "./claude-roots";
 import { writeDashboardHtml } from "./dashboard";
 import {
   isFullDashboardDue,
@@ -19,8 +21,10 @@ import {
 } from "./dashboard-state";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
+import { notifyIngestSummary, runIngest } from "./ingest";
 import { notifyOS } from "./notify/os";
 import { notifySlack } from "./notify/slack";
+import { basename } from "node:path";
 import { computeCost, loadPriceTable } from "./pricing";
 import {
   appendTurn,
@@ -33,11 +37,19 @@ import {
   sanitizeCursor,
   saveCursor,
   todayTotalUSD,
+  clearPendingAppend,
+  floorKey,
+  hasPendingAppend,
+  loadHistoryIndex,
+  markPendingAppend,
 } from "./store";
+import type { FloorScope, HistoryIndex } from "./store";
+import { anyOf, callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
+import type { MessageKeyFilter } from "./counted-calls";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
 import { aggregateNewTurn } from "./transcript";
-import type { StopHookInput, TokenBuckets, TurnAggregate, TurnRecord, UsageByModel } from "./types";
+import type { Cursor, StopHookInput, TokenBuckets, TurnAggregate, TurnRecord, UsageByModel } from "./types";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -130,10 +142,72 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     // 3. 新規ターンの集計。Claude はメイン usage が無くても、遅れて完了した
     //    サブエージェント差分を回収するため、この時点では return しない。
     //    Codex 経路(opts.codex)は rollout(累積カウンタの逐次差分)を集計する。
-    let agg = isCodex
-      ? await aggregateCodexTurn(transcriptPath, cursor)
-      : await aggregateNewTurn(transcriptPath, cursor);
-    if (isCodex && agg === null) return;
+    //
+    //    カーソルが無い(消失・破損)ときは、そのファイルを先頭から読み直すことになる。
+    //    カーソルの不在は「未計上」の証拠にならないので、history に指紋として残っている
+    //    呼び出しを除外条件にする。カーソルが健全なら history は1バイトも読まない。
+    //    さらに、前回の append 後にカーソル保存が完了していない(= マーカーが残っている)ときも
+    //    カーソルは真実を反映していない。この場合カーソル自体は有効なので窓は狭いままだが、
+    //    その窓には既計上の呼び出しが混ざる。どちらの場合も history の指紋を除外条件に重ねて、
+    //    呼び出し単位で弾く(レコード単位のキー照合では、新しいターンが加わって集計範囲が
+    //    変わった時点で別キーになり、弾けない)。
+    const cursorMayBeStale = cursor === null || hasPendingAppend(transcriptPath);
+    let indexCache: HistoryIndex | null = null;
+    const history = (): HistoryIndex => (indexCache ??= loadHistoryIndex());
+    const counted = (): Set<string> => history().countedCalls;
+    /** 計上済み呼び出しの除外条件。カーソルが信用できるときは undefined(history を読まない)。 */
+    const countedFilter = (): MessageKeyFilter | undefined =>
+      cursorMayBeStale ? messageKeyFilterOf(counted()) : undefined;
+    // 指紋を持たない旧レコードぶんのフォールバック(ingest と同じ規則)。
+    const sessionKey =
+      (typeof input.session_id === "string" && input.session_id.length > 0
+        ? input.session_id
+        : basename(transcriptPath).replace(/\.jsonl$/, ""));
+    const legacyFloorMs = (scope: FloorScope): number | null => {
+      const iso = history().legacyFloors.get(floorKey(scope, sessionKey));
+      if (iso === undefined) return null;
+      const ms = Date.parse(iso);
+      return Number.isFinite(ms) ? ms + 1 : null;
+    };
+
+    // 既計上分しか無かったときに張り直すカーソル(ゼロ件のレコードは作らない)。
+    let recoveredCursor: Cursor | null = null;
+
+    let agg: (TurnAggregate & { messageKeys?: string[] }) | null;
+    if (isCodex) {
+      let readFrom = cursor;
+      const scanOpts = cursorMayBeStale ? { excludeEvents: counted() } : {};
+      if (cursor === null) {
+        const floorIso = history().legacyFloors.get(floorKey("codex", sessionKey));
+        if (floorIso !== undefined) readFrom = await codexResumePointAtTs(transcriptPath, floorIso);
+      }
+      agg = await aggregateCodexTurn(transcriptPath, readFrom, scanOpts);
+      if (agg === null) {
+        // 新規 usage 無し。カーソルが信用できない状態だったなら、読み切った位置まで
+        // 張り直して次回以降の Stop で history を読み直さずに済むようにする。
+        if (cursorMayBeStale) {
+          const consumed = await codexConsumedCursor(transcriptPath, readFrom, scanOpts);
+          if (consumed !== null) saveCursor(transcriptPath, consumed);
+          clearPendingAppend(transcriptPath);
+        }
+        return;
+      }
+    } else if (cursorMayBeStale) {
+      const recovered = await aggregateNewTurn(transcriptPath, cursor, {
+        excludeMessageKeys: messageKeyFilterOf(counted()),
+        // 指紋を持たない旧レコードぶんのフォールバックは、先頭から読み直すときだけ効かせる。
+        minTimestampMs: cursor === null ? legacyFloorMs("claude") : null,
+        returnEmpty: true,
+      });
+      if (recovered !== null && recovered.apiCalls === 0) {
+        recoveredCursor = recovered.newCursor; // 既計上分だけだった
+        agg = null;
+      } else {
+        agg = recovered;
+      }
+    } else {
+      agg = await aggregateNewTurn(transcriptPath, cursor);
+    }
     hasMainUsage = agg !== null;
 
     // 3a. Codex はモデルを hook payload 優先で決める(rollout 由来のキーを payload.model に組み替える)。
@@ -150,7 +224,17 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         if (agg !== null && "messageKeys" in agg) {
           for (const key of (agg as TurnAggregate & { messageKeys: string[] }).messageKeys) excluded.add(key);
         }
-        sa = await collectSubagentUsage(transcriptPath, { excludeMessageKeys: excluded });
+        const staleFilter = countedFilter();
+        sa = await collectSubagentUsage(transcriptPath, {
+          excludeMessageKeys: staleFilter === undefined ? excluded : anyOf([excluded, staleFilter]),
+          // agent ファイル側のカーソルだけを失っている場合もあるので、そのファイルに限って
+          // history 由来の指紋と旧レコード向けの下限で弾く
+          // (すべてのカーソルが健全なら一度も呼ばれない = history を読まない)。
+          recovery: () => ({
+            excludeMessageKeys: messageKeyFilterOf(counted()),
+            minTimestampMs: legacyFloorMs("claude-sa"),
+          }),
+        });
       } catch (err) {
         logError("track:subagents", err);
         sa = null;
@@ -159,7 +243,9 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
     if (agg === null && (sa === null || sa.apiCalls === 0)) {
       // A newly discovered file may contain only a copy of already-counted main
       // calls. Persist its consumed cursor without creating a zero-value row.
+      if (recoveredCursor !== null) saveCursor(transcriptPath, recoveredCursor);
       for (const nc of sa?.newCursors ?? []) saveCursor(nc.path, nc.cursor);
+      if (cursorMayBeStale) clearPendingAppend(transcriptPath);
       return;
     }
 
@@ -200,6 +286,15 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       // valid parent turnにはactivityの到着順と無関係に、keyCheck検証済みの匿名join keyを保存する。
       // key/ledger整合性の検証失敗だけをmain記録から隔離し、未検証keyは履歴へ付けない。
       if (activityProjectionKey !== null) record.activityProjectionKey = activityProjectionKey;
+      const rawOriginator = agg?.originator;
+      record.surface = normalizeCodexOriginator(rawOriginator);
+      if (typeof rawOriginator === "string") record.originator = rawOriginator;
+    } else {
+      try {
+        record.surface = await determineClaudeSurface(transcriptPath);
+      } catch (err) {
+        logError("track:surface", err);
+      }
     }
     if (breakdown.unknownModels.length > 0) {
       record.unknownModels = breakdown.unknownModels;
@@ -227,18 +322,48 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       }
     }
 
+    // 6c. 計上した呼び出しの指紋を載せる(親ターン分 + サブエージェント分)。
+    //     カーソルが失われても、ここに載った呼び出しは以後どの経路でも再計上されない。
+    if (isCodex) {
+      // rollout は token_count イベント1件を1呼び出しとみなして指紋を付ける。
+      setCountedCalls(record, agg?.codexEventKeys ?? []);
+    } else {
+      const countedKeys: string[] = [];
+      if (agg !== null && "messageKeys" in agg) {
+        countedKeys.push(...(agg as TurnAggregate & { messageKeys: string[] }).messageKeys);
+      }
+      for (const group of sa?.groups ?? []) countedKeys.push(...group.messageKeys);
+      setCountedCalls(record, callFingerprints(countedKeys));
+    }
+
     // 7. 記録 → カーソル保存(この順序固定)。
-    //    クラッシュ時は「記録済み・カーソル未更新」側に倒し、seenMessageKeys による重複排除で
-    //    二重計上を防ぐ。逆順にすると「カーソルだけ進んで未記録」= 恒久的なコスト取りこぼしになる。
+    //    クラッシュ時は「記録済み・カーソル未更新」側に倒す。逆順にすると「カーソルだけ進んで
+    //    未記録」= 恒久的なコスト取りこぼしになる。その代わり、append の前に保留マーカーを置き、
+    //    カーソル保存が全部済んでから消す。「マーカーが無い = カーソルは append を反映済み」を
+    //    保つことで、次回の track が既計上分を再計上しない。
     //    SA のカーソルはメインより後に保存する(途中クラッシュで SA 分が再集計されても、
     //    次回 seenMessageKeys で重複排除される側に倒す)。
+    try {
+      markPendingAppend(transcriptPath, record.ingestKey ?? "");
+    } catch (err) {
+      // マーカーを置けないまま append すると、カーソル保存が失敗したときに検出できず
+      // 二重計上になる。このターンは記録せずに終える(transcript は残るので、
+      // history 全体の指紋索引で守られている ingest が後から回収する)。
+      logError("track:pending-marker", err);
+      return;
+    }
     appendTurn(record);
-    if (agg !== null) saveCursor(transcriptPath, agg.newCursor);
+    // メインの新規 usage が無く既計上分だけだった場合(SA-only 記録)も、読み切った位置まで
+    // カーソルを進める。ここを飛ばすと古いカーソルのままマーカーだけ消え、次回に再計上される。
+    const mainCursor = agg?.newCursor ?? recoveredCursor;
+    if (mainCursor !== null) saveCursor(transcriptPath, mainCursor);
     if (sa !== null) {
       for (const nc of sa.newCursors) {
         saveCursor(nc.path, nc.cursor);
       }
     }
+    // ここまで来たらカーソルは append を反映している。
+    clearPendingAppend(transcriptPath);
     } finally {
       commitLock.release();
     }
@@ -263,60 +388,77 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
       tasks.push(notifySlack(record, cfg, todayUSD));
     }
 
-    if (cfg.dashboard.autoRegenerate) {
-      tasks.push(
-        (async () => {
-          const now = new Date();
-          const dashboardLock = await waitForDataLock(1000);
-          if (dashboardLock === null) {
-            logError("track:dashboard-lock", new Error("data lock timeout; dashboard skipped"));
+    // ingest 便乗り取込 → report.html 再生成の順で1本の直列タスクにする(この2つは同じ data lock を
+    // 奪い合わないよう、あえて Promise.allSettled の別要素にせず直列合成する。並列にすると、送信通知
+    // タスクとは独立でよいが、この2つ自身は同じ lock を取り合ってどちらかがタイムアウトしうるため)。
+    // ingest を先にすることで、直後の dashboard 再生成に新規取り込み分を反映できる。
+    tasks.push(
+      (async () => {
+        // - ingest 便乗り取込(hook 非依存の増分取り込み。デスクトップアプリ等の hook 取りこぼしの保険):
+        //   本来のターン処理(上の記録・カーソル保存)の後にベストエフォートで実行する。runIngest 自身が
+        //   実際の書き込み区間だけを data lock で直列化する(config/単価/為替の準備・ファイル列挙は
+        //   lock 外)。失敗しても track 本来の処理は失敗させない(logError のみ)。単価表はキャッシュのみ
+        //   (offlinePricing)で毎 hook のネット待ちを避ける。新規に取り込んだターン群の合計が
+        //   minNotifyUSD 以上ならまとめて1通通知する(notifyIngestSummary はミュート・しきい値を尊重)。
+        try {
+          const result = await runIngest({ dryRun: false, offlinePricing: true });
+          if (result.records.length > 0) {
+            await notifyIngestSummary(result, cfg);
+          }
+        } catch (err) {
+          logError("track:ingest", err);
+        }
+
+        if (!cfg.dashboard.autoRegenerate) return;
+        const now = new Date();
+        const dashboardLock = await waitForDataLock(1000);
+        if (dashboardLock === null) {
+          logError("track:dashboard-lock", new Error("data lock timeout; dashboard skipped"));
+          return;
+        }
+        try {
+          // privacy: 履歴snapshotの取得から両canonical書込まで同じ所有権lock内に置く。
+          let allTurns: TurnRecord[];
+          try {
+            allTurns = readTurns();
+          } catch (err) {
+            logError("track:dashboard-read", err);
             return;
           }
-          try {
-            // privacy: 履歴snapshotの取得から両canonical書込まで同じ所有権lock内に置く。
-            let allTurns: TurnRecord[];
-            try {
-              allTurns = readTurns();
-            } catch (err) {
-              logError("track:dashboard-read", err);
-              return;
-            }
 
+          try {
+            writeDashboardHtml({
+              days: cfg.dashboard.days,
+              outPath: paths().recentDashboardFile,
+              autoReloadSec: cfg.dashboard.autoReloadSec,
+              allTurns,
+              variant: "recent",
+            });
+          } catch (err) {
+            logError("track:dashboard-recent", err);
+          }
+
+          if (isFullDashboardDue(now)) {
             try {
               writeDashboardHtml({
-                days: cfg.dashboard.days,
-                outPath: paths().recentDashboardFile,
+                days: null,
+                outPath: paths().fullDashboardFile,
                 autoReloadSec: cfg.dashboard.autoReloadSec,
                 allTurns,
-                variant: "recent",
+                variant: "full",
+                generatedAt: now.toISOString(),
               });
+              // HTML の atomic rename が成功した後だけ state を進める。
+              writeFullDashboardStateAtomic(makeFullDashboardState(now));
             } catch (err) {
-              logError("track:dashboard-recent", err);
+              logError("track:dashboard-full", err);
             }
-
-            if (isFullDashboardDue(now)) {
-              try {
-                writeDashboardHtml({
-                  days: null,
-                  outPath: paths().fullDashboardFile,
-                  autoReloadSec: cfg.dashboard.autoReloadSec,
-                  allTurns,
-                  variant: "full",
-                  generatedAt: now.toISOString(),
-                });
-                // HTML の atomic rename が成功した後だけ state を進める。
-                writeFullDashboardStateAtomic(makeFullDashboardState(now));
-              } catch (err) {
-                logError("track:dashboard-full", err);
-              }
-            }
-
-          } finally {
-            dashboardLock.release();
           }
-        })(),
-      );
-    }
+        } finally {
+          dashboardLock.release();
+        }
+      })(),
+    );
 
     if (tasks.length > 0) {
       await Promise.allSettled(tasks);

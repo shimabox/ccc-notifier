@@ -474,3 +474,76 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - reset対象はhistory、cursors、canonical dashboardと日次更新stateだけ。全sourceの再生成が正常完了し、`dashboard.autoRegenerate=true`なら直近版・全履歴版と日次更新stateを即時再生成して相互リンクを有効にする。false、`--dry-run`、source partial failureでは生成せず、必要なら手動`dashboard` / `dashboard --all`に委ねる。config、月予算、通知設定、mute、単価/為替cache、Codex hook、Codexサブエージェント利用記録は保持する。
 - 対象履歴はsweep実行時点の単価表/FXで再計算し、過去額は変わり得る。clear済み履歴/redact済みpromptもsourceにあれば復活する。source消失・移動・破損行は復元できない。Codexサブエージェント利用記録は保持するが、再生成した過去turnへの表示joinは失われ得る。
 - source単位のhard failureは終了コード1とし、部分生成をrollbackしない。同じ`sweep`を再実行すると履歴/cursorを再度resetして最初から再生成する。
+
+## 2026-08-11 追加: append の冪等化(TurnRecord.countedCalls / ingestKey)
+
+- `cursors.json` は「ファイルのどこまで読んだか」の目印であって、計上済みかどうかの真実源ではない。
+  真実源は `history.jsonl` 側に置く。各 `TurnRecord` は「そのレコードで計上した API 呼び出しの指紋」を
+  `countedCalls`(`string[]`)に、そこから決まる一意キーを `ingestKey` に持つ。
+- 指紋(`src/counted-calls.ts`)は内容だけで決まり、取り込み時刻・経路には依存しない。
+  - Claude: `sha256("claude-call <messageId>:<requestId>")` の先頭 16 hex。親ターン分も
+    サブエージェント(`agent-*.jsonl`)分も同じ名前空間に入れる。
+  - Codex: rollout に呼び出し単位の ID が無いため、`token_count` イベント1件を1呼び出しとみなし、
+    `sha256("codex-event|<rollout ファイル名>|<session_id>|<行のバイトオフセット>|<累積カウンタ3成分>")`
+    の先頭 16 hex。
+    rollout は追記専用なので、この素材は集計窓の広さ・ターン境界の取り方・取り込み経路に依存しない。
+    計上済みイベントは金額に足さないが累積カウンタ(prev)は必ず進める(取りこぼすと次の差分が
+    累積全量になるため)。
+  - `ingestKey` は `countedCalls` を整列・重複除去した集合の sha256。呼び出しを1件も計上していない
+    レコードには付けない(内容で識別できないものを重複扱いして取りこぼさないため)。
+- 取り込み側(`src/ingest.ts`)は history から指紋集合・キー集合・旧レコード用の ts 下限を
+  ingest 1回につき最大1度だけ構築し、(1) 指紋に載っている呼び出しは集計から除外、
+  (2) 既に同じ `ingestKey` があるレコードは append しない。カーソルが失われても再計上されない。
+- 指紋を持たない旧レコードはマイグレーションしない。旧レコードだけから作ったセッション別 ts 下限で
+  従来どおり突合する(カーソルを持たないファイル・agent ファイルにだけ適用する)。
+- `IngestResult` の `totalUSD` / `totalJPY` / `bySurface` はサブエージェント分を含む
+  (= 実際に取り込んだ金額。通知しきい値 `minNotifyUSD` の判定対象もこれ)。
+- `track`(Stop hook)も同じ原則で動く。**カーソルが真実を反映していると分かるときは
+  history を1バイトも読まない**。反映していない可能性があるのは次の2つで、このときだけ
+  history 由来の指紋(と、先頭から読み直す場合は旧レコード向けの ts 下限)を
+  **呼び出し単位の除外条件**として重ねる。既計上分しか無ければレコードを作らずカーソルだけ張り直す。
+  - カーソルが欠損・破損している(`sanitizeCursor` が null)
+  - 保留マーカー(`cache/pending-append.json`)にその transcript が残っている
+- 保留マーカーは `appendTurn` の**前**に置き、カーソル保存(メイン・サブエージェントとも)が
+  全部済んでから消す。したがって「マーカーが無い = 直前の append はカーソルに反映済み」が
+  常に成り立つ。判定は「直近何件」「何バイト」といった窓に依存しないので、間に何件 append
+  されても、集計範囲が変わって `ingestKey` が別値になっても破れない。マーカーが残ったまま
+  実際には append 前に落ちていた場合は、history に指紋が無いので除外が起きず、そのターンは
+  通常どおり記録される。
+- 不変条件を保つため、マーカーは両方向に fail-closed で扱う。
+  - **読めない・壊れている**ときは「保留あり」とみなす(実害は history を1回余分に読むだけ)。
+    壊れたマーカーに上書きするときは、全 transcript が保留であることを表す予約キー `"*"` を
+    必ず一緒に書く。自分の分だけ書いて正常な JSON に戻すと、他 transcript の保留情報が消え、
+    その transcript は次回カーソルを信用して二重計上する。予約キーは自動解除しない
+    (「全 transcript のカーソルが history を反映している」ことを track/ingest からは証明
+    できないため)。立っている間も track は動き続け、毎回 history を読むだけ。解除は
+    `ccc-notifier reset-cursors`(全カーソルを破棄してから予約キーを消す。順序はこの向きで固定し、
+    途中で落ちても「カーソル無し + 予約キー残存」= 安全側に倒す)。マーカーファイル単独の削除は
+    案内しない — まだ回復していない transcript が古いカーソルを信用して再計上するため。
+    `doctor` はこの手順を案内する。
+  - **マーカーを置けない**ときは append せずにそのターンを見送る。記録を落とすのはコストの
+    取りこぼしだが、transcript は残るので history 全体の指紋索引で守られている ingest が
+    後から回収する。二重計上を作るよりこちらに倒す。`runTrack` は例外を外に出さない契約のまま。
+  - メインに新規 usage が無く SA だけを記録する場合も、読み切った位置までメインカーソルを
+    進めてからマーカーを消す(進めないと古いカーソルのままマーカーだけ消え、次回再計上になる)。
+- `doctor` は同一 `ingestKey` を持つレコードが複数あれば warn する(旧レコードは従来どおり
+  同一 `sessionId` + `ts` で検知)。
+
+## 2026-08-12 追加: token_count の成分欠損(合計だけが入るケース)
+
+- Codex rollout の `event_msg/token_count` は通常 `total_token_usage` に
+  `input_tokens` / `cached_input_tokens` / `output_tokens` / `reasoning_output_tokens` /
+  `total_tokens` を持ち、実データ 171,945 件すべてで
+  `total_tokens === input_tokens + output_tokens` が成立する(cached は input の、
+  reasoning は output の内数)。
+- ただし Codex Desktop の一部ビルドは**成分をすべて 0 のまま `total_tokens` だけに合計を書く**
+  (実データ: Codex Desktop の親 rollout 43件中 34件)。成分だけを読むと使用量ゼロと判定され、
+  そのセッションが丸ごと履歴に現れない。
+- そのため `readTotals` は「成分がすべて 0 かつ `total_tokens` > 0」のときだけ、
+  合計を内訳不明の使用量として拾う。内訳が無い以上どのバケットに置くかは仮定になるので、
+  実データで支配的(input の 97.5% がキャッシュ読み)かつ単価が最も低いキャッシュ読みとして扱う
+  = 過大計上を作らない側に倒す。`total_tokens` も 0 のイベントは従来どおり使用量なし。
+- 該当 rollout は `turn_context` も持たないため model が不明で、単価が引けず費用は 0 になる
+  (`unknownModels` と同じ扱い)。ターン・時刻・トークン数は履歴に現れる。
+- Claude 経路には同種の欠損は無い(実データ 33,170 行の assistant usage を確認。
+  読んでいない数値フィールドに使用量が入っているケースは 0 件)。

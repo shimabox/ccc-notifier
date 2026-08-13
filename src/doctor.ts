@@ -6,7 +6,7 @@
 // 二重に例外を捕捉することで、1つのチェックの想定外の失敗が残りのチェックを止めないようにする。
 
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { computeCost, loadPriceTable } from "./pricing";
@@ -17,12 +17,22 @@ import { notifyOS, selectNotifyBackend } from "./notify/os";
 import { notifySlack } from "./notify/slack";
 import { fmtMuteUntil } from "./mute";
 import { matchesMarker } from "./setup";
+import { claudeTranscriptRoots, rootForClaudePath } from "./claude-roots";
+import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome, detectCodex } from "./codex/env";
 import { CODEX_HOOK_EVENTS } from "./codex/setup";
 import { diagnoseCodexHookSources } from "./codex/hook-diagnostics";
-import { findLatestCodexRollout } from "./codex/sessions";
+import { findLatestCodexRollout, listCodexRollouts } from "./codex/sessions";
 import { splitIntoCodexTurnDrafts } from "./codex/transcript";
-import { isMuted, paths, readConfig, readMuteState } from "./store";
+import {
+  cursorPaths,
+  hasUnresolvedPendingMarker,
+  isMuted,
+  paths,
+  readConfig,
+  readMuteState,
+  readTurns,
+} from "./store";
 import { aggregateNewTurn } from "./transcript";
 import type { Config, TokenBuckets, TurnRecord, UsageByModel } from "./types";
 
@@ -547,6 +557,284 @@ async function checkCodexRecentSessionTotal(configured: boolean): Promise<boolea
   }
 }
 
+// ---- 8. デスクトップ検出状況・追跡漏れ・originator 内訳・sessionId 重複(desktop-cost-tracking) ----
+
+const PEEK_CHUNK_BYTES = 64 * 1024;
+const PEEK_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * ファイル先頭の1行だけを読み JSON として返す。失敗は null(診断のみが目的のベストエフォート)。
+ *
+ * 改行が見つかるまでチャンク単位で読み進める。Codex rollout の先頭行は base_instructions
+ * (長いシステムプロンプト)を含み、実データでは 14KB〜42KB になる。固定長で切ると
+ * 途中で切れた文字列を JSON.parse することになり、全件が黙って null になる。
+ * ファイル全体を読み込まないよう上限を設け、超えたら null にする。
+ */
+async function peekFirstJsonLine(
+  path: string,
+  maxBytes = PEEK_MAX_BYTES,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const fh = await open(path, "r");
+    try {
+      const chunk = Buffer.alloc(Math.min(PEEK_CHUNK_BYTES, maxBytes));
+      const parts: Buffer[] = [];
+      let read = 0;
+      let line: string | null = null;
+      while (read < maxBytes) {
+        const { bytesRead } = await fh.read(chunk, 0, Math.min(chunk.length, maxBytes - read), read);
+        if (bytesRead === 0) {
+          line = Buffer.concat(parts).toString("utf8"); // 改行なしで EOF = ファイル全体が1行
+          break;
+        }
+        const slice = chunk.subarray(0, bytesRead);
+        const nl = slice.indexOf(0x0a);
+        if (nl !== -1) {
+          parts.push(Buffer.from(slice.subarray(0, nl)));
+          line = Buffer.concat(parts).toString("utf8");
+          break;
+        }
+        parts.push(Buffer.from(slice));
+        read += bytesRead;
+      }
+      if (line === null) return null; // 上限まで改行が無い
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return null;
+      const obj: unknown = JSON.parse(trimmed);
+      return isRecord(obj) ? obj : null;
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function listProjectDirsSafe(root: string): Promise<string[]> {
+  try {
+    const entries = readdirSync(root, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => join(root, e.name));
+  } catch {
+    return [];
+  }
+}
+
+async function listTranscriptsSafe(projectDir: string): Promise<string[]> {
+  try {
+    const entries = readdirSync(projectDir, { withFileTypes: true });
+    return entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => join(projectDir, e.name));
+  } catch {
+    return [];
+  }
+}
+
+async function discoverClaudeFilesForDoctor(roots: ClaudeTranscriptRoot[]): Promise<string[]> {
+  const files: string[] = [];
+  for (const root of roots) {
+    for (const dir of await listProjectDirsSafe(root.path)) {
+      files.push(...(await listTranscriptsSafe(dir)));
+    }
+  }
+  return files;
+}
+
+async function checkDesktopScan(): Promise<boolean> {
+  const roots = await claudeTranscriptRoots();
+  const desktopRoots = roots.filter((r) => r.surface === "desktop");
+  if (desktopRoots.length === 0) {
+    log("ok", "Claude デスクトップのスキャンルートは検出されませんでした(未使用、または macOS 以外・CCCN_CLAUDE_DESKTOP_ROOTS 未設定)");
+  } else {
+    for (const root of desktopRoots) {
+      const exists = existsSync(root.path);
+      log(
+        exists ? "ok" : "warn",
+        `Claude デスクトップのスキャンルート: ${root.path}${exists ? "" : "(現在は不在。アプリ更新でレイアウトが変わった可能性があります)"}`,
+      );
+    }
+  }
+
+  const tracked = cursorPaths();
+
+  const claudeFiles = await discoverClaudeFilesForDoctor(roots);
+  const claudeUntracked = claudeFiles.filter((f) => !tracked.has(f)).length;
+  log(
+    "ok",
+    `Claude transcript 追跡漏れ: ${claudeUntracked}件(全 ${claudeFiles.length}件中。未追跡分は ccc-notifier scan で回収できます)`,
+  );
+
+  // 同一 sessionId が複数の transcript ファイルに現れるケースを検知する(二重計上ガード)。
+  // 数えるのはサーフェスの種類ではなくファイル。同じサーフェスのルートが複数ある構成
+  // (デスクトップルートが2つ等)の重複も検知対象に含める。
+  const sessionToFiles = new Map<string, string[]>();
+  for (const f of claudeFiles) {
+    const line = await peekFirstJsonLine(f);
+    const sid = typeof line?.sessionId === "string" ? line.sessionId : null;
+    if (sid === null || sid.length === 0) continue;
+    const files = sessionToFiles.get(sid) ?? [];
+    files.push(f);
+    sessionToFiles.set(sid, files);
+  }
+  const dupEntries = [...sessionToFiles.entries()].filter(([, files]) => files.length > 1);
+  if (dupEntries.length > 0) {
+    const multiRoot = dupEntries.filter(
+      ([, files]) => new Set(files.map((f) => rootForClaudePath(f, roots)?.path ?? "")).size > 1,
+    ).length;
+    const sample = dupEntries
+      .slice(0, 3)
+      .map(([sid, files]) => `${sid.slice(0, 8)}…(${files.length}ファイル)`)
+      .join(" / ");
+    log(
+      "warn",
+      `同一 sessionId が複数の transcript ファイルに現れています(${dupEntries.length}件・うち複数ルートにまたがるもの ${multiRoot}件): ${sample}。` +
+        "二重計上の可能性があるため history を確認してください",
+    );
+  } else {
+    log("ok", "同一 sessionId が複数の Claude transcript ファイルに重複するケースは検出されませんでした");
+  }
+
+  // Codex originator 内訳 + 未追跡件数(セッションディレクトリが無ければスキップ)。
+  const sessionsRoot = join(codexHome(), "sessions");
+  if (!existsSync(sessionsRoot)) {
+    log("ok", "Codex セッションディレクトリが無いため originator 内訳・追跡漏れはスキップしました");
+    return true;
+  }
+
+  let codexFiles: string[] = [];
+  try {
+    codexFiles = (await listCodexRollouts(sessionsRoot)).rollouts;
+  } catch (err) {
+    log("warn", `Codex rollout の列挙中にエラーが発生しました: ${errMessage(err)}`);
+    return true;
+  }
+
+  const codexUntracked = codexFiles.filter((f) => !tracked.has(f)).length;
+  log(
+    "ok",
+    `Codex rollout 追跡漏れ: ${codexUntracked}件(全 ${codexFiles.length}件中。未追跡分は ccc-notifier scan で回収できます)`,
+  );
+
+  const originatorCounts = new Map<string, number>();
+  const sessionIdToFiles = new Map<string, Set<string>>();
+  for (const f of codexFiles) {
+    const line = await peekFirstJsonLine(f);
+    const payload = isRecord(line?.payload) ? line!.payload : null;
+    const originator = typeof payload?.originator === "string" ? payload.originator : "(unknown)";
+    originatorCounts.set(originator, (originatorCounts.get(originator) ?? 0) + 1);
+    // 実データの session_meta.payload のキーは id(session_id ではない)。
+    // 将来 session_id へ戻る可能性に備えて両方を見る。
+    const sid =
+      typeof payload?.id === "string"
+        ? payload.id
+        : typeof payload?.session_id === "string"
+          ? payload.session_id
+          : null;
+    if (sid !== null && sid.length > 0) {
+      const set = sessionIdToFiles.get(sid) ?? new Set();
+      set.add(f);
+      sessionIdToFiles.set(sid, set);
+    }
+  }
+  const originatorSummary = [...originatorCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}:${v}`)
+    .join(" / ");
+  log("ok", `Codex originator 内訳: ${originatorSummary.length > 0 ? originatorSummary : "(rollout なし)"}`);
+
+  const dupCodex = [...sessionIdToFiles.values()].filter((files) => files.size > 1).length;
+  if (dupCodex > 0) {
+    log(
+      "warn",
+      `同一 session_id を持つ Codex rollout が複数ファイルにまたがっています(${dupCodex}件)。二重計上の可能性があるため history を確認してください`,
+    );
+  } else {
+    log("ok", "同一 session_id が複数の Codex rollout ファイルに重複するケースは検出されませんでした");
+  }
+
+  return true;
+}
+
+// ---- 9a. 保留マーカーの全体保留(壊れたマーカーからの復旧痕跡) ----
+//
+// cache/pending-append.json が壊れると、どの transcript に「カーソル未反映の append」が
+// あったのか復元できない。安全側として全 transcript を保留扱いにする予約キーが立ち、
+// track は毎回 history を参照するようになる(正しさは保たれるが応答は遅くなる)。
+// 自動解除はできないので、状態と解除方法を案内する。
+function checkPendingAppendMarker(): boolean {
+  if (!hasUnresolvedPendingMarker()) {
+    log("ok", "取り込み保留マーカーは正常です");
+    return true;
+  }
+  log(
+    "warn",
+    "取り込み保留マーカー(cache/pending-append.json)が壊れた形跡があります。" +
+      "安全側で全セッションを保留扱いにしているため、Stop hook のたびに history を読み直します" +
+      "(二重計上は起きません)。解消するには ccc-notifier reset-cursors を実行してください" +
+      "(取り込み位置を捨ててから解除します。履歴は保持され、次回の取り込みだけ全再走査で時間がかかります)。" +
+      "マーカーファイル単独の削除では、まだ回復していないセッションが再計上され得ます",
+  );
+  return true;
+}
+
+// ---- 9. history.jsonl 内の完全重複ターン検知(同一 sessionId + ts が複数行) ----
+//
+// 同じ transcript を track(通常の増分)と ingest(scan / 便乗り取込)の双方が異なる範囲認識で
+// 二重に取り込むと、同一 sessionId・同一 ts(そのターンの最終メッセージ時刻はカーソル位置に依らず
+// 一意に決まる)を持つ行が history.jsonl に複数現れる。1ターンにつき1行が正しい状態であるため、
+// これは強い二重計上シグナルとして扱う。apiCalls が大きく異なる(片方が全履歴分)場合は特に疑わしい。
+function checkDuplicateHistoryTurns(): boolean {
+  const turns = readTurns();
+  const groups = new Map<string, TurnRecord[]>();
+  // 一意キー(計上した呼び出しの集合から決まる)を持つレコードはキーで、
+  // キーが無い旧レコードは sessionId + ts で束ねる。
+  const byIngestKey = new Map<string, TurnRecord[]>();
+  for (const rec of turns) {
+    if (typeof rec.ingestKey === "string" && rec.ingestKey.length > 0) {
+      const keyed = byIngestKey.get(rec.ingestKey) ?? [];
+      keyed.push(rec);
+      byIngestKey.set(rec.ingestKey, keyed);
+    }
+    if (!rec.sessionId || !rec.ts) continue;
+    const key = `${rec.sessionId} ${rec.ts} ${rec.source ?? "claude"}`;
+    const list = groups.get(key) ?? [];
+    list.push(rec);
+    groups.set(key, list);
+  }
+
+  const dupKeys = [...byIngestKey.entries()].filter(([, list]) => list.length > 1);
+  if (dupKeys.length > 0) {
+    const rows = dupKeys.reduce((sum, [, list]) => sum + list.length, 0);
+    const sample = dupKeys
+      .slice(0, 3)
+      .map(([key, list]) => `${key.slice(0, 8)}…(${list[0].sessionId.slice(0, 8)}… apiCalls ${list.map((r) => r.apiCalls).join("/")})`);
+    log(
+      "warn",
+      `history.jsonl に同一の取り込みキーを持つレコードが複数あります(${dupKeys.length}組・${rows}行)。` +
+        `同じ API 呼び出しを二度計上しています。例: ${sample.join(", ")}`,
+    );
+  } else {
+    log("ok", "history.jsonl に同一の取り込みキーを持つ重複レコードは検出されませんでした");
+  }
+
+  const dupGroups = [...groups.entries()].filter(([, list]) => list.length > 1);
+  if (dupGroups.length === 0) {
+    log("ok", "history.jsonl に同一 sessionId+ts の重複ターンは検出されませんでした");
+    return true;
+  }
+  const totalDupRows = dupGroups.reduce((sum, [, list]) => sum + list.length, 0);
+  const sample = dupGroups.slice(0, 3).map(([key, list]) => {
+    const [sessionId] = key.split(" ");
+    const apiCallsList = list.map((r) => r.apiCalls).join("/");
+    return `${sessionId.slice(0, 8)}…(apiCalls ${apiCallsList})`;
+  });
+  log(
+    "warn",
+    `history.jsonl に同一 sessionId+ts の重複ターンを検出しました(${dupGroups.length}組・${totalDupRows}行)。` +
+      `二重計上の可能性があります。例: ${sample.join(", ")}。` +
+      "元 JSONL から作り直すなら ccc-notifier sweep、個別に消すなら history clear を検討してください",
+  );
+  return true;
+}
+
 export async function runDoctor(): Promise<number> {
   const results: boolean[] = [];
 
@@ -576,6 +864,9 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("notify", () => checkNotification(cfg)));
   results.push(await safeRun("claude-recent-session", () => checkClaudeRecentSessionTotal(latestTranscript)));
   results.push(await safeRun("codex-recent-session", () => checkCodexRecentSessionTotal(codexStopConfigured)));
+  results.push(await safeRun("desktop-scan", () => checkDesktopScan()));
+  results.push(await safeRun("pending-append", () => Promise.resolve(checkPendingAppendMarker())));
+  results.push(await safeRun("duplicate-history", () => Promise.resolve(checkDuplicateHistoryTurns())));
 
   const hasFailure = results.some((ok) => ok === false);
   return hasFailure ? 1 : 0;

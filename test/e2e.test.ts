@@ -54,6 +54,12 @@ const FIXTURE_CODEX_ROLLOUT_MULTITURN = fileURLToPath(
 const FIXTURE_CODEX_STOP_PAYLOAD = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
 const FIXTURE_FAKE_NOW_SHIM = fileURLToPath(new URL("./fixtures/fake-now.cjs", import.meta.url));
 
+// desktop-cost-tracking(2026-07-23)のフィクスチャ。実データ検証(タスク1)を匿名化して再現したもの。
+const FIXTURE_DESKTOP_TRANSCRIPT = fileURLToPath(
+  new URL("./fixtures/desktop/transcript-desktop-basic.jsonl", import.meta.url),
+);
+const FIXTURE_CODEX_ROLLOUT_DESKTOP = fileURLToPath(new URL("./fixtures/codex/rollout-desktop.jsonl", import.meta.url));
+
 const FIXED_FX_RATE = 150;
 
 // 子プロセスが応答不能になった場合に無限に待ち続けないための安全弁(テスト全体の
@@ -128,6 +134,8 @@ interface Sandbox {
   projectsDir: string; // CCCN_CLAUDE_PROJECTS。proj/session.jsonl に fixture のコピーを配置
   codexHome: string; // CCCN_CODEX_HOME。既定は不在ディレクトリ(detectCodex()=false に隔離)。Codex
   // シナリオのテストはここへ sessions/ や hooks.json を自分で用意してから使う。
+  desktopRoots: string; // CCCN_CLAUDE_DESKTOP_ROOTS。既定は不在ディレクトリ。desktop-cost-tracking
+  // シナリオのテストはここへ .claude/projects 相当のフィクスチャを自分で用意してから使う。
   env: NodeJS.ProcessEnv;
 }
 
@@ -182,13 +190,12 @@ function createSandbox(): Sandbox {
   const settingsPath = join(tmp, "settings.json");
   copyFileSync(FIXTURE_SETTINGS, settingsPath);
 
+  // proj/session.jsonl(sweep 専用の走査対象フィクスチャ)は、ここでは作らない。desktop-cost-tracking
+  // (track 便乗り取込)は CCCN_CLAUDE_PROJECTS 配下を毎 track 呼び出しで走査するため、ここに置くと
+  // sweep 以外の全テストの history に意図しない ingest:"scan" レコードが混入してしまう。
+  // sweep シナリオ(11. / 14.)だけが seedSweepTarget() で明示的に配置する。
   const projectsDir = join(tmp, "claude-projects");
   mkdirSync(join(projectsDir, "proj"), { recursive: true });
-  const sweepTarget = join(projectsDir, "proj", "session.jsonl");
-  copyFileSync(FIXTURE_TRANSCRIPT, sweepTarget);
-  // コピー直後(mtime=現在)だと sweep の進行中セッション保護でスキップされるため、完了済みを模して古くする。
-  const aged = new Date(Date.now() - 10 * 60_000);
-  utimesSync(sweepTarget, aged, aged);
 
   // sweep/doctor が実 ~/.codex を読まないよう隔離(2026-07-10)。既定はディレクトリを作らない
   // (= 不在パス)ことで detectCodex() を false に倒し、既存シナリオ(Codex ブロック非表示・sweep の
@@ -196,21 +203,36 @@ function createSandbox(): Sandbox {
   // sessions/ や hooks.json を自分で用意してから使う。
   const codexHome = join(tmp, "codex-home");
 
+  // desktop-cost-tracking(claudeTranscriptRoots)が実 macOS の
+  // `~/Library/Application Support/Claude/local-agent-mode-sessions` を読まないよう隔離。
+  // 既定は不在ディレクトリ(存在しないルートは黙ってスキップされる設計)。
+  const desktopRoots = join(tmp, "claude-desktop-roots");
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     CCCN_HOME: cccnHome,
     CCCN_DRY_RUN: "1",
     CCCN_CLAUDE_SETTINGS: settingsPath,
     CCCN_CLAUDE_PROJECTS: projectsDir,
+    CCCN_CLAUDE_DESKTOP_ROOTS: desktopRoots,
     CCCN_CODEX_HOME: codexHome,
     CCCN_CLI_PATH: CLI_PATH,
   };
 
-  return { tmp, cccnHome, transcriptPath, settingsPath, projectsDir, codexHome, env };
+  return { tmp, cccnHome, transcriptPath, settingsPath, projectsDir, codexHome, desktopRoots, env };
 }
 
 function cleanupSandbox(sb: Sandbox): void {
   rmSync(sb.tmp, { recursive: true, force: true });
+}
+
+/** sweep シナリオ専用: CCCN_CLAUDE_PROJECTS/proj/session.jsonl に走査対象フィクスチャを配置する。 */
+function seedSweepTarget(sb: Sandbox): void {
+  const sweepTarget = join(sb.projectsDir, "proj", "session.jsonl");
+  copyFileSync(FIXTURE_TRANSCRIPT, sweepTarget);
+  // コピー直後(mtime=現在)だと sweep の進行中セッション保護でスキップされるため、完了済みを模して古くする。
+  const aged = new Date(Date.now() - 10 * 60_000);
+  utimesSync(sweepTarget, aged, aged);
 }
 
 // ============ 小ヘルパー ============
@@ -651,6 +673,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
   // ---- 11. sweep: dry-run はサマリのみ、本実行で ingest:"sweep" の履歴が入る ----
   it('11. sweep: --dry-run previews without writing, then a real run regenerates ingest:"sweep" history', async () => {
     // 走査対象 = CCCN_CLAUDE_PROJECTS(projectsDir)/proj/session.jsonl(transcript-basic フィクスチャ)。
+    seedSweepTarget(sb);
     const dry = await runCli(["sweep", "--dry-run"], { env: sb.env });
     expect(dry.code).toBe(0);
     expect(dry.stdout).toContain("dry-run: 書き込みは行っていません");
@@ -1013,5 +1036,73 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     const rerun = await runCli(["sweep"], { env: sb.env });
     expect(rerun.code).toBe(0);
     expect(readHistory(sb.cccnHome).filter((r) => r.source === "codex")).toHaveLength(3);
+  });
+
+  // ================================================================================
+  // desktop-cost-tracking(2026-07-23 追加)。契約: docs/plans/2026-07-23-desktop-cost-tracking/。
+  // ================================================================================
+
+  it("15. scan: --dry-run はプレビューのみ、本実行で Claude デスクトップ + Codex Desktop 分を取り込み、surface を記録する", async () => {
+    // Claude デスクトップ(surface=desktop): CCCN_CLAUDE_DESKTOP_ROOTS 配下に配置。
+    mkdirSync(join(sb.desktopRoots, "proj-desktop"), { recursive: true });
+    copyFileSync(FIXTURE_DESKTOP_TRANSCRIPT, join(sb.desktopRoots, "proj-desktop", "session.jsonl"));
+
+    // Codex Desktop rollout(originator="Codex Desktop"): CCCN_CODEX_HOME/sessions 配下。
+    const codexSessions = join(sb.codexHome, "sessions", "2026", "08", "01");
+    mkdirSync(codexSessions, { recursive: true });
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_DESKTOP, join(codexSessions, "rollout-desktop.jsonl"));
+
+    const dry = await runCli(["scan", "--dry-run"], { env: sb.env });
+    expect(dry.code).toBe(0);
+    expect(dry.stdout).toContain("dry-run");
+    expect(readHistory(sb.cccnHome)).toHaveLength(0);
+
+    const real = await runCli(["scan"], { env: sb.env });
+    expect(real.code).toBe(0);
+
+    const rows = readHistory(sb.cccnHome);
+    const desktopClaude = rows.find((r) => r.sessionId === "desktop-sess-1");
+    const desktopCodex = rows.find((r) => r.source === "codex" && r.sessionId === "01234567-cccc-7000-8000-000000000099");
+    expect(desktopClaude?.surface).toBe("desktop");
+    expect(desktopClaude?.ingest).toBe("scan");
+    expect(desktopCodex?.surface).toBe("desktop");
+    expect(desktopCodex?.originator).toBe("Codex Desktop");
+
+    // 再実行では増えない(冪等)。
+    const rerun = await runCli(["scan"], { env: sb.env });
+    expect(rerun.code).toBe(0);
+    expect(readHistory(sb.cccnHome)).toHaveLength(rows.length);
+  });
+
+  it("16. doctor: デスクトップ検出状況・追跡漏れ・originator 内訳・sessionId 重複を報告する", async () => {
+    mkdirSync(join(sb.desktopRoots, "proj-desktop"), { recursive: true });
+    copyFileSync(FIXTURE_DESKTOP_TRANSCRIPT, join(sb.desktopRoots, "proj-desktop", "session.jsonl"));
+    const codexSessions = join(sb.codexHome, "sessions", "2026", "08", "01");
+    mkdirSync(codexSessions, { recursive: true });
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_BASIC, join(codexSessions, "rollout-cli.jsonl"));
+    copyFileSync(FIXTURE_CODEX_ROLLOUT_DESKTOP, join(codexSessions, "rollout-desktop.jsonl"));
+
+    const result = await runCli(["doctor"], { env: sb.env });
+    expect(result.stdout).toContain("Claude デスクトップのスキャンルート");
+    expect(result.stdout).toContain("Claude transcript 追跡漏れ");
+    expect(result.stdout).toContain("Codex rollout 追跡漏れ");
+    expect(result.stdout).toContain("Codex originator 内訳");
+    expect(result.stdout).toContain("codex-tui:1");
+    expect(result.stdout).toContain("Codex Desktop:1");
+  });
+
+  it("17. track 便乗り取込: Stop hook 経由でも Claude デスクトップの未追跡セッションが history に混入する", async () => {
+    mkdirSync(join(sb.desktopRoots, "proj-desktop"), { recursive: true });
+    copyFileSync(FIXTURE_DESKTOP_TRANSCRIPT, join(sb.desktopRoots, "proj-desktop", "session.jsonl"));
+
+    const result = await runCli(["track"], { env: sb.env, stdin: stdinFor(sb.transcriptPath) });
+    expect(result.code).toBe(0);
+
+    const rows = readHistory(sb.cccnHome);
+    const main = rows.find((r) => r.ingest === undefined);
+    const ingested = rows.find((r) => r.ingest === "scan" && r.surface === "desktop");
+    expect(main).toBeDefined();
+    expect(ingested).toBeDefined();
+    expect(ingested?.sessionId).toBe("desktop-sess-1");
   });
 });

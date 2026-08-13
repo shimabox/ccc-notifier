@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Config, TurnRecord } from "../types";
-import { formatSummary } from "../format";
+import { formatSummary, type FormattedSummary } from "../format";
 import { isWSL } from "../env";
 import { appendNotifyError, writeDryRun } from "./util";
 
@@ -186,11 +186,16 @@ function spawnNotifyChild(title: string, body: string): { child: ChildProcess; s
  * OS ネイティブ通知を送る。通知はベストエフォートであり、
  * どのような失敗が起きても reject しない(本体 Claude Code の処理を妨げない)。
  */
-export async function notifyOS(record: TurnRecord, cfg: Config, todayUSD?: number): Promise<void> {
+export async function notifyOS(
+  record: TurnRecord,
+  cfg: Config,
+  todayUSD?: number,
+  summaryOverride?: FormattedSummary,
+): Promise<void> {
   try {
     if (!cfg?.notify?.os) return;
 
-    const { title, body } = formatSummary(record, cfg, todayUSD);
+    const { title, body } = summaryOverride ?? formatSummary(record, cfg, todayUSD);
 
     if (process.env.CCCN_DRY_RUN === "1") {
       writeDryRun("os", { title, body });

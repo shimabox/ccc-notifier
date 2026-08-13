@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { aggregateCodexTurn, splitIntoCodexTurnDrafts } from "../src/codex/transcript";
+import { aggregateCodexTurn, codexResumePointAtTs, splitIntoCodexTurnDrafts } from "../src/codex/transcript";
 import type { Cursor, TokenBuckets, TurnAggregate } from "../src/types";
 
 // 読み取り専用のゴールデン fixture。正解値は test/fixtures/codex/README.md。
@@ -68,7 +68,11 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
       lastTs: "2026-07-10T12:09:34.000Z",
       seenMessageKeys: [],
       codexTotals: { input: 17272, cached: 4992, output: 7 },
+      codexOriginator: "codex-tui",
+      codexModel: "gpt-5.5",
     });
+    expect(r.originator).toBe("codex-tui");
+    expect(r.isSubagentRollout).toBe(false);
   });
 
   // 2. rollout-multiturn 全体: 逐次差分で4件を積み、破損 JSON 行・info:null の token_count・
@@ -330,5 +334,154 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
     expect(drafts.every((draft) => draft.isSubagentRollout === false)).toBe(true);
     expect(sumMain(drafts.map((draft) => draft.agg))).toEqual(buckets(900, 700, 80));
     expect(drafts[1].agg.newCursor).toEqual(whole.newCursor);
+  });
+
+  // 12. 旧カーソル(codexOriginator を持たない v0.6.3 以前のもの)からの増分読みでも、
+  //     session_meta 由来の属性(originator / child rollout 判定 / session_id / cwd)を失わない。
+  //     session_meta はファイル先頭行にしか無いため、offset 途中からの再開では読めない。
+  it("12. codexOriginator の無い旧カーソルから再開しても originator / cwd / session_id を保つ", async () => {
+    const f = join(dir, "legacy-cursor.jsonl");
+    const head = [
+      { timestamp: "2026-07-10T16:00:00.000Z", type: "session_meta", payload: { session_id: "legacy-1", cwd: "/proj/legacy", originator: "Codex Desktop", source: "cli" } },
+      { timestamp: "2026-07-10T16:00:01.000Z", type: "turn_context", payload: { model: "gpt-5.5", cwd: "/proj/legacy" } },
+      { timestamp: "2026-07-10T16:00:02.000Z", type: "event_msg", payload: { type: "user_message", message: "1つめ" } },
+      { timestamp: "2026-07-10T16:00:03.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 10 } } } },
+      { timestamp: "2026-07-10T16:00:04.000Z", type: "event_msg", payload: { type: "task_complete" } },
+    ];
+    const headText = `${head.map((line) => JSON.stringify(line)).join("\n")}\n`;
+    const tail = [
+      { timestamp: "2026-07-10T16:09:59.000Z", type: "turn_context", payload: { model: "gpt-5.5", cwd: "/proj/legacy" } },
+      { timestamp: "2026-07-10T16:10:00.000Z", type: "event_msg", payload: { type: "user_message", message: "2つめ" } },
+      { timestamp: "2026-07-10T16:10:01.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 2000, cached_input_tokens: 0, output_tokens: 20 } } } },
+      { timestamp: "2026-07-10T16:10:02.000Z", type: "event_msg", payload: { type: "task_complete" } },
+    ];
+    writeFileSync(f, headText + `${tail.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+    // v0.6.3 が書いたカーソルの形(codexOriginator フィールドそのものが無い)。
+    const legacy: Cursor = {
+      offset: Buffer.byteLength(headText),
+      lastUuid: null,
+      lastTs: "2026-07-10T16:00:04.000Z",
+      seenMessageKeys: [],
+      codexTotals: { input: 1000, cached: 0, output: 10 },
+    };
+
+    const r = await aggregateCodexTurn(f, legacy);
+    expect(r).not.toBeNull();
+    if (r === null) return;
+    expect(r.originator).toBe("Codex Desktop");
+    expect(r.sessionId).toBe("legacy-1");
+    expect(r.cwd).toBe("/proj/legacy");
+    expect(r.main).toEqual({ "gpt-5.5": buckets(1000, 0, 10) }); // 差分だけ
+  });
+
+  // 13. child rollout(session_meta.payload.source.subagent)は料金未集計。増分読みで
+  //     先頭行を読まなくても child 判定を落とさない(落とすと通常 rollout として課金される)。
+  it("13. child rollout に追記された分を増分読みしても isSubagentRollout を落とさない", async () => {
+    const f = join(dir, "child-append.jsonl");
+    const head = [
+      { timestamp: "2026-07-10T17:00:00.000Z", type: "session_meta", payload: { session_id: "child-1", cwd: "/proj/child", originator: "codex-tui", source: { subagent: { thread_spawn: { parent_thread_id: "p1", depth: 1 } } } } },
+      { timestamp: "2026-07-10T17:00:01.000Z", type: "turn_context", payload: { model: "gpt-5.5", cwd: "/proj/child" } },
+      { timestamp: "2026-07-10T17:00:02.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 500, cached_input_tokens: 0, output_tokens: 5 } } } },
+      { timestamp: "2026-07-10T17:00:03.000Z", type: "event_msg", payload: { type: "task_complete" } },
+    ];
+    const headText = `${head.map((line) => JSON.stringify(line)).join("\n")}\n`;
+    const tail = [
+      { timestamp: "2026-07-10T17:10:00.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 900, cached_input_tokens: 0, output_tokens: 9 } } } },
+      { timestamp: "2026-07-10T17:10:01.000Z", type: "event_msg", payload: { type: "task_complete" } },
+    ];
+    writeFileSync(f, headText + `${tail.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+    const cursor: Cursor = {
+      offset: Buffer.byteLength(headText),
+      lastUuid: null,
+      lastTs: "2026-07-10T17:00:03.000Z",
+      seenMessageKeys: [],
+      codexTotals: { input: 500, cached: 0, output: 5 },
+      codexOriginator: "codex-tui",
+    };
+
+    const r = await aggregateCodexTurn(f, cursor);
+    expect(r).not.toBeNull();
+    expect(r?.isSubagentRollout).toBe(true);
+    const drafts = await splitIntoCodexTurnDrafts(f, cursor);
+    expect(drafts?.every((d) => d.isSubagentRollout)).toBe(true);
+  });
+
+  // 15. 実データの Codex Desktop 一部ビルドは、成分(input/cached/output)を 0 のまま
+  //     total_tokens だけに合計を書く。成分だけを見ると使用量ゼロと判定して丸ごと落ちる。
+  it("15. 成分0・total_tokens のみの token_count でも使用量を拾う", async () => {
+    const f = join(dir, "total-only.jsonl");
+    const lines = [
+      { timestamp: "2026-05-03T04:30:23.000Z", type: "session_meta", payload: { id: "total-only-1", cwd: "/proj", originator: "Codex Desktop", source: "cli" } },
+      { timestamp: "2026-05-03T04:30:24.000Z", type: "event_msg", payload: { type: "user_message", message: "q" } },
+      { timestamp: "2026-05-03T04:30:25.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 16660 }, last_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 16660 }, model_context_window: null } } },
+      { timestamp: "2026-05-03T04:30:26.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    ];
+    writeFileSync(f, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+    const r = await aggregateCodexTurn(f, null);
+    expect(r).not.toBeNull();
+    if (r === null) return;
+    // 内訳が分からないので、実データで支配的かつ単価が最も低いキャッシュ読みとして扱う。
+    expect(r.main).toEqual({ unknown: buckets(0, 16660, 0) });
+    expect(r.apiCalls).toBe(1);
+    expect(r.sessionId).toBe("total-only-1");
+
+    // 成分が入っているイベントは従来どおり(この分岐に入らない)。
+    const healthy = join(dir, "healthy.jsonl");
+    const healthyLines = [
+      { timestamp: "2026-05-03T04:30:23.000Z", type: "session_meta", payload: { id: "healthy-1", cwd: "/proj", originator: "codex-tui", source: "cli" } },
+      { timestamp: "2026-05-03T04:30:24.000Z", type: "turn_context", payload: { model: "gpt-5.5", cwd: "/proj" } },
+      { timestamp: "2026-05-03T04:30:25.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 5000, cached_input_tokens: 1000, output_tokens: 50, total_tokens: 5050 } } } },
+      { timestamp: "2026-05-03T04:30:26.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    ];
+    writeFileSync(healthy, `${healthyLines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    const h = await aggregateCodexTurn(healthy, null);
+    expect(h?.main).toEqual({ "gpt-5.5": buckets(4000, 1000, 50) });
+  });
+
+  // 16. 合計が 0 のイベント(使用量なし)は従来どおり記録しない。
+  it("16. total_tokens も 0 の token_count は使用量なしのまま", async () => {
+    const f = join(dir, "all-zero.jsonl");
+    const lines = [
+      { timestamp: "2026-05-03T04:30:23.000Z", type: "session_meta", payload: { id: "all-zero-1", cwd: "/proj", originator: "Codex Desktop", source: "cli" } },
+      { timestamp: "2026-05-03T04:30:25.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 0 } } } },
+      { timestamp: "2026-05-03T04:30:26.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    ];
+    writeFileSync(f, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    expect(await aggregateCodexTurn(f, null)).toBeNull();
+  });
+
+  // 14. codexResumePointAtTs: 記録済み ts までを消費した再開点を返す。ターンの途中に下限が
+  //     あっても、累積カウンタ(prev)をそこまで進めるので残りが正しい差分として出る。
+  it("14. codexResumePointAtTs はターン途中の下限からでも残りの差分だけを返す", async () => {
+    const f = join(dir, "partial-turn.jsonl");
+    const lines = [
+      { timestamp: "2026-07-10T18:00:00.000Z", type: "session_meta", payload: { session_id: "partial-1", cwd: "/proj/p", originator: "codex-tui", source: "cli" } },
+      { timestamp: "2026-07-10T18:00:01.000Z", type: "turn_context", payload: { model: "gpt-5.5", cwd: "/proj/p" } },
+      { timestamp: "2026-07-10T18:00:02.000Z", type: "event_msg", payload: { type: "user_message", message: "ターン1" } },
+      { timestamp: "2026-07-10T18:00:03.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 10 } } } },
+      { timestamp: "2026-07-10T18:00:04.000Z", type: "event_msg", payload: { type: "task_complete" } },
+      { timestamp: "2026-07-10T18:10:00.000Z", type: "event_msg", payload: { type: "user_message", message: "ターン2" } },
+      { timestamp: "2026-07-10T18:10:05.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 3000, cached_input_tokens: 0, output_tokens: 30 } } } },
+      { timestamp: "2026-07-10T18:10:10.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 5000, cached_input_tokens: 0, output_tokens: 50 } } } },
+      { timestamp: "2026-07-10T18:10:12.000Z", type: "event_msg", payload: { type: "task_complete" } },
+    ];
+    writeFileSync(f, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+    const resume = await codexResumePointAtTs(f, "2026-07-10T18:10:05.000Z");
+    expect(resume).not.toBeNull();
+    if (resume === null) return;
+    expect(resume.codexTotals).toEqual({ input: 3000, cached: 0, output: 30 });
+    expect(resume.codexOriginator).toBe("codex-tui");
+
+    const drafts = await splitIntoCodexTurnDrafts(f, resume);
+    expect(drafts).toHaveLength(1);
+    expect(drafts?.[0].agg.main).toEqual({ "gpt-5.5": buckets(2000, 0, 20) });
+
+    // 下限がファイル末尾より後なら、消費し切って新規ターンは出ない。
+    const after = await codexResumePointAtTs(f, "2026-07-10T19:00:00.000Z");
+    expect(await splitIntoCodexTurnDrafts(f, after)).toBeNull();
   });
 });
