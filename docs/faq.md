@@ -51,7 +51,7 @@ ccc-notifier init              # または npx ccc-notifier init
 あわせて次を実行すると、他に問題が無いかも確認できます。
 
 ```bash
-node dist/cli.js doctor        # グローバルインストール済みなら ccc-notifier doctor
+ccc-notifier doctor            # または npx ccc-notifier doctor
 ```
 
 **通知の送信元表示が「スクリプトエディタ」「Windows PowerShell」になっている**
