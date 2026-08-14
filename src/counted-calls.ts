@@ -11,8 +11,8 @@
 //  - Codex: rollout に呼び出し単位の ID は無いので、token_count イベント1件を1呼び出しとみなし、
 //    セッション ID + そのイベント行のバイトオフセット + 累積カウンタから指紋を作る。
 //
-// 指紋は sha256 の先頭 64bit(16 hex)。実データ規模(6万件弱)での衝突確率は 1e-10 未満で、
-// 生キーをそのまま持つより history.jsonl を 3.7MB ではなく 1.0MB の増加に抑えられる。
+// 指紋は sha256 の先頭 64bit(16 hex)。個人の履歴が取りうる規模では衝突確率が無視でき、
+// 生キーをそのまま持つより history.jsonl の肥大を抑えられる。
 
 import { createHash } from "node:crypto";
 import type { TurnRecord } from "./types";

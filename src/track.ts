@@ -1,6 +1,6 @@
 // src/track.ts (T6) — Stop hook 統合パイプライン
 //
-// 契約: src/contracts.md の "src/track.ts (T6)" 参照。
+// 契約: docs/internal/contracts.md の "src/track.ts (T6)" 参照。
 //
 // この関数は Claude Code の Stop hook から毎ターン呼ばれる「フェイルセーフ境界」であり、
 // いかなる失敗でも Claude Code 本体を妨げないことが最優先の品質基準:

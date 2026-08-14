@@ -1,6 +1,6 @@
 // src/sweep.ts — 手元のClaude/Codex JSONLから履歴を全再生成する。
 //
-// 契約: src/contracts.md の "src/sweep.ts(2026-07-07 追加)" 参照。
+// 契約: docs/internal/contracts.md の "src/sweep.ts(2026-07-07 追加)" 参照。
 //
 // hook(track)のタイミングに依存せず、~/.claude/projects 配下の全 transcript(メイン +
 // subagents/)とCodex rolloutを先頭から走査し、**ターン単位に復元**して履歴へ取り込む。
@@ -637,7 +637,7 @@ async function processTranscriptLocked(
 // Claude と違い assistant 行ごとの usage は無く、event_msg/token_count が運ぶ累積カウンタの
 // 逐次ステップ差分で集計する(詳細は src/codex/transcript.ts)。ここでは splitIntoCodexTurnDrafts が
 // 返すターン下書きをTurnRecord化する。sweepでは常にcursorなしで先頭から読み、生成したcursorは
-// 後続hookとの互換性を保つ。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/sweep.ts。
+// 後続hookとの互換性を保つ。契約: docs/internal/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/sweep.ts。
 
 /** Codex ターン下書きを TurnRecord 化する(source:'codex'・ingest:'sweep'・サブエージェント無し)。 */
 function codexDraftToRecord(

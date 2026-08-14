@@ -2,7 +2,7 @@
 
 後続タスク(T2: `src/codex/env.ts` / `src/codex/transcript.ts` 等)のテストはこの値をアサートすること。
 逐次ステップ差分方式・TokenBuckets 写像・モデル/プロンプト/cwd 抽出規約は
-`.claude/plans/2026-07-10-codex-implementation-orchestration.md` §4-3(および `src/contracts.md`
+`.claude/plans/2026-07-10-codex-implementation-orchestration.md` §4-3(および `docs/internal/contracts.md`
 「2026-07-10 追加: Codex CLI 対応」節)を参照。
 
 すべて `cursor = null`(初回・全体)から読んだ場合の値。浮動小数比較は `toBeCloseTo(x, 10)` 推奨。

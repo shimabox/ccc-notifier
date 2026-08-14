@@ -150,7 +150,7 @@ describe("doctor: 同一 sessionId の transcript 重複検知", () => {
   });
 
   it("8192 バイトを超える Claude transcript の先頭行でも sessionId を読み取れる", async () => {
-    // Claude transcript も先頭行が 8192 バイトを超えることがある(実データで確認済み)。
+    // Claude transcript も先頭行が 8192 バイトを超えることがある。
     const long = JSON.stringify({
       type: "user",
       sessionId: "long-head-session",

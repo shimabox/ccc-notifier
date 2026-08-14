@@ -1,6 +1,6 @@
 // test/e2e.test.ts — 結合 E2E テスト(ビルド済み dist/cli.js を child_process で実際に起動する)
 //
-// 契約: src/contracts.md 全体、および GOLDEN 値は test/fixtures/GOLDEN.md
+// 契約: docs/internal/contracts.md 全体、および GOLDEN 値は test/fixtures/GOLDEN.md
 // (test/fixtures/transcript-basic.jsonl の正解値)を参照。
 //
 // 他の test/*.test.ts は各モジュール(src/track.ts, src/setup.ts, src/cli.ts …)を直接
@@ -693,7 +693,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
   });
 
   // ================================================================================
-  // Codex CLI 対応(2026-07-10)。契約: src/contracts.md「2026-07-10 追加: Codex CLI 対応」。
+  // Codex CLI 対応(2026-07-10)。契約: docs/internal/contracts.md「2026-07-10 追加: Codex CLI 対応」。
   // 正解値・逐次ステップ差分方式の検算は test/fixtures/codex/README.md 参照。
   // sb.codexHome は既定で不在(隔離済み)なので、各テストが sessions/ や hooks.json を
   // 自分で用意してから使う。

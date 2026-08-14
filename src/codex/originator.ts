@@ -1,6 +1,6 @@
 // src/codex/originator.ts — Codex rollout の session_meta.originator を surface へ正規化する。
 //
-// 実機で観測される originator: codex-tui / "Codex Desktop" / "Claude Code" / codex_exec /
+// Codex が記録する originator の例: codex-tui / "Codex Desktop" / "Claude Code" / codex_exec /
 // codex-chrome-extension-sidepanel / codex_work_desktop など。生の originator 値は別フィールド
 // (TurnRecord.originator)に必ず保持する。未知値は "other" へフォールバックする。
 

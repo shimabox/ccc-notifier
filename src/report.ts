@@ -1,6 +1,6 @@
 // src/report.ts (T8) — ターミナル向け集計レポート。
 //
-// 契約: src/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
+// 契約: docs/internal/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
 
 import { formatJPY, formatTokens, formatUSD } from "./format";
 import { readTurns } from "./store";

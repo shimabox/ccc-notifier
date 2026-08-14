@@ -1,6 +1,6 @@
 // src/cli.ts (T8) — エントリポイント配線。
 //
-// 契約: src/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
+// 契約: docs/internal/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
 //
 // track / init / uninstall の実体(src/track.ts / src/setup.ts)は並行実装中のため、
 // あえて動的 import() にしている(トップレベルの静的 import にしない)。
