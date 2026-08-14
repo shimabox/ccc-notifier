@@ -40,16 +40,18 @@ hook には `init` を実行した時点の Node.js の絶対パスがそのま�
 
 `doctor` はこの状態(hook に記録された Node 実行パスが実在しない)を検知し、⚠️「hook の Node 実行パスが見つかりません(mise 等での更新が原因の可能性)。init を再実行してください」と該当パス付きで知らせます(この警告は診断の終了コードには影響しません)。
 
-対処: リポジトリのディレクトリで `init` を再実行してください。hook の登録が今使っている Node.js のパスで上書きされます。
+対処: `init` を再実行してください。hook の登録が今使っている Node.js のパスで上書きされます。
 
 ```bash
-node dist/cli.js init          # グローバルインストール済みなら ccc-notifier init
+ccc-notifier init              # または npx ccc-notifier init
 ```
+
+> **注意**: `init` は「そのとき動いている ccc-notifier 自身のパス」を hook に登録します。ソースを clone した作業ディレクトリで `node dist/cli.js init` を実行すると、**hook がその作業ディレクトリを指す**ようになり、以後 `npm run build` するたびに開発中のコードが hook の実体になります。このリポジトリで開発もする場合は、インストール済みのコマンド(`ccc-notifier init`)から登録してください。いまどの実体が hook として動いているかは `doctor` が絶対パスで表示します。
 
 あわせて次を実行すると、他に問題が無いかも確認できます。
 
 ```bash
-node dist/cli.js doctor        # グローバルインストール済みなら ccc-notifier doctor
+ccc-notifier doctor            # または npx ccc-notifier doctor
 ```
 
 **通知の送信元表示が「スクリプトエディタ」「Windows PowerShell」になっている**
