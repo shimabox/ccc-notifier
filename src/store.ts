@@ -1,6 +1,6 @@
 // src/store.ts (T4) — ローカル永続化(config / cursor / history / error log)
 //
-// 契約: src/contracts.md の "src/store.ts (T4)" セクション参照。
+// 契約: docs/internal/contracts.md の "src/store.ts (T4)" セクション参照。
 // history readerはCodex activityのruntime projectionもpure mergeする。
 
 import {

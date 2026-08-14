@@ -1,6 +1,6 @@
 // src/subagents.ts — サブエージェント(バックグラウンド/サブエージェント)usage の増分集計。
 //
-// 契約: src/contracts.md の "src/subagents.ts" 参照。
+// 契約: docs/internal/contracts.md の "src/subagents.ts" 参照。
 //
 // メイン transcript の兄弟ディレクトリ
 //   <mainTranscriptPath(.jsonl 除去)>/subagents/agent-*.jsonl

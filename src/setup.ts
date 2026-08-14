@@ -3,7 +3,7 @@
 // ユーザーの ~/.claude/settings.json を編集する、本ツールで最も破壊リスクの高いモジュール。
 // 「既存設定を1項目たりとも壊さない」ことが絶対の品質基準。
 //
-// 契約: src/contracts.md の "src/setup.ts (T7)" セクション参照。
+// 契約: docs/internal/contracts.md の "src/setup.ts (T7)" セクション参照。
 //   - runInit(argv: string[]): Promise<number>      // --yes --os-only --no-notify を必ずサポート
 //   - runUninstall(argv: string[]): Promise<number> // --purge サポート
 

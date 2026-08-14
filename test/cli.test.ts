@@ -1,6 +1,6 @@
 // test/cli.test.ts (T8)
 //
-// 契約: src/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
+// 契約: docs/internal/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
 //
 // 注意: src/track.ts / src/setup.ts は並行実装中のため、このテストファイルは
 // それらを直接 import しない。main() のテスト(--version / unknown / help)は

@@ -1,6 +1,6 @@
 // test/sweep.test.ts — sweep(過去分の一括回収)の単体/結合テスト。
 //
-// 契約: src/contracts.md の "src/sweep.ts(2026-07-07 追加)"、GOLDEN 値は
+// 契約: docs/internal/contracts.md の "src/sweep.ts(2026-07-07 追加)"、GOLDEN 値は
 // test/fixtures/GOLDEN.md(transcript-multiturn.jsonl / subagent-basic.jsonl)を参照。
 //
 // 一時 CCCN_HOME + 一時 projects ルート(--projects かつ CCCN_CLAUDE_PROJECTS で指定)に

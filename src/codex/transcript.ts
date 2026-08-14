@@ -8,7 +8,7 @@
 // 実カウンタに追従するので次ウィンドウから差分方式に自己復帰する。
 // ここの誤りは全ユーザーの金額を狂わせるので、破損行・書きかけ行・壊れたカーソル・重複・リセットの
 // すべてでクラッシュせず・二重計上しないことを最優先にする(src/transcript.ts と同じ防御方針)。
-// 契約は src/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/codex/transcript.ts。
+// 契約は docs/internal/contracts.md「2026-07-10 追加: Codex CLI 対応」§ src/codex/transcript.ts。
 
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -65,13 +65,11 @@ function addTotals(target: CodexTotals, d: CodexTotals): void {
 /**
  * total_token_usage / last_token_usage を3成分に読む。record でなければ null(欠損扱い)。
  *
- * 成分がすべて 0 なのに total_tokens だけ正のイベントがある(実データでは Codex Desktop の
- * 一部ビルドが該当。43件中34件が該当し、内訳を書かずに合計だけを残す)。成分だけを見ると
- * 使用量ゼロと判定して丸ごと取りこぼすため、total_tokens を内訳不明の使用量として拾う。
- * 内訳が分からない以上どのバケットに置くかは仮定になるので、実データで最も支配的で、かつ
- * 単価が最も低いキャッシュ読みとして扱う(過大計上を作らない側)。健全なイベントでは
- * total_tokens === input_tokens + output_tokens が実データ171,945件すべてで成立しており、
- * この分岐には入らない。
+ * 成分がすべて 0 なのに total_tokens だけ正のイベントがある(Codex Desktop の一部ビルドは
+ * 内訳を書かず合計だけを残す)。成分だけを見ると使用量ゼロと判定して丸ごと取りこぼすため、
+ * total_tokens を内訳不明の使用量として拾う。どのバケットに置くかは内訳が無い以上仮定に
+ * なるので、単価が最も低いキャッシュ読みとして扱う(過大計上を作らない側に倒す)。
+ * 成分のいずれかが正であればこの分岐に入らないので、内訳を持つイベントの読み方は変わらない。
  */
 function readTotals(v: unknown): CodexTotals | null {
   if (!isRecord(v)) return null;
@@ -142,7 +140,7 @@ function readSessionMetaSeed(buffer: Buffer): SessionMetaSeed | null {
   if (payload === null) return null;
   const source = payload.source;
   return {
-    // 実データの session_meta.payload のキーは id。将来 session_id へ戻る可能性に備えて両方見る。
+    // session_meta.payload のキーは id。将来 session_id へ戻る可能性に備えて両方見る。
     sessionId: strOrNull(payload.id) ?? strOrNull(payload.session_id),
     cwd: strOrNull(payload.cwd),
     originator: strOrNull(payload.originator),

@@ -22,12 +22,12 @@
 
 ### 並列実装を成立させる鍵: 契約ファースト + ファイル所有権
 
-- Wave 0 で `src/types.ts` 追記・`src/contracts.md` 追記・テストフィクスチャ(正解値つき)を確定(契約全文は §4。設計は本書=私、転記と検証は T0)
+- Wave 0 で `src/types.ts` 追記・`docs/internal/contracts.md` 追記・テストフィクスチャ(正解値つき)を確定(契約全文は §4。設計は本書=私、転記と検証は T0)
 - 各タスクは**所有ファイル以外に触れない**(§2 の表)。契約と食い違う実装が必要になったら、改変せず報告して停止
 
 ## 1. 共通実装規約(全エージェントのプロンプトに埋め込む)
 
-1. 契約(`src/contracts.md` と本プラン抜粋)は不可侵。矛盾を見つけたら実装せず報告
+1. 契約(`docs/internal/contracts.md` と本プラン抜粋)は不可侵。矛盾を見つけたら実装せず報告
 2. 所有ファイル以外を編集しない。新規依存パッケージを追加しない
 3. コメント・命名・エラーメッセージは既存コードの流儀(日本語コメント・バイリンガル CLI 出力)に合わせる
 4. 終了前に `npx tsc --noEmit` と `npx vitest run test/<担当>.test.ts` を通す。**`npm run build` と全体 vitest は禁止**(並列中の競合防止。全体検証は私のゲートで実施)
@@ -46,7 +46,7 @@ G   最終ゲート(私 + ユーザー実機確認)
 
 | タスク | 所有ファイル | 依存 |
 |---|---|---|
-| T0 契約 | `src/types.ts` `src/contracts.md` `src/store.ts`(sanitizeCursor のみ) `test/fixtures/codex/*` `test/store.test.ts`(1ケース追記) | — |
+| T0 契約 | `src/types.ts` `docs/internal/contracts.md` `src/store.ts`(sanitizeCursor のみ) `test/fixtures/codex/*` `test/store.test.ts`(1ケース追記) | — |
 | T1 pricing/format | `src/pricing.ts` `src/format.ts` `test/pricing.test.ts` `test/format.test.ts`(新規) | T0 |
 | T2 codex core | `src/codex/env.ts` `src/codex/transcript.ts` `test/codex-transcript.test.ts` | T0(fixtures) |
 | T3 hooks.json 編集 | `src/codex/setup.ts` `test/codex-setup.test.ts` | T0 |

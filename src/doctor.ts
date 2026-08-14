@@ -1,6 +1,6 @@
 // src/doctor.ts (T8) — インストール状態の自己診断。
 //
-// 契約: src/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
+// 契約: docs/internal/contracts.md の "src/cli.ts, src/doctor.ts, src/report.ts (T8)" 参照。
 // 各チェックは ✅/⚠️/❌ + 1行説明を表示し、❌ が1つでもあれば全体として 1 を返す。
 // 個々のチェックは必ず自分自身で例外を処理し(内部で try/catch)、さらに safeRun() で
 // 二重に例外を捕捉することで、1つのチェックの想定外の失敗が残りのチェックを止めないようにする。
@@ -566,8 +566,8 @@ const PEEK_MAX_BYTES = 4 * 1024 * 1024;
  * ファイル先頭の1行だけを読み JSON として返す。失敗は null(診断のみが目的のベストエフォート)。
  *
  * 改行が見つかるまでチャンク単位で読み進める。Codex rollout の先頭行は base_instructions
- * (長いシステムプロンプト)を含み、実データでは 14KB〜42KB になる。固定長で切ると
- * 途中で切れた文字列を JSON.parse することになり、全件が黙って null になる。
+ * (長いシステムプロンプト)を含み、数十 KB に達しうる。固定長で切ると途中で切れた
+ * 文字列を JSON.parse することになり、全件が黙って null になる。
  * ファイル全体を読み込まないよう上限を設け、超えたら null にする。
  */
 async function peekFirstJsonLine(
@@ -720,7 +720,7 @@ async function checkDesktopScan(): Promise<boolean> {
     const payload = isRecord(line?.payload) ? line!.payload : null;
     const originator = typeof payload?.originator === "string" ? payload.originator : "(unknown)";
     originatorCounts.set(originator, (originatorCounts.get(originator) ?? 0) + 1);
-    // 実データの session_meta.payload のキーは id(session_id ではない)。
+    // session_meta.payload のキーは id(session_id ではない)。
     // 将来 session_id へ戻る可能性に備えて両方を見る。
     const sid =
       typeof payload?.id === "string"
