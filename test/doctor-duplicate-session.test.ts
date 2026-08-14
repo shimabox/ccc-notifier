@@ -62,8 +62,8 @@ afterEach(() => {
 });
 
 /**
- * Codex rollout の先頭行(session_meta)。実データでは base_instructions を含むため
- * 14KB〜42KB になる。ここでも 8192 バイトを確実に超える長さで書く。
+ * Codex rollout の先頭行(session_meta)。base_instructions を含むため長くなりうる。
+ * ここでも 8192 バイトを確実に超える長さで書く。
  */
 function writeRollout(dir: string, name: string, sessionId: string, originator: string): void {
   const meta = {

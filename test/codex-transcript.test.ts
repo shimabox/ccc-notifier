@@ -408,7 +408,7 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
     expect(drafts?.every((d) => d.isSubagentRollout)).toBe(true);
   });
 
-  // 15. 実データの Codex Desktop 一部ビルドは、成分(input/cached/output)を 0 のまま
+  // 15. Codex Desktop の一部ビルドは、成分(input/cached/output)を 0 のまま
   //     total_tokens だけに合計を書く。成分だけを見ると使用量ゼロと判定して丸ごと落ちる。
   it("15. 成分0・total_tokens のみの token_count でも使用量を拾う", async () => {
     const f = join(dir, "total-only.jsonl");
@@ -423,7 +423,7 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
     const r = await aggregateCodexTurn(f, null);
     expect(r).not.toBeNull();
     if (r === null) return;
-    // 内訳が分からないので、実データで支配的かつ単価が最も低いキャッシュ読みとして扱う。
+    // 内訳が分からないので、単価が最も低いキャッシュ読みとして扱う(過大計上を作らない側)。
     expect(r.main).toEqual({ unknown: buckets(0, 16660, 0) });
     expect(r.apiCalls).toBe(1);
     expect(r.sessionId).toBe("total-only-1");

@@ -232,7 +232,7 @@ runReport(argv: string[]): Promise<number>
 
 ### T0 基盤契約・スキャフォールド(Sonnet 5)
 
-**成果物**: `package.json` `tsconfig.json` `tsup.config.ts` `vitest.config.ts` `.gitignore` `src/types.ts` `src/contracts.md` `test/fixtures/transcript-basic.jsonl` `test/fixtures/settings-existing.json` `test/fixtures/GOLDEN.md`
+**成果物**: `package.json` `tsconfig.json` `tsup.config.ts` `vitest.config.ts` `.gitignore` `src/types.ts` `docs/internal/contracts.md` `test/fixtures/transcript-basic.jsonl` `test/fixtures/settings-existing.json` `test/fixtures/GOLDEN.md`
 
 指示内容:
 - `src/types.ts` は §5 の全文を転記(変更禁止)

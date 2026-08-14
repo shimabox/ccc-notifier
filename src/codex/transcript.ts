@@ -69,8 +69,7 @@ function addTotals(target: CodexTotals, d: CodexTotals): void {
  * 内訳を書かず合計だけを残す)。成分だけを見ると使用量ゼロと判定して丸ごと取りこぼすため、
  * total_tokens を内訳不明の使用量として拾う。どのバケットに置くかは内訳が無い以上仮定に
  * なるので、単価が最も低いキャッシュ読みとして扱う(過大計上を作らない側に倒す)。
- * 内訳を持つイベントは total_tokens === input_tokens + output_tokens が成立するため、
- * この分岐には入らない。
+ * 成分のいずれかが正であればこの分岐に入らないので、内訳を持つイベントの読み方は変わらない。
  */
 function readTotals(v: unknown): CodexTotals | null {
   if (!isRecord(v)) return null;
