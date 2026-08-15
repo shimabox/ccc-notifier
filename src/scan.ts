@@ -4,7 +4,7 @@
 // Codex Desktop の未追跡 rollout を含めて増分取り込みを行う。sweep(全リセット再構築)とは別物で、
 // 既存の history / cursors を破壊しない追記型。
 
-import { formatJPY, formatUSD } from "./format";
+import { formatJPY, formatTokens, formatUSD } from "./format";
 import { runIngest, notifyIngestSummary } from "./ingest";
 import { readConfig } from "./store";
 
@@ -53,6 +53,8 @@ export async function runScan(argv: string[]): Promise<number> {
           failures: result.failures,
           totalUSD: result.totalUSD,
           totalJPY: result.totalJPY,
+          totalTokens: result.totalTokens,
+          cacheTokens: result.cacheTokens,
           bySurface: result.bySurface,
         },
         null,
@@ -69,7 +71,11 @@ export async function runScan(argv: string[]): Promise<number> {
   if (result.records.length === 0) {
     console.log("新規取り込みはありませんでした");
   } else {
-    console.log(`取り込み: ${result.records.length} ターン、合計 ${formatUSD(result.totalUSD)}(${formatJPY(result.totalJPY)})`);
+    const cachePct = result.totalTokens > 0 ? Math.round((result.cacheTokens / result.totalTokens) * 100) : 0;
+    const tokensPart = result.totalTokens > 0 ? `、計 ${formatTokens(result.totalTokens)} tokens(cache ${cachePct}%)` : "";
+    console.log(
+      `取り込み: ${result.records.length} ターン、合計 ${formatUSD(result.totalUSD)}(${formatJPY(result.totalJPY)})${tokensPart}`,
+    );
     const bySurface = Object.entries(result.bySurface).sort((a, b) => (b[1]?.usd ?? 0) - (a[1]?.usd ?? 0));
     for (const [surface, v] of bySurface) {
       if (!v) continue;

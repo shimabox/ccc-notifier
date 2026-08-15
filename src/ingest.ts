@@ -336,6 +336,10 @@ export interface IngestResult {
   failures: number;
   totalUSD: number;
   totalJPY: number;
+  /** 取り込んだ全レコードの総トークン(main + sidechain + サブエージェント、5バケット合算)。 */
+  totalTokens: number;
+  /** 総トークンのうちキャッシュ系(cacheRead + cacheWrite5m + cacheWrite1h)。 */
+  cacheTokens: number;
   fxRate: number;
   fxSource: FxResult["source"];
   bySurface: Partial<Record<Surface, IngestSurfaceTotal>>;
@@ -352,19 +356,37 @@ function emptyResult(dryRun: boolean, fx: FxResult, lockAcquired: boolean): Inge
     failures: 0,
     totalUSD: 0,
     totalJPY: 0,
+    totalTokens: 0,
+    cacheTokens: 0,
     fxRate: fx.rate,
     fxSource: fx.source,
     bySurface: {},
   };
 }
 
+/** レコードの総トークンとキャッシュ系トークン(main + sidechain + サブエージェント)。 */
+function recordTokenTotals(rec: TurnRecord): { total: number; cache: number } {
+  let total = 0;
+  let cache = 0;
+  for (const b of [rec.tokens, rec.sidechainTokens, rec.subagents?.tokens]) {
+    if (!b) continue;
+    const cached = b.cacheRead + b.cacheWrite5m + b.cacheWrite1h;
+    total += b.input + b.output + cached;
+    cache += cached;
+  }
+  return { total, cache };
+}
+
 /** 合計はサブエージェント分を含む(取り込んだ金額そのもの = 通知しきい値の判定対象)。 */
 function addRecord(result: IngestResult, rec: TurnRecord): void {
   const usd = rec.costUSD + (rec.subagents?.costUSD ?? 0);
   const jpy = rec.costJPY + (rec.subagents?.costUSD ?? 0) * rec.fxRate;
+  const tokens = recordTokenTotals(rec);
   result.records.push(rec);
   result.totalUSD += usd;
   result.totalJPY += jpy;
+  result.totalTokens += tokens.total;
+  result.cacheTokens += tokens.cache;
   const surface = rec.surface ?? "cli";
   const cur = result.bySurface[surface] ?? { turns: 0, usd: 0 };
   cur.turns += 1;
@@ -632,7 +654,14 @@ export async function notifyIngestSummary(result: IngestResult, cfg: Config): Pr
     if (v) bySurface[surface] = v;
   }
   const summary = formatIngestSummary(
-    { recordCount: result.records.length, totalUSD: result.totalUSD, totalJPY: result.totalJPY, bySurface },
+    {
+      recordCount: result.records.length,
+      totalUSD: result.totalUSD,
+      totalJPY: result.totalJPY,
+      totalTokens: result.totalTokens,
+      cacheTokens: result.cacheTokens,
+      bySurface,
+    },
     cfg,
   );
 

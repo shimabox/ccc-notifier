@@ -160,6 +160,10 @@ export interface IngestSummaryInput {
   recordCount: number;
   totalUSD: number;
   totalJPY: number;
+  /** 取り込んだ全レコードの総トークン(main + sidechain + サブエージェント合算)。 */
+  totalTokens: number;
+  /** 総トークンのうちキャッシュ系(cacheRead + cacheWrite5m + cacheWrite1h)。 */
+  cacheTokens: number;
   bySurface: Record<string, { turns: number; usd: number }>;
 }
 
@@ -176,6 +180,11 @@ export function formatIngestSummary(input: IngestSummaryInput, cfg: Config): For
     .map(([surface, v]) => `${surface}: ${v.turns}件 ${formatUSD(v.usd)}`)
     .join(" / ");
 
-  const body = `${bySurfaceLine}\nhook 非依存の増分取り込み(scan)による新規分です`;
+  // モデル不明でトークンだけ載るレコード(金額 $0)でも規模が分かるよう、総トークンを添える。
+  // Codex Desktop の一部は in/out の内訳が rollout に無いため、内訳ではなく合計で表記する。
+  const cachePct = input.totalTokens > 0 ? Math.round((input.cacheTokens / input.totalTokens) * 100) : 0;
+  const tokensPart = input.totalTokens > 0 ? ` · 計 ${formatTokens(input.totalTokens)} tokens(cache ${cachePct}%)` : "";
+
+  const body = `${bySurfaceLine}${tokensPart}\nhook 非依存の増分取り込み(scan)による新規分です`;
   return { title, body };
 }

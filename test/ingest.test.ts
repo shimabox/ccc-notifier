@@ -1459,6 +1459,18 @@ describe("runIngest", () => {
     // サーフェス別内訳の合計も本体合計と一致する。
     const bySurface = Object.values(result.bySurface).reduce((sum, v) => sum + (v?.usd ?? 0), 0);
     expect(bySurface).toBeCloseTo(result.totalUSD, 10);
+    // トークン合計もサブエージェント分を含む(main + sidechain + subagents の5バケット合算)。
+    const expectedTokens = result.records.reduce((sum, r) => {
+      let t = 0;
+      for (const b of [r.tokens, r.sidechainTokens, r.subagents?.tokens]) {
+        if (!b) continue;
+        t += b.input + b.output + b.cacheRead + b.cacheWrite5m + b.cacheWrite1h;
+      }
+      return sum + t;
+    }, 0);
+    expect(result.totalTokens).toBe(expectedTokens);
+    expect(result.totalTokens).toBeGreaterThan(0);
+    expect(result.cacheTokens).toBeLessThanOrEqual(result.totalTokens);
   });
 
   it("15. カーソルを失っても、記録済みのサブエージェント分を二重計上しない", async () => {
@@ -1507,6 +1519,7 @@ describe("notifyIngestSummary", () => {
     expect(existsSync(join(tmpHome, "last-notify.json"))).toBe(true);
     const notify = JSON.parse(readFileSync(join(tmpHome, "last-notify.json"), "utf8"));
     expect(notify.os.title).toContain("取り込み");
+    expect(notify.os.body).toMatch(/計 [\d.]+[kM]? tokens\(cache \d+%\)/);
   });
 
   it("8. ミュート中は通知しない", async () => {
