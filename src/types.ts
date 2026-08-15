@@ -51,6 +51,8 @@ export interface TurnAggregate {
   originator?: string | null;
   /** session_meta.payload.source.subagent を持つ child rollout か。Claude 経路では常に undefined。 */
   isSubagentRollout?: boolean;
+  /** session_meta.payload.forked_from_id を持つ fork 由来の rollout か。Claude 経路では常に undefined。 */
+  isForkedRollout?: boolean;
   /** この集計で計上した token_count イベントの指紋(Codex 経路のみ)。Claude では常に undefined。 */
   codexEventKeys?: string[];
 }

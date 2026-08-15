@@ -15,7 +15,7 @@ npx ccc-notifier sweep --dry-run --days 7
 
 ## 通常実行で起きること
 
-sweep全体でdata lockを一度だけ取得し、次を削除・無効化してからClaude main / agentとCodexの通常rolloutをsource先頭から走査します。Codexサブエージェントのchild rolloutは料金未集計のため履歴へ入れません。**backupは作成しません**。
+sweep全体でdata lockを一度だけ取得し、次を削除・無効化してからClaude main / agentとCodexの通常rolloutをsource先頭から走査します。Codexサブエージェントのchild rolloutは「メイン $0 + サブエージェント枠」の独立レコードとして履歴へ入れます。**backupは作成しません**。
 
 - コスト履歴 `history.jsonl`
 - 取り込み位置 `cursors.json`

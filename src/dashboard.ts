@@ -1102,7 +1102,7 @@ const APP_JS = `<script>
     }
     if(t.ca){
       var caLine = document.createElement('div'); caLine.className = 'detail-meta';
-      caLine.textContent = 'Codexサブエージェント: 利用あり・料金未集計 · 開始 ' +
+      caLine.textContent = 'Codexサブエージェント: 利用あり(料金は独立レコードで計上)· 開始 ' +
         (t.ca.started||0) + ' · 終了 ' + (t.ca.stopped||0) + ' · 種別 ' + ((t.ca.agentTypes||[]).join(', ')||'unknown');
       dtd.appendChild(caLine);
     }

@@ -46,8 +46,10 @@ import {
   pendingAppendPath,
   readConfig,
   sanitizeCursor,
+  saveCursor,
   writeMuteState,
 } from "../src/store";
+import { scanCodexTurns } from "../src/codex/transcript";
 import type { Config, TurnRecord } from "../src/types";
 
 const FIXTURE_TRANSCRIPT = fileURLToPath(new URL("./fixtures/transcript-basic.jsonl", import.meta.url));
@@ -56,6 +58,19 @@ const FIXTURE_DESKTOP_TRANSCRIPT = fileURLToPath(
 );
 const FIXTURE_CODEX_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
 const FIXTURE_CODEX_DESKTOP_ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-desktop.jsonl", import.meta.url));
+const FIXTURE_CODEX_CHILD_BASIC = fileURLToPath(new URL("./fixtures/codex/rollout-child-basic.jsonl", import.meta.url));
+const FIXTURE_CODEX_CHILD_ORPHAN = fileURLToPath(
+  new URL("./fixtures/codex/rollout-child-orphan.jsonl", import.meta.url),
+);
+const FIXTURE_CODEX_CHILD_DEPTH2 = fileURLToPath(
+  new URL("./fixtures/codex/rollout-child-depth2.jsonl", import.meta.url),
+);
+const FIXTURE_CODEX_CHILD_NOMODEL = fileURLToPath(
+  new URL("./fixtures/codex/rollout-child-nomodel.jsonl", import.meta.url),
+);
+const FIXTURE_CODEX_CHILD_FORKED = fileURLToPath(
+  new URL("./fixtures/codex/rollout-child-forked.jsonl", import.meta.url),
+);
 const FIXTURE_STDIN = fileURLToPath(new URL("./fixtures/stop-hook-stdin.json", import.meta.url));
 const FIXTURE_SUBAGENT = fileURLToPath(new URL("./fixtures/subagent-basic.jsonl", import.meta.url));
 const FIXTURE_CODEX_STOP_PAYLOAD = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
@@ -268,25 +283,145 @@ describe("runIngest", () => {
     expect(readHistory()).toHaveLength(firstCount);
   });
 
-  it("4. Codex child rollout(session_meta.payload.source.subagent)は取り込まずカーソルだけ進める", async () => {
-    const childPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child.jsonl");
-    const raw = readFileSync(FIXTURE_CODEX_ROLLOUT, "utf8").replace(
-      '"source":"cli"',
-      '"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1","depth":1}}}',
-    );
-    writeFileSync(childPath, raw, "utf8");
+  it("4. Codex child rollout は「メイン $0 + subagents 枠」の独立レコードとして取り込む", async () => {
+    const childPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-basic.jsonl");
+    copyFileSync(FIXTURE_CODEX_CHILD_BASIC, childPath);
 
     const result = await runIngest({ dryRun: false, offlinePricing: true });
-    const rows = readHistory();
-    expect(rows.some((r) => r.sessionId === "01234567-aaaa-7000-8000-000000000001" && r.project === undefined)).toBe(
-      false,
-    );
-    // child rollout 自体からは history レコードが作られない。
-    const childRecords = rows.filter((r) => r.source === "codex" && r.project === "/home/user/proj-a");
-    expect(childRecords).toHaveLength(1); // root(rollout-cli.jsonl)分のみ
     expect(result.failures).toBe(0);
+
+    // 正解値は test/fixtures/codex/README.md「rollout-child-basic.jsonl」を参照。
+    const rows = readHistory().filter((r) => r.sessionId === "01234567-cccc-7000-8000-000000000001");
+    expect(rows).toHaveLength(1);
+    const rec = rows[0];
+    // メイン側は空(child の値は subagents 枠だけに置く境界)。
+    expect(rec.costUSD).toBe(0);
+    expect(rec.costJPY).toBe(0);
+    expect(rec.apiCalls).toBe(0);
+    expect(rec.tokens).toEqual({ input: 0, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 });
+    expect(rec.prompt).toBe("");
+    // subagents 枠に child の usage・金額が入る。
+    expect(rec.subagents?.costUSD).toBeCloseTo(0.095, 10);
+    expect(rec.subagents?.costByModel["gpt-5.5"]).toBeCloseTo(0.095, 10);
+    expect(rec.subagents?.tokens).toEqual({ input: 10000, output: 1300, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 12000 });
+    expect(rec.subagents?.apiCalls).toBe(2);
+    expect(rec.subagents?.agentFiles).toBe(1);
+    // 属性: ts は child の終了時刻、models にはモデル名、指紋は token_count 2件分。
+    expect(rec.ts).toBe("2026-07-10T14:00:21.000Z");
+    expect(rec.models).toEqual(["gpt-5.5"]);
+    expect(rec.source).toBe("codex");
+    expect(rec.surface).toBe("cli");
+    expect(rec.ingest).toBe("scan");
+    expect(rec.countedCalls).toHaveLength(2);
+    expect(rec.ingestKey).toBeDefined();
     // カーソルは進んでいる(次回以降スキャン対象にならない)。
     expect(sanitizeCursor(loadCursor(childPath))).not.toBeNull();
+
+    // 再実行しても増えない(冪等)。
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.sessionId === "01234567-cccc-7000-8000-000000000001")).toHaveLength(0);
+  });
+
+  it("4b. child の変種(親不明 guardian / depth 2 / model 欠損)も独立レコードになる", async () => {
+    copyFileSync(FIXTURE_CODEX_CHILD_ORPHAN, join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-orphan.jsonl"));
+    copyFileSync(FIXTURE_CODEX_CHILD_DEPTH2, join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-depth2.jsonl"));
+    copyFileSync(FIXTURE_CODEX_CHILD_NOMODEL, join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-nomodel.jsonl"));
+
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(result.failures).toBe(0);
+    const rows = readHistory();
+
+    // 親不明(parent_thread_id 無しの guardian)。EOF 打ち切りでも記録される。
+    const orphan = rows.find((r) => r.sessionId === "01234567-dddd-7000-8000-000000000001");
+    expect(orphan?.subagents?.costUSD).toBeCloseTo(0.0145, 10);
+    expect(orphan?.subagents?.apiCalls).toBe(1);
+
+    // depth 2(親も child)。扱いは depth 1 と同じ。
+    const depth2 = rows.find((r) => r.sessionId === "01234567-eeee-7000-8000-000000000001");
+    expect(depth2?.subagents?.costUSD).toBeCloseTo(0.028, 10);
+    expect(depth2?.subagents?.tokens.cacheRead).toBe(1000);
+
+    // model 欠損: トークンだけ載って金額 0、unknownModels が付く。
+    const nomodel = rows.find((r) => r.sessionId === "01234567-ffff-7000-8000-000000000001");
+    expect(nomodel?.subagents?.costUSD).toBe(0);
+    expect(nomodel?.subagents?.tokens).toEqual({ input: 3000, output: 100, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 });
+    expect(nomodel?.unknownModels).toEqual(["unknown"]);
+  });
+
+  it("4e. fork 由来の child(forked_from_id)は親カウンタ引き継ぎのため計上せず、カーソルだけ進める", async () => {
+    const forkedPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-forked.jsonl");
+    copyFileSync(FIXTURE_CODEX_CHILD_FORKED, forkedPath);
+
+    const result = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(result.failures).toBe(0);
+    // fork 複製の親カウンタ(input 100000 起点)を計上しない。child 自身のレコードも作らない。
+    const rows = readHistory();
+    expect(rows.filter((r) => r.sessionId === "01234567-9999-7000-8000-000000000001")).toHaveLength(0);
+    // 複製された親 meta の id で親セッションのレコードが「増える」こともない
+    // (親 rollout 由来の正規レコードとは countedCalls の有無で区別できないため件数で見る)。
+    const parentRecords = rows.filter(
+      (r) => r.source === "codex" && r.sessionId === "01234567-aaaa-7000-8000-000000000001",
+    );
+    expect(parentRecords).toHaveLength(1); // rollout-cli.jsonl(正規の親)由来の1件のみ
+    // カーソルは進む(次回以降の再走査を避ける)。
+    expect(sanitizeCursor(loadCursor(forkedPath))).not.toBeNull();
+
+    // sweep 再構築でも同じ規則で除外される。
+    await runSweep([]);
+    const swept = readHistory().filter(
+      (r) => r.source === "codex" && r.sessionId === "01234567-aaaa-7000-8000-000000000001",
+    );
+    expect(swept).toHaveLength(1);
+  });
+
+  it("4c. 移行: 旧版で捨てられた child(カーソル EOF・指紋なし)は reset-cursors 後に一度だけ入る", async () => {
+    const childId = "01234567-cccc-7000-8000-000000000001";
+    const childPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-basic.jsonl");
+    copyFileSync(FIXTURE_CODEX_CHILD_BASIC, childPath);
+
+    // (1) 旧版相当の状態を作る: child のカーソルは EOF、history に child 指紋なし。
+    const scanned = await scanCodexTurns(childPath, null, {});
+    expect(scanned).not.toBeNull();
+    saveCursor(childPath, scanned!.newCursor);
+
+    // (2) 通常 scan(健全なカーソルが残っている状態)では child は入らない。
+    const first = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(first.records.filter((r) => r.sessionId === childId)).toHaveLength(0);
+
+    // (3) reset-cursors 後の scan で child が一度だけ入る(既存分は指紋で除外される)。
+    expect(await runResetCursors([])).toBe(0);
+    const second = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(second.records.filter((r) => r.sessionId === childId)).toHaveLength(1);
+    const beforeCount = readHistory().length;
+
+    // (4) 再度 reset-cursors → scan しても新規 0 件(history 指紋で冪等)。
+    expect(await runResetCursors([])).toBe(0);
+    const third = await runIngest({ dryRun: false, offlinePricing: true });
+    expect(third.records).toHaveLength(0);
+    expect(readHistory()).toHaveLength(beforeCount);
+    expect(readHistory().filter((r) => r.sessionId === childId)).toHaveLength(1);
+  });
+
+  it("4d. sweep 再構築の child レコードは ingest 経由と指紋・トークン・金額・ts が一致する", async () => {
+    const childId = "01234567-cccc-7000-8000-000000000001";
+    const childPath = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-child-basic.jsonl");
+    copyFileSync(FIXTURE_CODEX_CHILD_BASIC, childPath);
+
+    await runIngest({ dryRun: false, offlinePricing: true });
+    const viaIngest = readHistory().find((r) => r.sessionId === childId);
+    expect(viaIngest).toBeDefined();
+
+    await runSweep([]); // history / cursors を捨てて先頭から再構築する
+    const viaSweep = readHistory().find((r) => r.sessionId === childId);
+    expect(viaSweep).toBeDefined();
+
+    expect(viaSweep!.ingest).toBe("sweep");
+    expect(viaSweep!.countedCalls).toEqual(viaIngest!.countedCalls);
+    expect(viaSweep!.ingestKey).toBe(viaIngest!.ingestKey);
+    expect(viaSweep!.subagents?.tokens).toEqual(viaIngest!.subagents?.tokens);
+    expect(viaSweep!.subagents?.costUSD).toBeCloseTo(viaIngest!.subagents?.costUSD ?? Number.NaN, 10);
+    expect(viaSweep!.ts).toBe(viaIngest!.ts);
+    expect(viaSweep!.costUSD).toBe(0);
   });
 
   it("5. --dry-run と実行時で totalUSD 等の集計が一致する(同一入力に対して)", async () => {

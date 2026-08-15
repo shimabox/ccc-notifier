@@ -894,7 +894,7 @@ describe("E2E: dist/cli.js (built binary via child_process)", () => {
     expect(JSON.parse(report.stdout).total.codexSubagentActivity).toMatchObject({ turns: 1 });
     await runCli(["dashboard", "--no-open"], { env: sb.env });
     const html = readFileSync(join(sb.cccnHome, "report.html"), "utf8");
-    expect(html).toContain("利用あり・料金未集計");
+    expect(html).toContain("利用あり(料金は独立レコードで計上)");
     for (const forbidden of ["PROMPT-CANARY", "session-concurrent", "child-X", "child-Y", "late-agent"]) {
       expect(html).not.toContain(forbidden);
     }

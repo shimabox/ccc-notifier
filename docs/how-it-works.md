@@ -45,6 +45,7 @@ ccc-notifierは**手元に残るログのトークン数**だけを集計しま�
 | Claude デスクトップアプリの**ホームタブ通常チャット** | ❌ **取り込めない** | 通常チャット直後にアプリのデータ領域を走査しても、トークン数を持つファイルは見つかりませんでした(2026-08-12実測)。**集計の材料が手元に無い**状態です |
 | Claude の**Web版(claude.ai)チャット** | ❌ **取り込めない** | 手元にログが残りません(2026-08-12時点) |
 | Codex CLI | ✅ 取り込める | Stop hookと`~/.codex/sessions`のrollout |
+| Codex の**サブエージェント**(child rollout) | ✅ 取り込める | `~/.codex/sessions`のchild rollout。「メイン $0 + サブエージェント枠」の独立レコードとして計上([詳細](codex.md#制限--limitations)) |
 | Codex Desktop | ✅ 取り込める(注記あり) | `~/.codex/sessions`にCLIと同じ形式のrolloutが残る。ただし[金額が0になるケース](codex.md#codex-desktop統合chatgptアプリのcodexモード)があります |
 | Codexの**クラウド実行**(Web / GitHub / Slack / クラウド委任) | ❌ **取り込めない** | 実行がクラウド側で行われ、手元に rollout が残りません(2026-08-12時点) |
 | **ChatGPT通常チャット** | ❌ **取り込めない** | 手元にログが残りません(2026-08-12時点) |

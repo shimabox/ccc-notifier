@@ -675,6 +675,56 @@ function codexDraftToRecord(
 }
 
 /**
+ * Codex child rollout(サブエージェント)の draft を独立レコード化する(ingest / sweep 共用)。
+ * 親スレッドは session_meta で分かるが、どの親「ターン」に属すかの対応付けは推測になるため
+ * 帰属させない。Claude の親不明サブエージェントと同じ「メイン $0・プロンプトなし +
+ * subagents 枠」の表現に固定し、child の値は subagents 枠だけに置く。
+ * sessionId は child 自身の id、countedCalls は child のイベント指紋なので、
+ * ingest / sweep のどちらの経路で作っても同一 child は同一キーになり冪等化が効く。
+ */
+export function codexChildDraftToRecord(
+  draft: CodexTurnDraft,
+  ts: string,
+  table: PriceTable,
+  fx: FxResult,
+  ingest: "sweep" | "scan",
+): TurnRecord {
+  const main = draft.agg.main;
+  const breakdown = computeCost(main, {}, table);
+  const rec: TurnRecord = {
+    schemaVersion: 1,
+    ts,
+    sessionId: draft.agg.sessionId,
+    project: draft.agg.cwd ?? "",
+    gitBranch: null,
+    models: collectModels(main, {}),
+    tokens: emptyBuckets(),
+    sidechainTokens: null,
+    apiCalls: 0,
+    costUSD: 0,
+    costByModel: {},
+    costJPY: 0,
+    fxRate: fx.rate,
+    fxSource: fx.source,
+    prompt: "",
+    ingest,
+    source: "codex",
+    surface: normalizeCodexOriginator(draft.agg.originator),
+    subagents: {
+      costUSD: breakdown.usd,
+      costByModel: { ...breakdown.byModel },
+      tokens: sumBuckets(main),
+      apiCalls: draft.agg.apiCalls,
+      agentFiles: 1,
+    },
+  };
+  if (typeof draft.agg.originator === "string") rec.originator = draft.agg.originator;
+  if (breakdown.unknownModels.length > 0) rec.unknownModels = breakdown.unknownModels;
+  setCountedCalls(rec, draft.agg.codexEventKeys ?? []);
+  return rec;
+}
+
+/**
  * 1つのrolloutファイルをターン単位に復元し、--daysで古いターンを捨てつつTurnRecord化する。
  * sweepからはcursorなしで呼び、保存するnewCursorは後続hookが末尾追記だけを回収するために使う。
  */
@@ -695,9 +745,12 @@ async function processCodexRolloutLocked(
   const drafts = await splitIntoCodexTurnDrafts(rolloutPath, cursor);
   // null = 読めない or 新規 usage なし。カーソルも進めない(進行中セッションを後で hook / 次回 sweep が拾う)。
   if (drafts === null || drafts.length === 0) return;
-  // Codex child rolloutは利用記録だけを扱い、料金は未集計という公開仕様に合わせる。
+  // fork 由来の child rollout は親スレッドの累積カウンタを引き継いでおり、ゼロ起点で集計すると
+  // 親の使用量を丸ごと二重計上する。計上対象から外す(ingest 側と同じ規則)。
+  if (drafts[0].isSubagentRollout && drafts[0].isForkedRollout) return;
+  // Codex child rollout(サブエージェント)は独立レコードとして計上する。
   // source欠損・未知形式はrootとして維持し、将来形式の通常rolloutを誤って捨てない。
-  if (drafts[0].isSubagentRollout) return;
+  const isChild = drafts[0].isSubagentRollout;
 
   // 各 draft → TurnRecord(--days より古いターンは捨てる。カーソルは最終ドラフトまで進めるので再走査しない)。
   const records: TurnRecord[] = [];
@@ -707,15 +760,19 @@ async function processCodexRolloutLocked(
       const tsMs = Date.parse(ts);
       if (!Number.isFinite(tsMs) || tsMs < daysCutoff) continue; // 古い → 捨てる(カーソルは進める)
     }
-    records.push(codexDraftToRecord(draft, ts, table, fx));
+    records.push(
+      isChild ? codexChildDraftToRecord(draft, ts, table, fx, "sweep") : codexDraftToRecord(draft, ts, table, fx),
+    );
   }
 
   // サマリ集計。Codex 分は全体合計(newRecords / totalUSD / byModel)にも、Codex 別枠にも計上する。
+  // child 分は Claude の SA と同じく別枠(subagentsUSD)。totalUSD / byModel はメイン基準のまま。
   for (const rec of records) {
     summary.newRecords += 1;
     summary.totalUSD += rec.costUSD;
     summary.codexRecords += 1;
     summary.codexUSD += rec.costUSD;
+    summary.subagentsUSD += rec.subagents?.costUSD ?? 0;
     if (rec.costByModel) {
       for (const [m, c] of Object.entries(rec.costByModel)) {
         summary.byModel[m] = (summary.byModel[m] ?? 0) + c;

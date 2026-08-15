@@ -93,3 +93,48 @@
 - `model` = `gpt-5.5`(hook payload 優先のテストに使う。transcript 側の turn_context.model と
   一致させてあるため、優先関係を区別したいテストは payload 側を別値に差し替えて使うこと)
 - `last_assistant_message` = `"2です。"`
+
+## child rollout フィクスチャ(2026-08-15 追加: サブエージェント独立レコード化)
+
+いずれも先頭行 session_meta の `payload.source.subagent` を持つ child rollout。
+sessionId は `payload.id`(child 自身の id)であって `payload.session_id`(親スレッド id)ではない点に注意。
+独立レコード化の契約: メイン側 tokens=0 / apiCalls=0 / costUSD=0、child の値は `subagents` 枠のみ。
+ts は draft の endTs(そのターン最後のイベント timestamp)。
+
+### rollout-child-basic.jsonl(thread_spawn・depth 1・1ターン・token_count 2回)
+
+- sessionId = `01234567-cccc-7000-8000-000000000001`(parent_thread_id = `...aaaa...0001`)
+- 逐次差分: A {10000,4000,500} → B {22000,12000,1300}(step {12000,8000,800})→ acc = {22000,12000,1300}
+- subagents.tokens = `{input: max(0,22000-12000)=10000, cacheRead:12000, output:1300}` / apiCalls = **2**
+- subagents.costUSD(gpt-5.5)= `10000×5e-6 + 12000×0.5e-6 + 1300×30e-6` = **0.095**
+- endTs = `2026-07-10T14:00:21.000Z`(task_complete)
+
+### rollout-child-orphan.jsonl(guardian・parent_thread_id 無し・task_complete 無し = EOF 打ち切り)
+
+- sessionId = `01234567-dddd-7000-8000-000000000001`
+- subagents.tokens = `{input:2000, cacheRead:0, output:150}` / apiCalls = **1**
+- subagents.costUSD = `2000×5e-6 + 150×30e-6` = **0.0145**
+- endTs = `2026-07-10T15:00:05.000Z`(最後の token_count)
+
+### rollout-child-depth2.jsonl(thread_spawn・depth 2 = 親も child)
+
+- sessionId = `01234567-eeee-7000-8000-000000000001`(parent_thread_id = child-basic の `...cccc...0001`)
+- subagents.tokens = `{input:4000, cacheRead:1000, output:250}` / apiCalls = **1**
+- subagents.costUSD = `4000×5e-6 + 1000×0.5e-6 + 250×30e-6` = **0.028**
+
+### rollout-child-nomodel.jsonl(合成: turn_context 無し = model 不明)
+
+- 実機の child 151件にはすべて turn_context があった(2026-08-15 実測)ため、これは将来の欠損に備えた合成ケース
+- sessionId = `01234567-ffff-7000-8000-000000000001`
+- model キーは `"unknown"` → 単価なし → subagents.costUSD = **0** / unknownModels = `["unknown"]`
+- subagents.tokens = `{input:3000, cacheRead:0, output:100}` / apiCalls = **1**
+
+### rollout-child-forked.jsonl(fork 由来 = 集計対象外)
+
+- 先頭 session_meta に `forked_from_id` があり、2行目に親の session_meta 複製、続いて親の累積カウンタを
+  引き継いだ token_count(input 100000 から開始)を含む。実機では child 152件中 103件がこの形
+  (2026-08-15 実測。複製区間の token_count は親 rollout の値と完全一致し、ゼロ起点で集計すると
+  親の使用量を丸ごと二重計上する)
+- 期待動作: **レコードを作らずカーソルだけ進める**(ingest / sweep とも)。fork 後の増分(この
+  フィクスチャでは input +500 / output +200)を切り出す基準点は rollout 内から機械的に判定できない
+  ため、安全側(計上しない)に倒す

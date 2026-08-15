@@ -31,6 +31,10 @@ export interface CodexTurnDraft {
   agg: TurnAggregate; // ターン1件分(aggregateCodexTurn と同じ規約で構築)
   endTs: string | null; // そのターン最後のイベント timestamp(record の ts に使う)
   isSubagentRollout: boolean; // session_meta.payload.source.subagent を持つ child rollout か
+  // session_meta.payload.forked_from_id を持つ fork 由来の rollout か。fork は親スレッドの履歴と
+  // 累積トークンカウンタを引き継ぐ(親イベントの複製行や、親の値から始まるカウンタを含む)ため、
+  // ゼロ起点で集計すると親の使用量を丸ごと二重計上する。
+  isForkedRollout: boolean;
 }
 
 // ============ 小ヘルパー(src/transcript.ts と同一規則をローカルに複製) ============
@@ -119,6 +123,7 @@ interface SessionMetaSeed {
   cwd: string | null;
   originator: string | null;
   isSubagentRollout: boolean;
+  isForkedRollout: boolean;
 }
 
 /**
@@ -145,6 +150,7 @@ function readSessionMetaSeed(buffer: Buffer): SessionMetaSeed | null {
     cwd: strOrNull(payload.cwd),
     originator: strOrNull(payload.originator),
     isSubagentRollout: isRecord(source) && Object.hasOwn(source, "subagent"),
+    isForkedRollout: strOrNull(payload.forked_from_id) !== null,
   };
 }
 
@@ -202,7 +208,8 @@ interface WindowScan {
   cwd: string | null; // 最後の turn_context.cwd → session_meta.cwd
   sessionId: string; // session_meta の id(旧 session_id)→ ファイル名の uuid 部 → ""
   eventKeys: string[]; // ウィンドウ全体で計上した token_count イベントの指紋
-  isSubagentRollout: boolean; // child rollout は sweep の料金履歴へ入れないため呼び出し側へ伝える
+  isSubagentRollout: boolean; // child rollout の扱い(独立レコード化 / fork 除外)を呼び出し側が決めるために伝える
+  isForkedRollout: boolean; // fork 由来か(親カウンタ引き継ぎ = ゼロ起点集計は二重計上になる)
   originator: string | null; // session_meta.originator(生値)。ファイル先頭にしか無いのでカーソル越しに持ち回る
   firstTs: string | null;
   lastTs: string | null;
@@ -258,6 +265,7 @@ async function scanWindow(
   let sessionMetaCwd: string | null = null;
   let sessionMetaSid: string | null = null;
   let isSubagentRollout = false;
+  let isForkedRollout = false;
   // session_meta はファイル先頭にしか現れないため、増分読み(rescan でない再開)では観測できない。
   // カーソルに保存済みの originator を初期値にし、先頭行からも直接読み直して補う
   // (child rollout 判定はカーソルに持たないため、常に先頭行から採る)。
@@ -269,6 +277,7 @@ async function scanWindow(
       sessionMetaCwd = seed.cwd;
       if (seed.originator !== null) originator = seed.originator;
       isSubagentRollout = seed.isSubagentRollout;
+      isForkedRollout = seed.isForkedRollout;
     }
   }
   let firstTs: string | null = null;
@@ -334,6 +343,9 @@ async function scanWindow(
       if (c !== null) sessionMetaCwd = c;
       const source = payload.source;
       if (isRecord(source) && Object.hasOwn(source, "subagent")) isSubagentRollout = true;
+      // fork された rollout は親の session_meta の複製行も含む(2行目以降)。判定は一度 true に
+      // なったら維持する(複製された親 meta に forked_from_id が無くても fork には変わりない)。
+      if (strOrNull(payload.forked_from_id) !== null) isForkedRollout = true;
       const orig = strOrNull(payload.originator);
       if (orig !== null) originator = orig;
       return;
@@ -428,6 +440,7 @@ async function scanWindow(
     sessionId: rolloutId(),
     eventKeys: windowEventKeys,
     isSubagentRollout,
+    isForkedRollout,
     originator,
     firstTs,
     lastTs,
@@ -476,6 +489,7 @@ export async function aggregateCodexTurn(
     newCursor: windowCursor(scan),
     originator: scan.originator,
     isSubagentRollout: scan.isSubagentRollout,
+    isForkedRollout: scan.isForkedRollout,
     codexEventKeys: scan.eventKeys,
   };
 }
@@ -603,6 +617,7 @@ function draftsFromScan(scan: WindowScan): CodexTurnDraft[] {
   const lastIndex = picked.length - 1;
   return picked.map((s, i) => ({
     isSubagentRollout: scan.isSubagentRollout,
+    isForkedRollout: scan.isForkedRollout,
     agg: {
       sessionId: scan.sessionId, // session_meta はファイル先頭にしか無いので全ドラフト共通
       main: { [s.model ?? "unknown"]: totalsToBuckets(s.acc) },
@@ -613,6 +628,7 @@ function draftsFromScan(scan: WindowScan): CodexTurnDraft[] {
       gitBranch: null,
       originator: scan.originator, // session_meta はファイル先頭にしか無いので全ドラフト共通
       isSubagentRollout: scan.isSubagentRollout,
+      isForkedRollout: scan.isForkedRollout,
       codexEventKeys: s.eventKeys,
       firstTs: s.firstTs,
       lastTs: s.endTs,

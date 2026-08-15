@@ -46,5 +46,8 @@ export async function runResetCursors(argv: string[]): Promise<number> {
   console.log("取り込み位置(cursors.json)と保留マーカーを破棄しました。");
   console.log("履歴(history.jsonl)・設定・通知先はそのままです。二重計上は履歴側の指紋で防ぎます。");
   console.log("次回の取り込みは全 transcript / rollout を読み直すため、一度だけ時間がかかります。");
+  console.log(
+    "注意: 過去に未計上だった分(例: 旧バージョンで計上していなかった Codex サブエージェント分)も新規に取り込まれるため、履歴総額・月予算の消化が増えることがあります。",
+  );
   return 0;
 }

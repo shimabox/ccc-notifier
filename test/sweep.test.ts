@@ -512,16 +512,11 @@ function placeCodexRollout(fixtureBasename: string, fileName: string): string {
 }
 
 describe("runSweep (codex)", () => {
-  it("child rolloutを料金・履歴・cursorから除外し、rootと未知sourceは維持する", async () => {
+  it("child rolloutは「メイン $0 + subagents 枠」の独立レコードとして取り込み、rootと未知sourceは従来どおり", async () => {
     const root = placeCodexRollout("rollout-basic.jsonl", "rollout-root.jsonl");
-    const child = placeCodexRollout("rollout-basic.jsonl", "rollout-child.jsonl");
+    const child = placeCodexRollout("rollout-child-basic.jsonl", "rollout-child.jsonl");
     const unknown = placeCodexRollout("rollout-basic.jsonl", "rollout-unknown.jsonl");
 
-    const childRaw = readFileSync(child, "utf8").replace(
-      '"source":"cli"',
-      '"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1","depth":1}}}',
-    );
-    writeFileSync(child, childRaw, "utf8");
     const unknownRaw = readFileSync(unknown, "utf8").replace(
       '"source":"cli"',
       '"source":{"future_runtime":{"version":2}}',
@@ -531,12 +526,23 @@ describe("runSweep (codex)", () => {
     const { code, output } = await sweep([]);
 
     expect(code).toBe(0);
-    expect(output).toContain("Codex: 2 ターン");
-    expect(readHistory()).toHaveLength(2);
+    expect(output).toContain("Codex: 3 ターン");
+    // child 分は別枠(サブエージェント行)に出る。正解値は test/fixtures/codex/README.md 参照。
+    expect(output).toContain("うちサブエージェント");
+    expect(readHistory()).toHaveLength(3);
+
+    const childRec = readHistory().find((r) => r.sessionId === "01234567-cccc-7000-8000-000000000001");
+    expect(childRec?.costUSD).toBe(0);
+    expect(childRec?.apiCalls).toBe(0);
+    expect(childRec?.subagents?.costUSD).toBeCloseTo(0.095, 10);
+    expect(childRec?.subagents?.apiCalls).toBe(2);
+    expect(childRec?.ingest).toBe("sweep");
+
     const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
     expect(cursors[root]).toBeDefined();
     expect(cursors[unknown]).toBeDefined();
-    expect(cursors[child]).toBeUndefined();
+    // child にもカーソルが付く(以後は末尾追記だけを回収する)。
+    expect(cursors[child]).toBeDefined();
   });
 
   it("51 rolloutでも25件単位だけ進捗を出し、1件ごとの冗長な出力をしない", async () => {
