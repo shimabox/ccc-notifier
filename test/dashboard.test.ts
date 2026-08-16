@@ -137,7 +137,7 @@ interface EmbedTurn {
   bs: Record<string, number>;
   pr: string;
   tr: boolean;
-  sa: { usd: string; jpy: string; models: string; apiCalls: number } | null;
+  sa: { usd: string; jpy: string; models: string; apiCalls: number; tok?: string } | null;
 }
 interface Embed {
   version: string;
@@ -717,6 +717,7 @@ describe("runDashboard — サブエージェント (subagents)", () => {
     expect(t.sa!.usd).toBe(formatUSD(0.033));
     expect(t.sa!.apiCalls).toBe(1);
     expect(t.sa!.models).toContain("Sonnet 5");
+    expect(t.sa!.tok).toBe("計 3.0k tokens(cache 0%)"); // input 1000 + output 2000
   });
 
   it("SA なしなら「うちサブエージェント」は出ず、embed の sa は null・md に +SA が無い", async () => {
