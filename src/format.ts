@@ -27,13 +27,14 @@ export function formatJPY(n: number): string {
 
 /**
  * トークン数表示。
- * n < 1000 → そのまま / n < 1e6 → 小数1桁 + "k" / それ以上 → 小数1桁 + "M"
- * 例: "999" "12.3k" "1.2M"
+ * n < 1000 → そのまま / n < 1e6 → 小数1桁 + "k" / n < 1e9 → 小数1桁 + "M" / それ以上 → 小数1桁 + "B"
+ * 例: "999" "12.3k" "1.2M" "5.7B"
  */
 export function formatTokens(n: number): string {
   if (n < 1000) return `${n}`;
   if (n < 1e6) return `${(n / 1000).toFixed(1)}k`;
-  return `${(n / 1e6).toFixed(1)}M`;
+  if (n < 1e9) return `${(n / 1e6).toFixed(1)}M`;
+  return `${(n / 1e9).toFixed(1)}B`;
 }
 
 function groupThousands(n: number): string {

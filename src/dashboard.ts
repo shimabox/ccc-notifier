@@ -311,6 +311,7 @@ interface TurnEmbed {
   pr: string; // プロンプト(最大 PROMPT_MAX 字 + マーク)
   tr: boolean; // 切り詰めたか
   sa: { usd: string; jpy: string; models: string; apiCalls: number; tok?: string } | null;
+  tk: [number, number, number]; // [実効入力, 出力, うちcache](main + sidechain + SA 合算の生値)
   ca?: { started: number; stopped: number; agentTypes: string[]; usageStatus: "partial" | "unavailable" };
   sc?: "codex"; // Codex 由来のみ。Claude はキー省略(容量節約・後方互換)
 }
@@ -319,10 +320,28 @@ interface PeriodTotals {
   usd: number;
   jpy: number;
   turns: number;
+  tin: number; // 実効入力トークン(input + cache 系。main + sidechain + サブエージェント合算)
+  tout: number; // 出力トークン(同上)
+  tcache: number; // tin のうち cache 系(cacheRead + cacheWrite5m/1h)
 }
 
 function emptyTotals(): PeriodTotals {
-  return { usd: 0, jpy: 0, turns: 0 };
+  return { usd: 0, jpy: 0, turns: 0, tin: 0, tout: 0, tcache: 0 };
+}
+
+/** ターンの全トークン(main + sidechain + サブエージェント)。金額の hero/KPI と同じ包含範囲にする。 */
+function turnTokenTotals(rec: TurnRecord): { tin: number; tout: number; tcache: number } {
+  let tin = 0;
+  let tout = 0;
+  let tcache = 0;
+  for (const b of [rec.tokens, rec.sidechainTokens, rec.subagents?.tokens]) {
+    if (!b) continue;
+    const cache = b.cacheRead + b.cacheWrite5m + b.cacheWrite1h;
+    tin += b.input + cache;
+    tcache += cache;
+    tout += b.output;
+  }
+  return { tin, tout, tcache };
 }
 
 function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
@@ -367,6 +386,10 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
     pr: text,
     tr: truncated,
     sa,
+    tk: (() => {
+      const t = turnTokenTotals(rec);
+      return [t.tin, t.tout, t.tcache] as [number, number, number];
+    })(),
   };
   // Codex 由来のみ sc を付与(Claude はキー省略で容量節約・JSON では undefined キーは出力されない)。
   if (rec.source === "codex") out.sc = "codex";
@@ -399,29 +422,30 @@ function computeKpis(turns: TurnRecord[]): {
   const month = emptyTotals();
   const all = emptyTotals();
 
+  const add = (t: PeriodTotals, usd: number, jpy: number, tk: { tin: number; tout: number; tcache: number }): void => {
+    t.usd += usd;
+    t.jpy += jpy;
+    t.turns += 1;
+    t.tin += tk.tin;
+    t.tout += tk.tout;
+    t.tcache += tk.tcache;
+  };
   for (const rec of turns) {
     const usd = turnTotalUSD(rec);
     const jpy = turnTotalJPY(rec);
-    all.usd += usd;
-    all.jpy += jpy;
-    all.turns += 1;
+    const tk = turnTokenTotals(rec);
+    add(all, usd, jpy, tk);
 
     const dt = new Date(rec.ts);
     if (Number.isNaN(dt.getTime())) continue;
     if (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) {
-      today.usd += usd;
-      today.jpy += jpy;
-      today.turns += 1;
+      add(today, usd, jpy, tk);
     }
     if (dt.getTime() >= weekCutoff) {
-      week.usd += usd;
-      week.jpy += jpy;
-      week.turns += 1;
+      add(week, usd, jpy, tk);
     }
     if (dt.getFullYear() === y && dt.getMonth() === mo) {
-      month.usd += usd;
-      month.jpy += jpy;
-      month.turns += 1;
+      add(month, usd, jpy, tk);
     }
   }
   return { today, week, month, all };
@@ -593,6 +617,13 @@ const APP_JS = `<script>
     var v = n || 0;
     if(v >= 1) return '¥' + Math.round(v).toLocaleString('en-US');
     return '¥' + (Math.round(v * 10) / 10);
+  }
+  function formatTok(n){
+    var v = n || 0;
+    if(v < 1000) return String(v);
+    if(v < 1e6) return (v / 1000).toFixed(1) + 'k';
+    if(v < 1e9) return (v / 1e6).toFixed(1) + 'M';
+    return (v / 1e9).toFixed(1) + 'B';
   }
 
   // ---- 日付/バケット(ローカルTZ)----
@@ -1019,14 +1050,21 @@ const APP_JS = `<script>
   var kpiCards = document.querySelectorAll('.kpi .stat');
   var heroValueEl = document.querySelector('.hero .hero-value');
   var heroMetaEls = document.querySelectorAll('.hero .hero-meta');
-  var heroSaEl = heroMetaEls.length > 1 ? heroMetaEls[1] : null; // SA 行(SA ありのときだけサーバが描画)
+  var heroTokEl = document.querySelector('.hero .hero-tok');
+  var heroSaEl = document.querySelector('.hero .hero-sa'); // SA 行(SA ありのときだけサーバが描画)
   var heroSaPrefix = heroSaEl ? ((heroSaEl.textContent || '').split('$')[0]) : '';
+  function tokLine(tot){
+    var pct = tot.ti > 0 ? Math.round(tot.tc / tot.ti * 100) : 0;
+    return 'in ' + formatTok(tot.ti) + '(cache ' + pct + '%)/ out ' + formatTok(tot.to) + ' tokens';
+  }
   function setKpiCard(card, tot){
     if(!card) return;
     var v = card.querySelector('.stat-value');
     var m = card.querySelector('.stat-meta');
+    var tk = card.querySelector('.stat-tok');
     if(v) v.textContent = formatUSD(tot.usd);
     if(m) m.textContent = formatJPY(tot.jpy) + ' · ' + tot.turns + ' ターン';
+    if(tk) tk.textContent = 'in ' + formatTok(tot.ti) + ' / out ' + formatTok(tot.to);
   }
   function renderKpis(){
     if(!HAS_CODEX) return;
@@ -1034,25 +1072,29 @@ const APP_JS = `<script>
     var now = new Date();
     var y = now.getFullYear(), mo = now.getMonth(), d = now.getDate();
     var weekCutoff = Date.now() - 7*86400000;
-    var today = {usd:0,jpy:0,turns:0}, week = {usd:0,jpy:0,turns:0}, month = {usd:0,jpy:0,turns:0}, all = {usd:0,jpy:0,turns:0};
+    function zero(){ return {usd:0,jpy:0,turns:0,ti:0,to:0,tc:0}; }
+    var today = zero(), week = zero(), month = zero(), all = zero();
     var saUsd = 0, saJpy = 0;
+    function acc(t, u, j, tk){ t.usd+=u; t.jpy+=j; t.turns++; t.ti+=tk[0]; t.to+=tk[1]; t.tc+=tk[2]; }
     for(var i=0;i<src.length;i++){
       var tn = src[i], bs = tn.bs || {}, fx = tn.fx || 0, u = 0;
       for(var s in bs){ if(bs.hasOwnProperty(s)) u += bs[s]; }
       var j = u * fx;
+      var tk = tn.tk || [0,0,0];
       if(tn.sa){ var sau = u - (tn.um || 0); saUsd += sau; saJpy += sau * fx; } // SA 分 = 総額 − メイン
-      all.usd += u; all.jpy += j; all.turns++;
+      acc(all, u, j, tk);
       var dt = new Date(tn.t);
       if(isNaN(dt.getTime())) continue;
-      if(dt.getFullYear()===y && dt.getMonth()===mo && dt.getDate()===d){ today.usd+=u; today.jpy+=j; today.turns++; }
-      if(tn.t >= weekCutoff){ week.usd+=u; week.jpy+=j; week.turns++; }
-      if(dt.getFullYear()===y && dt.getMonth()===mo){ month.usd+=u; month.jpy+=j; month.turns++; }
+      if(dt.getFullYear()===y && dt.getMonth()===mo && dt.getDate()===d){ acc(today, u, j, tk); }
+      if(tn.t >= weekCutoff){ acc(week, u, j, tk); }
+      if(dt.getFullYear()===y && dt.getMonth()===mo){ acc(month, u, j, tk); }
     }
     if(kpiCards.length >= 4){
       setKpiCard(kpiCards[0], today); setKpiCard(kpiCards[1], week); setKpiCard(kpiCards[2], month); setKpiCard(kpiCards[3], all);
     }
     if(heroValueEl) heroValueEl.textContent = formatUSD(all.usd);
     if(heroMetaEls.length > 0) heroMetaEls[0].textContent = formatJPY(all.jpy) + ' · ' + all.turns + ' ターン';
+    if(heroTokEl) heroTokEl.textContent = tokLine(all);
     if(heroSaEl){
       heroSaEl.hidden = !(saUsd > 0);
       if(saUsd > 0) heroSaEl.textContent = heroSaPrefix + formatUSD(saUsd) + '(' + formatJPY(saJpy) + ')';
@@ -1213,6 +1255,7 @@ function statCard(label: string, sub: string, totals: PeriodTotals): string {
     `<div class="stat-label">${esc(label)}<span class="stat-sub">${esc(sub)}</span></div>` +
     `<div class="stat-value">${esc(formatUSD(totals.usd))}</div>` +
     `<div class="stat-meta">${esc(formatJPY(totals.jpy))} · ${totals.turns} ターン</div>` +
+    `<div class="stat-meta stat-tok">in ${esc(formatTokens(totals.tin))} / out ${esc(formatTokens(totals.tout))}</div>` +
     `</div>`
   );
 }
@@ -1483,8 +1526,9 @@ function renderDashboard(
     `<div class="hero-label">${esc(totalLabel)} / ${esc(totalLabelEn)}</div>` +
     `<div class="hero-value">${esc(formatUSD(kpi.all.usd))}</div>` +
     `<div class="hero-meta">${esc(formatJPY(kpi.all.jpy))} · ${kpi.all.turns} ターン</div>` +
+    `<div class="hero-meta hero-tok">in ${esc(formatTokens(kpi.all.tin))}(cache ${kpi.all.tin > 0 ? Math.round((kpi.all.tcache / kpi.all.tin) * 100) : 0}%)/ out ${esc(formatTokens(kpi.all.tout))} tokens</div>` +
     (anySub
-      ? `<div class="hero-meta">うちサブエージェント ${esc(formatUSD(subUsd))}(${esc(formatJPY(subJpy))})</div>`
+      ? `<div class="hero-meta hero-sa">うちサブエージェント ${esc(formatUSD(subUsd))}(${esc(formatJPY(subJpy))})</div>`
       : "") +
     `</div>` +
     `</div>`;

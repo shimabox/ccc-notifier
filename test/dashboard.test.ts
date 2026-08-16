@@ -720,6 +720,21 @@ describe("runDashboard — サブエージェント (subagents)", () => {
     expect(t.sa!.tok).toBe("計 3.0k tokens(cache 0%)"); // input 1000 + output 2000
   });
 
+  it("ヒーローとKPIカードに期間トークン(in/out)が表示され、embed に生トークンが載る", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+    // ヒーロー: in X(cache Y%)/ out Z tokens(SA 分のトークンも合算される)
+    expect(html).toMatch(/class="hero-meta hero-tok">in [\d.]+[kM]?\(cache \d+%\)\/ out [\d.]+[kM]? tokens</);
+    // KPI カード: 4枚すべてにトークンサブ行
+    expect(html.match(/class="stat-meta stat-tok">in /g)?.length).toBe(4);
+    // embed に生値 [実効入力, 出力, cache](クライアント側のフィルタ連動集計用)
+    const t = parseData(html).turns[0] as { tk?: [number, number, number] };
+    expect(Array.isArray(t.tk)).toBe(true);
+    expect(t.tk![1]).toBeGreaterThan(0); // output
+    expect(t.tk![0]).toBeGreaterThanOrEqual(t.tk![2]); // 実効入力 >= cache 部分
+  });
+
   it("SA なしなら「うちサブエージェント」は出ず、embed の sa は null・md に +SA が無い", async () => {
     appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.12, costJPY: 18 }));
     await run(["--no-open"]);
@@ -782,7 +797,7 @@ describe("runDashboard — 月予算カード", () => {
     expect(readSpy).toHaveBeenCalledWith();
     expect(data.turns).toEqual([]);
     expect(data.budgetFixed).toBe(true);
-    expect(data.budgetMonth).toEqual({ usd: 0.2, jpy: 30, turns: 1 });
+    expect(data.budgetMonth).toMatchObject({ usd: 0.2, jpy: 30, turns: 1 });
     expect(html).toContain("保存済み履歴を全件集計");
     expect(html).toContain("all recorded history");
     expect(html).not.toContain("正確");
