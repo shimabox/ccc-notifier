@@ -309,7 +309,7 @@ describe("Codex subagent activity projection", () => {
     expect(rows[1].subagentActivity).toBeUndefined();
   });
 
-  it("report/dashboardは利用あり・料金未集計を示し、key・ID・path・料金へ混ぜない", async () => {
+  it("report/dashboardは利用あり(料金は親ターンに含めない)を示し、key・ID・path・料金へ混ぜない", async () => {
     const key = observe("SubagentStart", { agent_type: "<img src=x onerror=alert(1)>" });
     appendTurn(makeRecord({ activityProjectionKey: key }));
 
@@ -317,7 +317,7 @@ describe("Codex subagent activity projection", () => {
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
     await runReport(["--days", "9999"]);
     expect(logs.join("\n")).toContain("Codexサブエージェント利用あり");
-    expect(logs.join("\n")).toContain("料金未集計");
+    expect(logs.join("\n")).toContain("料金は親ターンに含めない");
     expect(logs.join("\n")).not.toContain(key);
 
     logs.length = 0;
@@ -334,7 +334,7 @@ describe("Codex subagent activity projection", () => {
     vi.mocked(console.log).mockClear();
     await runDashboard(["--no-open"]);
     const html = readFileSync(join(home, "report.html"), "utf8");
-    expect(html).toContain("利用あり・料金未集計");
+    expect(html).toContain("利用あり(料金はこのターンに含めない)");
     expect(html).not.toContain(key);
     expect(html).not.toContain("private-agent-a");
     expect(html).not.toContain("<img src=x onerror=alert(1)>");

@@ -17,6 +17,7 @@ import type { ClaudeTranscriptRoot } from "./claude-roots";
 import { codexHome } from "./codex/env";
 import { normalizeCodexOriginator } from "./codex/originator";
 import { codexResumePointAtTs, scanCodexTurns } from "./codex/transcript";
+import type { CodexTurnDraft } from "./codex/transcript";
 import { listCodexRollouts } from "./codex/sessions";
 import { waitForDataLock } from "./data-lock";
 import { getUsdJpy } from "./fx";
@@ -40,7 +41,7 @@ import {
 import type { FloorScope, HistoryIndex } from "./store";
 import { anyOf, callFingerprints, messageKeyFilterOf, setCountedCalls } from "./counted-calls";
 import type { MessageKeyFilter } from "./counted-calls";
-import { attachSubagentGroups, splitIntoTurnDrafts } from "./sweep";
+import { attachSubagentGroups, codexChildDraftToRecord, splitIntoTurnDrafts } from "./sweep";
 import type { TurnDraft } from "./sweep";
 import { collectSubagentUsage } from "./subagents";
 import type { SubagentUsage } from "./subagents";
@@ -562,14 +563,20 @@ async function processFiles(
     }
     const windowCursor = scan.newCursor;
 
-    if (drafts[0].isSubagentRollout) {
-      // Codex child rollout は利用記録のみで料金未集計という公開仕様に合わせる(sweep と同じ扱い)。
-      // カーソルだけ進めて次回以降の再走査を避ける。
+    // fork 由来の child rollout は親スレッドの累積カウンタを引き継いでおり、ゼロ起点で集計すると
+    // 親の使用量を丸ごと二重計上する。計上せずカーソルだけ進める(fork 前の親分は親 rollout 側で
+    // 計上済み。fork 後の増分だけを切り出す基準点は rollout 内から機械的に判定できない)。
+    if (drafts[0].isSubagentRollout && drafts[0].isForkedRollout) {
       commit(filePath, [], windowCursor);
       return;
     }
+    // Codex child rollout(サブエージェント)は独立レコードとして計上する(sweep と同じ表現)。
+    const build = drafts[0].isSubagentRollout
+      ? (draft: CodexTurnDraft) =>
+          codexChildDraftToRecord(draft, draft.endTs ?? new Date().toISOString(), table, fx, "scan")
+      : (draft: CodexTurnDraft) => buildCodexRecord(draft.agg, table, fx);
     if (cursor !== null) {
-      commit(filePath, drafts.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
+      commit(filePath, drafts.map(build), windowCursor);
       return;
     }
 
@@ -582,7 +589,7 @@ async function processFiles(
       floor === null
         ? drafts
         : ((await scanCodexTurns(filePath, await codexResumePointAtTs(filePath, floor), scanOpts))?.drafts ?? []);
-    commit(filePath, target.map((draft) => buildCodexRecord(draft.agg, table, fx)), windowCursor);
+    commit(filePath, target.map(build), windowCursor);
   };
 
   const runOver = async (

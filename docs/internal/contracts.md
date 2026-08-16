@@ -296,6 +296,7 @@ interface CodexTurnDraft {
   agg: TurnAggregate;      // ターン1件分(下記規約で構築)
   endTs: string | null;    // そのターン最後のイベント timestamp(record.ts に使う)
   isSubagentRollout: boolean; // session_meta.payload.source.subagent を持つ child rollout か
+  isForkedRollout: boolean;   // session_meta.payload.forked_from_id を持つ fork 由来の rollout か(2026-08-16 追加)
 }
 ```
 
@@ -436,7 +437,10 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - rollout列挙はdoctorとread-only helperを共有し、通常ファイル限定・symlink非追跡・深さ上限を一致させる。
 - 各ファイル: cursorなしで`splitIntoCodexTurnDrafts` → `--days`フィルタ(endTs基準・cursorは読取末尾まで進める) →
   TurnRecord(`source: 'codex'`, `ingest: 'sweep'`)。進行中rolloutも常にbest-effortで走査する
-- `session_meta.payload.source.subagent`を持つchild rolloutは、Codexサブエージェント料金未集計の仕様に合わせ、料金・履歴・cursorへ入れない。
+- `session_meta.payload.source.subagent`を持つchild rolloutは「メイン $0・プロンプトなし + subagents 枠」の
+  独立レコード(`codexChildDraftToRecord`、ingest と共用)として履歴へ入れ、cursorも保存する。ただし
+  `forked_from_id`を持つfork由来のchildは親カウンタ引き継ぎ(二重計上)のためレコードを作らない
+  (cursorは保存する)。(2026-08-16 契約修正、下記参照)
   `source`欠損・未知形式は通常rolloutとして維持する。doctorの最新単一rollout診断は従来どおり親/子未分類。
 - サマリーに Codex 分の件数/金額を1行追加(「Codex: N ターン $X」。0件なら出さない)
 
@@ -446,8 +450,10 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   選択は sessionStorage `cccn-src`(値: `all` | `claude` | `codex`、既定 all)で自動リロードを跨いで保持
 - フィルタはチャート・モデル別・プロジェクト別・ターン履歴・KPI に適用。**月予算カードは常に合算**(カード内に「全ソース合算」を小さく明記)
 - ターン履歴の行に `Codex` バッジ(source が codex のとき)。XSS 不変条件(textContent / < エスケープ)維持
-- Codex activityがある行は「利用あり・料金未集計」と開始/終了unique数・safe typeを表示する。内部key/ID/pathは
-  embed/UIへ出さず、Claudeの既存`+SA`料金表示、filter、総額、月予算は変えない。
+- Codex activityがある行は「利用あり(料金はこのターンに含めない)」(一覧マークは`+SA(検出)`)と
+  開始/終了unique数・safe typeを表示する(2026-08-16 文言修正: 表示は利用検出であって、対応する
+  独立レコードの有無・回収状況を主張しない)。内部key/ID/pathはembed/UIへ出さず、
+  Claudeの既存`+SA`料金表示、filter、総額、月予算は変えない。
 - slot 配色ロジックは不変(全履歴のモデル別総コスト)
 
 ### 2026-07-10 Wave 2 での契約修正(オーケストレーター認可・実装済み)
@@ -547,3 +553,26 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   (`unknownModels` と同じ扱い)。ターン・時刻・トークン数は履歴に現れる。
 - Claude 経路には同種の欠損は無い(実データ 33,170 行の assistant usage を確認。
   読んでいない数値フィールドに使用量が入っているケースは 0 件)。
+
+## 2026-08-16 変更: Codex child rollout の独立レコード化(ユーザー認可済み)
+
+従来契約「child rollout は料金・履歴・cursor へ入れない(料金未集計)」を廃止し、次へ置き換える。
+
+- **独立レコード化**: fork でない child rollout の usage は「メイン $0(tokens=0 / apiCalls=0 / costUSD=0 /
+  costJPY=0)・プロンプトなし + `subagents` 枠」の TurnRecord として履歴へ追記する。ts は draft の endTs、
+  sessionId は child 自身の id(`payload.id` 優先)、`countedCalls` は child のイベント指紋。
+  ingest / sweep は共用ビルダー `codexChildDraftToRecord`(src/sweep.ts)を使い、経路をまたいで
+  同一 ingestKey になる(冪等)。親のどのターンに属すかの対応付けは行わない。
+- **fork 除外**: `session_meta.payload.forked_from_id` を持つ rollout は親スレッドの履歴と累積カウンタを
+  引き継ぐ(複製区間の token_count は親 rollout の値と一致することを実測確認)。child かつ fork のものは
+  レコードを作らないが、cursor は ingest / sweep とも保存する(全走査の繰り返し防止)。
+- **二重計上しない根拠(clean child 全件で検証、2026-08-16 確定)**: 親解決を
+  `parent_thread_id` → `source.subagent.thread_spawn.parent_thread_id` → `session_id` の順で行うと、
+  clean child 全50件(検証時点)の親36セッションがすべて解決でき、その**全親で「正の説明不能超過
+  `Σ max(0, step − last_token_usage)` = 0」が成立**した(同一累積値の再送・負ステップは超過に非算入)。
+  親カウンタの増分はすべて親自身の呼び出しで厳密に説明されるため、child の呼び出しが一部でも
+  混入する余地は無い。
+- **表示**: 親ターン上の activity 表示は「利用あり(料金はこのターンに含めない)」。独立レコードからは
+  ターン単位の OS/Slack 通知を送らない(Claude の親不明サブエージェントと同じ)。
+- **過去分**: 健全な既存カーソルが残る通常アップグレードでは自動回収しない。reset-cursors / sweep /
+  カーソル消失後の再走査で取り込まれる(reset-cursors の案内と docs に総額・月予算増の警告あり)。

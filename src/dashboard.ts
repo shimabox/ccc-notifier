@@ -310,7 +310,7 @@ interface TurnEmbed {
   bs: Record<string, number>; // slot → USD(SA 込み。チャート/内訳/プロジェクト集計用)
   pr: string; // プロンプト(最大 PROMPT_MAX 字 + マーク)
   tr: boolean; // 切り詰めたか
-  sa: { usd: string; jpy: string; models: string; apiCalls: number } | null;
+  sa: { usd: string; jpy: string; models: string; apiCalls: number; tok?: string } | null;
   ca?: { started: number; stopped: number; agentTypes: string[]; usageStatus: "partial" | "unavailable" };
   sc?: "codex"; // Codex 由来のみ。Claude はキー省略(容量節約・後方互換)
 }
@@ -331,7 +331,7 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
   const primary = rec.models[0] ?? "unknown";
   const extra = rec.models.length > 1 ? ` +${rec.models.length - 1}` : "";
   const saMark = rec.subagents ? " +SA" : "";
-  const codexActivityMark = rec.source === "codex" && rec.subagentActivity ? " +SA(未集計)" : "";
+  const codexActivityMark = rec.source === "codex" && rec.subagentActivity ? " +SA(検出)" : "";
   let sa: TurnEmbed["sa"] = null;
   if (rec.subagents) {
     const saModels = Object.keys(rec.subagents.costByModel).map((m) => modelDisplayName(m));
@@ -341,6 +341,14 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
       models: saModels.join(", "),
       apiCalls: rec.subagents.apiCalls,
     };
+    // 金額 $0 でも規模が分かるよう総トークンを添える(単価不明モデルの child など)。
+    // Codex Desktop 由来など in/out の内訳を持たないケースがあるため合計 + cache % で表記する。
+    const b = rec.subagents.tokens;
+    const cache = b.cacheRead + b.cacheWrite5m + b.cacheWrite1h;
+    const total = b.input + b.output + cache;
+    if (total > 0) {
+      sa.tok = `計 ${formatTokens(total)} tokens(cache ${Math.round((cache / total) * 100)}%)`;
+    }
   }
   const ms = Date.parse(rec.ts);
   const out: TurnEmbed = {
@@ -1097,12 +1105,12 @@ const APP_JS = `<script>
     dtd.appendChild(meta);
     if(t.sa){
       var saLine = document.createElement('div'); saLine.className = 'detail-meta';
-      saLine.textContent = 'サブエージェント: ' + (t.sa.usd||'') + '(' + (t.sa.jpy||'') + ')· ' + (t.sa.models||'') + ' · APIコール ' + (t.sa.apiCalls||0);
+      saLine.textContent = 'サブエージェント: ' + (t.sa.usd||'') + '(' + (t.sa.jpy||'') + ')· ' + (t.sa.models||'') + ' · APIコール ' + (t.sa.apiCalls||0) + (t.sa.tok ? ' · ' + t.sa.tok : '');
       dtd.appendChild(saLine);
     }
     if(t.ca){
       var caLine = document.createElement('div'); caLine.className = 'detail-meta';
-      caLine.textContent = 'Codexサブエージェント: 利用あり・料金未集計 · 開始 ' +
+      caLine.textContent = 'Codexサブエージェント: 利用あり(料金はこのターンに含めない)· 開始 ' +
         (t.ca.started||0) + ' · 終了 ' + (t.ca.stopped||0) + ' · 種別 ' + ((t.ca.agentTypes||[]).join(', ')||'unknown');
       dtd.appendChild(caLine);
     }
