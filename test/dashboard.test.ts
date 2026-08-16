@@ -735,6 +735,25 @@ describe("runDashboard — サブエージェント (subagents)", () => {
     expect(t.tk![0]).toBeGreaterThanOrEqual(t.tk![2]); // 実効入力 >= cache 部分
   });
 
+  it("チャートに金額/トークンの軸トグルとトークン凡例が描画される", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+    // 軸トグル(常設。Codex の有無に依存しない)
+    expect(html).toContain('data-metric="usd">金額<');
+    expect(html).toContain('data-metric="tok">トークン<');
+    // トークン用凡例(既定は hidden。クライアント側でトグルに連動して表示)
+    expect(html).toContain('id="cccn-tok-legend" hidden');
+    // .legend の display:flex が hidden 属性を上書きしないこと(これが無いと金額モードでも凡例が出続ける)
+    expect(html).toContain(".legend[hidden]{display:none;}");
+    expect(html).toContain("キャッシュ(read+write)");
+    expect(html).toContain("入力(キャッシュ以外)");
+    // クライアント JS: メトリクス状態の保存キーとトークン軸の描画分岐
+    expect(html).toContain("'cccn-metric'");
+    expect(html).toContain("トークン積み上げ棒グラフ");
+    expect(html).toContain("tokLegend.hidden = !tokMode");
+  });
+
   it("SA なしなら「うちサブエージェント」は出ず、embed の sa は null・md に +SA が無い", async () => {
     appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.12, costJPY: 18 }));
     await run(["--no-open"]);
