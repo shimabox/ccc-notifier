@@ -933,23 +933,29 @@ const APP_JS = `<script>
   function renderByModel(sub){
     if(!modelEl) return;
     clearNode(modelEl);
-    var usd = {}, jpy = {}, tcount = {}, total = 0;
+    var usd = {}, jpy = {}, tcount = {}, ttok = {}, total = 0;
     sub.forEach(function(tn){
       var bs = tn.bs || {}, fx = tn.fx || 0;
-      for(var s in bs){ if(bs.hasOwnProperty(s) && bs[s] > 0){
+      var tk = tn.tk || [0,0,0];
+      // 単価不明モデル・料金0のchildは bs の値が 0 のまま登場する。金額 0 でも参加として集計し、
+      // トークンだけの利用がモデル別表から消えないようにする(表示条件側で usd も tok も 0 の行を落とす)。
+      for(var s in bs){ if(bs.hasOwnProperty(s)){
         usd[s] = (usd[s]||0) + bs[s]; jpy[s] = (jpy[s]||0) + bs[s]*fx; total += bs[s];
         tcount[s] = (tcount[s]||0) + 1;
+        // ターン列と同じ参加カウント方式: そのモデルが登場したターンの全量を各モデルへ計上(重複あり)。
+        // レコードにモデル別トークンは無いため、ターン内のモデル間分割はしない。
+        ttok[s] = (ttok[s]||0) + tk[0] + tk[1];
       } }
     });
     var table = document.createElement('table'); table.className = 'data-table';
     var thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">構成比</th></tr>';
+    thead.innerHTML = '<tr><th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th><th class="c-num">構成比</th></tr>';
     table.appendChild(thead);
     var tbody = document.createElement('tbody');
     var any = false;
     for(var j=0;j<slotOrder.length;j++){
       var slot = slotOrder[j];
-      if(!(usd[slot] > 0)) continue;
+      if(!(usd[slot] > 0 || (ttok[slot]||0) > 0)) continue;
       any = true;
       var share = total > 0 ? (usd[slot]/total*100) : 0;
       var tr = document.createElement('tr');
@@ -959,8 +965,9 @@ const APP_JS = `<script>
       var c2 = document.createElement('td'); c2.className = 'c-num'; c2.textContent = String(tcount[slot]||0);
       var c3 = document.createElement('td'); c3.className = 'c-num'; c3.textContent = formatUSD(usd[slot]);
       var c4 = document.createElement('td'); c4.className = 'c-num'; c4.textContent = formatJPY(jpy[slot]);
+      var c4t = document.createElement('td'); c4t.className = 'c-num'; c4t.textContent = formatTok(ttok[slot]||0);
       var c5 = document.createElement('td'); c5.className = 'c-num'; c5.textContent = share.toFixed(1) + '%';
-      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c5);
+      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c4t); tr.appendChild(c5);
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -978,15 +985,16 @@ const APP_JS = `<script>
       var bs = tn.bs || {}, fx = tn.fx || 0, total = 0;
       for(var s in bs){ if(bs.hasOwnProperty(s)) total += bs[s]; }
       var name = tn.p || '(unknown)';
-      var a = agg[name] || (agg[name] = { usd:0, jpy:0, turns:0 });
-      a.usd += total; a.jpy += total*fx; a.turns++;
+      var tk = tn.tk || [0,0,0];
+      var a = agg[name] || (agg[name] = { usd:0, jpy:0, turns:0, tok:0 });
+      a.usd += total; a.jpy += total*fx; a.turns++; a.tok += tk[0] + tk[1];
     });
-    var rows = Object.keys(agg).map(function(name){ var a = agg[name]; return { name:name, usd:a.usd, jpy:a.jpy, turns:a.turns }; });
+    var rows = Object.keys(agg).map(function(name){ var a = agg[name]; return { name:name, usd:a.usd, jpy:a.jpy, turns:a.turns, tok:a.tok }; });
     rows.sort(function(a,b){ return b.usd - a.usd || a.name.localeCompare(b.name); });
     if(rows.length === 0){ var p = document.createElement('p'); p.className='empty-hint'; p.textContent='この期間のデータはありません'; projEl.appendChild(p); return; }
     var table = document.createElement('table'); table.className = 'data-table';
     var thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>プロジェクト / Project</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th></tr>';
+    thead.innerHTML = '<tr><th>プロジェクト / Project</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th></tr>';
     table.appendChild(thead);
     var tbody = document.createElement('tbody');
     rows.forEach(function(r){
@@ -995,7 +1003,8 @@ const APP_JS = `<script>
       var c2 = document.createElement('td'); c2.className='c-num'; c2.textContent = String(r.turns);
       var c3 = document.createElement('td'); c3.className='c-num'; c3.textContent = formatUSD(r.usd);
       var c4 = document.createElement('td'); c4.className='c-num'; c4.textContent = formatJPY(r.jpy);
-      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4);
+      var c5 = document.createElement('td'); c5.className='c-num'; c5.textContent = formatTok(r.tok);
+      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c5);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -1309,17 +1318,20 @@ interface SurfaceAgg {
   turns: number;
   usd: number;
   jpy: number;
+  tokens: number;
 }
 
-/** サーフェス別内訳(SA 込み総額)。turns は埋め込み対象期間分(kpi と同じ turns 配列)。 */
+/** サーフェス別内訳(SA 込み総額・総トークン)。turns は埋め込み対象期間分(kpi と同じ turns 配列)。 */
 function computeSurfaceBreakdown(turns: TurnRecord[]): SurfaceAgg[] {
   const map = new Map<string, SurfaceAgg>();
   for (const rec of turns) {
     const surface = effectiveSurface(rec);
-    const agg = map.get(surface) ?? { surface, turns: 0, usd: 0, jpy: 0 };
+    const agg = map.get(surface) ?? { surface, turns: 0, usd: 0, jpy: 0, tokens: 0 };
+    const tk = turnTokenTotals(rec);
     agg.turns += 1;
     agg.usd += turnTotalUSD(rec);
     agg.jpy += turnTotalJPY(rec);
+    agg.tokens += tk.tin + tk.tout;
     map.set(surface, agg);
   }
   return [...map.values()].sort((a, b) => b.usd - a.usd);
@@ -1340,15 +1352,16 @@ function surfaceSection(turns: TurnRecord[]): string {
         `<tr><td>${esc(surfaceLabel(r.surface as Parameters<typeof surfaceLabel>[0]))}</td>` +
         `<td class="c-num">${r.turns}</td>` +
         `<td class="c-num">${esc(formatUSD(r.usd))}</td>` +
-        `<td class="c-num">${esc(formatJPY(r.jpy))}</td></tr>`,
+        `<td class="c-num">${esc(formatJPY(r.jpy))}</td>` +
+        `<td class="c-num">${esc(formatTokens(r.tokens))}</td></tr>`,
     )
     .join("");
   return (
     `<section class="card">` +
     `<h2>サーフェス別内訳 / By surface</h2>` +
-    `<p class="note">CLI 以外(デスクトップアプリ等)からの利用分の内訳(埋め込み対象期間・SA 込み総額)。</p>` +
+    `<p class="note">CLI 以外(デスクトップアプリ等)からの利用分の内訳(埋め込み対象期間・SA 込み総額・総トークン)。モデル不明で金額 $0 の利用分も tokens 列で規模が分かります。</p>` +
     `<div class="table-wrap"><table class="turns"><thead><tr>` +
-    `<th>サーフェス</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th>` +
+    `<th>サーフェス</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th>` +
     `</tr></thead><tbody>${trs}</tbody></table></div>` +
     `</section>`
   );
@@ -1627,7 +1640,7 @@ function renderDashboard(
     `<div class="grid2">` +
     `<section class="card">` +
     `<h2>モデル別内訳 / By model</h2>` +
-    `<p class="note">選択中の期間(既定は${esc(totalLabel)})のコスト降順。複数モデルのターンは各モデルに1ずつ計上。</p>` +
+    `<p class="note">選択中の期間(既定は${esc(totalLabel)})のコスト降順。複数モデルのターンは、ターン数・tokens 列とも各モデルに全量計上(重複あり。レコードにモデル別トークンが無いためターン内では分割しない)。</p>` +
     `<div class="table-wrap" id="cccn-bymodel"></div>` +
     `</section>` +
     `<section class="card">` +

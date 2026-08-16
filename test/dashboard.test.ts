@@ -138,6 +138,7 @@ interface EmbedTurn {
   pr: string;
   tr: boolean;
   sa: { usd: string; jpy: string; models: string; apiCalls: number; tok?: string } | null;
+  tk: [number, number, number];
 }
 interface Embed {
   version: string;
@@ -752,6 +753,67 @@ describe("runDashboard — サブエージェント (subagents)", () => {
     expect(html).toContain("'cccn-metric'");
     expect(html).toContain("トークン積み上げ棒グラフ");
     expect(html).toContain("tokLegend.hidden = !tokMode");
+  });
+
+  it("モデル別・プロジェクト別テーブルに tokens 列が描画される", async () => {
+    seedWithSubagents();
+    await run(["--no-open"]);
+    const html = readHtml();
+    // 両テーブルのヘッダに tokens 列(client-render のため APP_JS 内の thead リテラルで確認)
+    expect(html).toContain(
+      '<th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th><th class="c-num">構成比</th>',
+    );
+    expect(html).toContain(
+      '<th>プロジェクト / Project</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th>',
+    );
+    // モデル別は参加カウント方式であることを注記に明示(重複計上の断り)
+    expect(html).toContain("ターン数・tokens 列とも各モデルに全量計上");
+  });
+
+  it("$0・トークンありのモデル(単価不明child等)がモデル別表から消えない", async () => {
+    // 単価不明モデルの $0 レコード(トークンのみ)。codex-auto-review の guardian child を模す。
+    appendTurn(
+      makeTurn({
+        models: ["codex-auto-review"],
+        costUSD: 0,
+        costJPY: 0,
+        costByModel: { "codex-auto-review": 0 },
+        tokens: { input: 12000, output: 300, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 4000 },
+      }),
+    );
+    await run(["--no-open"]);
+    const html = readHtml();
+    const data = parseData(html);
+    // スロット割当と埋め込みに $0 モデルが残っている(クライアント描画の前提)。
+    // modelDisplayName("codex-auto-review") は "Codex" になる。
+    expect(data.slots.map((sl: { name: string }) => sl.name)).toContain("Codex");
+    const t = data.turns[0];
+    expect(Object.keys(t.bs).length).toBeGreaterThan(0);
+    expect(Object.values(t.bs).every((v) => v === 0)).toBe(true);
+    expect(t.tk[0] + t.tk[1]).toBe(16300);
+    // 集計は bs[s] > 0 を要求せず、表示条件は「金額 > 0 またはトークン > 0」。
+    expect(html).toContain("for(var s in bs){ if(bs.hasOwnProperty(s)){");
+    expect(html).toContain("usd[slot] > 0 || (ttok[slot]||0) > 0");
+  });
+
+  it("サーフェス別内訳に tokens 列が出る(サーバ描画・正確な合算)", async () => {
+    // cli + desktop の2サーフェスを作る(単一 cli だとセクション自体が出ない)。
+    appendTurn(makeTurn({ models: ["claude-fable-5"], costUSD: 0.1, costJPY: 16 }));
+    appendTurn(
+      makeTurn({
+        models: ["gpt-5.5"],
+        costUSD: 0,
+        costJPY: 0,
+        surface: "desktop",
+        tokens: { input: 0, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 54141 },
+      }),
+    );
+    await run(["--no-open"]);
+    const html = readHtml();
+    expect(html).toContain("サーフェス別内訳");
+    expect(html).toMatch(/<th>サーフェス<\/th>.*<th class="c-num">tokens<\/th>/);
+    // モデル不明・金額 $0 の desktop 行にもトークンが出る(cacheRead 54141 → 54.1k)
+    expect(html).toContain(">54.1k<");
   });
 
   it("SA なしなら「うちサブエージェント」は出ず、embed の sa は null・md に +SA が無い", async () => {
