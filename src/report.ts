@@ -270,7 +270,7 @@ function printTable(result: Aggregated, days: number): void {
   if (result.total.codexSubagentActivity) {
     const activity = result.total.codexSubagentActivity;
     console.log(
-      `(Codexサブエージェント利用あり(料金は独立レコードで計上): ${activity.turns}ターン` +
+      `(Codexサブエージェント利用あり(料金は親ターンに含めない): ${activity.turns}ターン` +
       ` / 開始${activity.started}・終了${activity.stopped})`,
     );
   }

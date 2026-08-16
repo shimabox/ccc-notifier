@@ -545,6 +545,19 @@ describe("runSweep (codex)", () => {
     expect(cursors[child]).toBeDefined();
   });
 
+  it("fork由来のchild rolloutはレコードを作らないが、カーソルは保存する", async () => {
+    const forked = placeCodexRollout("rollout-child-forked.jsonl", "rollout-forked.jsonl");
+
+    const { code } = await sweep([]);
+
+    expect(code).toBe(0);
+    // fork 複製の親カウンタ(input 100000 起点)も child 自身の増分も計上しない。
+    expect(readHistory()).toHaveLength(0);
+    // カーソルは進む(進めないと次回 scan が fork rollout を毎回全走査する)。
+    const cursors = JSON.parse(readFileSync(cursorsFile(), "utf8")) as Record<string, unknown>;
+    expect(cursors[forked]).toBeDefined();
+  });
+
   it("51 rolloutでも25件単位だけ進捗を出し、1件ごとの冗長な出力をしない", async () => {
     for (let i = 0; i < 51; i++) {
       placeCodexRollout(

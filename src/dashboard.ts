@@ -331,7 +331,7 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
   const primary = rec.models[0] ?? "unknown";
   const extra = rec.models.length > 1 ? ` +${rec.models.length - 1}` : "";
   const saMark = rec.subagents ? " +SA" : "";
-  const codexActivityMark = rec.source === "codex" && rec.subagentActivity ? " +SA(未集計)" : "";
+  const codexActivityMark = rec.source === "codex" && rec.subagentActivity ? " +SA(検出)" : "";
   let sa: TurnEmbed["sa"] = null;
   if (rec.subagents) {
     const saModels = Object.keys(rec.subagents.costByModel).map((m) => modelDisplayName(m));
@@ -1102,7 +1102,7 @@ const APP_JS = `<script>
     }
     if(t.ca){
       var caLine = document.createElement('div'); caLine.className = 'detail-meta';
-      caLine.textContent = 'Codexサブエージェント: 利用あり(料金は独立レコードで計上)· 開始 ' +
+      caLine.textContent = 'Codexサブエージェント: 利用あり(料金はこのターンに含めない)· 開始 ' +
         (t.ca.started||0) + ' · 終了 ' + (t.ca.stopped||0) + ' · 種別 ' + ((t.ca.agentTypes||[]).join(', ')||'unknown');
       dtd.appendChild(caLine);
     }

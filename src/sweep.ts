@@ -745,24 +745,27 @@ async function processCodexRolloutLocked(
   const drafts = await splitIntoCodexTurnDrafts(rolloutPath, cursor);
   // null = 読めない or 新規 usage なし。カーソルも進めない(進行中セッションを後で hook / 次回 sweep が拾う)。
   if (drafts === null || drafts.length === 0) return;
-  // fork 由来の child rollout は親スレッドの累積カウンタを引き継いでおり、ゼロ起点で集計すると
-  // 親の使用量を丸ごと二重計上する。計上対象から外す(ingest 側と同じ規則)。
-  if (drafts[0].isSubagentRollout && drafts[0].isForkedRollout) return;
-  // Codex child rollout(サブエージェント)は独立レコードとして計上する。
+  // Codex child rollout(サブエージェント)は独立レコードとして計上する。ただし fork 由来の child は
+  // 親スレッドの累積カウンタを引き継いでおり、ゼロ起点で集計すると親の使用量を丸ごと二重計上する
+  // ため計上対象から外す(ingest 側と同じ規則)。レコードは作らないがカーソルは進める
+  // (進めないと後続の scan / hook が巨大な fork rollout を毎回全走査する)。
   // source欠損・未知形式はrootとして維持し、将来形式の通常rolloutを誤って捨てない。
   const isChild = drafts[0].isSubagentRollout;
+  const isForkedChild = isChild && drafts[0].isForkedRollout;
 
   // 各 draft → TurnRecord(--days より古いターンは捨てる。カーソルは最終ドラフトまで進めるので再走査しない)。
   const records: TurnRecord[] = [];
-  for (const draft of drafts) {
-    const ts = draft.endTs ?? new Date().toISOString();
-    if (daysCutoff !== null) {
-      const tsMs = Date.parse(ts);
-      if (!Number.isFinite(tsMs) || tsMs < daysCutoff) continue; // 古い → 捨てる(カーソルは進める)
+  if (!isForkedChild) {
+    for (const draft of drafts) {
+      const ts = draft.endTs ?? new Date().toISOString();
+      if (daysCutoff !== null) {
+        const tsMs = Date.parse(ts);
+        if (!Number.isFinite(tsMs) || tsMs < daysCutoff) continue; // 古い → 捨てる(カーソルは進める)
+      }
+      records.push(
+        isChild ? codexChildDraftToRecord(draft, ts, table, fx, "sweep") : codexDraftToRecord(draft, ts, table, fx),
+      );
     }
-    records.push(
-      isChild ? codexChildDraftToRecord(draft, ts, table, fx, "sweep") : codexDraftToRecord(draft, ts, table, fx),
-    );
   }
 
   // サマリ集計。Codex 分は全体合計(newRecords / totalUSD / byModel)にも、Codex 別枠にも計上する。

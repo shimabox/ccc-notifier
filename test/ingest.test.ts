@@ -431,6 +431,39 @@ describe("runIngest", () => {
     expect(real.records.length).toBe(dry.records.length);
   });
 
+  // 便乗り取込の実行条件の固定: track は「現在ターンの記録を正常に作成した後」にだけ ingest を
+  // 便乗実行する。新規 usage の無い Stop(重複 Stop など)では実行されない(docs/how-it-works.md の
+  // 記述と一致させる)。その場合の未回収分は次の正常ターンか手動 scan で回収される。
+  it("5b. 新規usageの無いStopでは便乗り取込が走らず、別rolloutの未回収分は手動scanで回収される", async () => {
+    // 1. transcript を track で処理し切る(この時点の便乗り取込で既存 rollout も消費される)。
+    const trackedPath = join(cliProjects, "proj-cli", "no-new-usage.jsonl");
+    copyFileSync(FIXTURE_TRANSCRIPT, trackedPath);
+    const stdin = readFileSync(FIXTURE_STDIN, "utf8").replace(
+      '"__TRANSCRIPT_PATH__"',
+      () => JSON.stringify(trackedPath),
+    );
+    await runTrack(stdin);
+
+    // 2. 別 rollout に未回収 usage を置く(新セッション ID)。
+    const newRollout = join(codexHomeDir, "sessions", "2026", "08", "01", "rollout-unrecovered.jsonl");
+    writeFileSync(
+      newRollout,
+      readFileSync(FIXTURE_CODEX_ROLLOUT, "utf8").replaceAll(
+        "01234567-aaaa-7000-8000-000000000001",
+        "01234567-aaaa-7000-8000-00000000005b",
+      ),
+      "utf8",
+    );
+
+    // 3. 同じ transcript への重複 Stop(新規 usage なし)→ 早期 return し、便乗り取込は走らない。
+    await runTrack(stdin);
+    expect(readHistory().filter((r) => r.sessionId === "01234567-aaaa-7000-8000-00000000005b")).toHaveLength(0);
+
+    // 4. 手動 scan では回収される。
+    await runIngest({ dryRun: false, offlinePricing: true });
+    expect(readHistory().filter((r) => r.sessionId === "01234567-aaaa-7000-8000-00000000005b")).toHaveLength(1);
+  });
+
   // track と ingest は同じ cursors.json を真実源として共有する。track が cursor を書いた
   // 「後」に ingest が同じルートを走査しても、新規レコードは0件でなければならない。
   it("6. track が既にカーソルを保存済みの transcript を ingest が走査しても新規0件(二重計上しない)", async () => {
