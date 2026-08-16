@@ -566,10 +566,12 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 - **fork 除外**: `session_meta.payload.forked_from_id` を持つ rollout は親スレッドの履歴と累積カウンタを
   引き継ぐ(複製区間の token_count は親 rollout の値と一致することを実測確認)。child かつ fork のものは
   レコードを作らないが、cursor は ingest / sweep とも保存する(全走査の繰り返し防止)。
-- **二重計上しない根拠(clean child のみで検証、2026-08-16)**: 親の全 token_count で
-  `total[i] − total[i−1] == last_token_usage[i]` が成立する親が 12/35。残る親も
-  「説明不能な超過分 < 配下 clean children 合計」が 35/35 で成立し、親カウンタが child の呼び出しを
-  含む余地はない。
+- **二重計上しない根拠(clean child 全件で検証、2026-08-16 確定)**: 親解決を
+  `parent_thread_id` → `source.subagent.thread_spawn.parent_thread_id` → `session_id` の順で行うと、
+  clean child 全50件(検証時点)の親36セッションがすべて解決でき、その**全親で「正の説明不能超過
+  `Σ max(0, step − last_token_usage)` = 0」が成立**した(同一累積値の再送・負ステップは超過に非算入)。
+  親カウンタの増分はすべて親自身の呼び出しで厳密に説明されるため、child の呼び出しが一部でも
+  混入する余地は無い。
 - **表示**: 親ターン上の activity 表示は「利用あり(料金はこのターンに含めない)」。独立レコードからは
   ターン単位の OS/Slack 通知を送らない(Claude の親不明サブエージェントと同じ)。
 - **過去分**: 健全な既存カーソルが残る通常アップグレードでは自動回収しない。reset-cursors / sweep /
