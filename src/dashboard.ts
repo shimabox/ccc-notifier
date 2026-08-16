@@ -311,6 +311,7 @@ interface TurnEmbed {
   pr: string; // プロンプト(最大 PROMPT_MAX 字 + マーク)
   tr: boolean; // 切り詰めたか
   sa: { usd: string; jpy: string; models: string; apiCalls: number; tok?: string } | null;
+  tk: [number, number, number]; // [実効入力, 出力, うちcache](main + sidechain + SA 合算の生値)
   ca?: { started: number; stopped: number; agentTypes: string[]; usageStatus: "partial" | "unavailable" };
   sc?: "codex"; // Codex 由来のみ。Claude はキー省略(容量節約・後方互換)
 }
@@ -319,10 +320,28 @@ interface PeriodTotals {
   usd: number;
   jpy: number;
   turns: number;
+  tin: number; // 実効入力トークン(input + cache 系。main + sidechain + サブエージェント合算)
+  tout: number; // 出力トークン(同上)
+  tcache: number; // tin のうち cache 系(cacheRead + cacheWrite5m/1h)
 }
 
 function emptyTotals(): PeriodTotals {
-  return { usd: 0, jpy: 0, turns: 0 };
+  return { usd: 0, jpy: 0, turns: 0, tin: 0, tout: 0, tcache: 0 };
+}
+
+/** ターンの全トークン(main + sidechain + サブエージェント)。金額の hero/KPI と同じ包含範囲にする。 */
+function turnTokenTotals(rec: TurnRecord): { tin: number; tout: number; tcache: number } {
+  let tin = 0;
+  let tout = 0;
+  let tcache = 0;
+  for (const b of [rec.tokens, rec.sidechainTokens, rec.subagents?.tokens]) {
+    if (!b) continue;
+    const cache = b.cacheRead + b.cacheWrite5m + b.cacheWrite1h;
+    tin += b.input + cache;
+    tcache += cache;
+    tout += b.output;
+  }
+  return { tin, tout, tcache };
 }
 
 function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
@@ -367,6 +386,10 @@ function buildTurnEmbed(rec: TurnRecord, map: SlotMap): TurnEmbed {
     pr: text,
     tr: truncated,
     sa,
+    tk: (() => {
+      const t = turnTokenTotals(rec);
+      return [t.tin, t.tout, t.tcache] as [number, number, number];
+    })(),
   };
   // Codex 由来のみ sc を付与(Claude はキー省略で容量節約・JSON では undefined キーは出力されない)。
   if (rec.source === "codex") out.sc = "codex";
@@ -399,29 +422,30 @@ function computeKpis(turns: TurnRecord[]): {
   const month = emptyTotals();
   const all = emptyTotals();
 
+  const add = (t: PeriodTotals, usd: number, jpy: number, tk: { tin: number; tout: number; tcache: number }): void => {
+    t.usd += usd;
+    t.jpy += jpy;
+    t.turns += 1;
+    t.tin += tk.tin;
+    t.tout += tk.tout;
+    t.tcache += tk.tcache;
+  };
   for (const rec of turns) {
     const usd = turnTotalUSD(rec);
     const jpy = turnTotalJPY(rec);
-    all.usd += usd;
-    all.jpy += jpy;
-    all.turns += 1;
+    const tk = turnTokenTotals(rec);
+    add(all, usd, jpy, tk);
 
     const dt = new Date(rec.ts);
     if (Number.isNaN(dt.getTime())) continue;
     if (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) {
-      today.usd += usd;
-      today.jpy += jpy;
-      today.turns += 1;
+      add(today, usd, jpy, tk);
     }
     if (dt.getTime() >= weekCutoff) {
-      week.usd += usd;
-      week.jpy += jpy;
-      week.turns += 1;
+      add(week, usd, jpy, tk);
     }
     if (dt.getFullYear() === y && dt.getMonth() === mo) {
-      month.usd += usd;
-      month.jpy += jpy;
-      month.turns += 1;
+      add(month, usd, jpy, tk);
     }
   }
   return { today, week, month, all };
@@ -482,9 +506,11 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 .sel-label b{color:var(--ink); font-weight:640;}
 
 .legend{display:flex; flex-wrap:wrap; gap:8px 18px; margin:2px 0 14px;}
+.legend[hidden]{display:none;}
 .legend-item{display:inline-flex; align-items:center; gap:7px; font-size:13px; color:var(--ink2);}
 .swatch{display:inline-block; width:11px; height:11px; border-radius:3px; flex:0 0 auto;}
 .k1{background:var(--s1);} .k2{background:var(--s2);} .k3{background:var(--s3);} .k4{background:var(--s4);}
+.ktin{background:var(--s1);} .ktcache{background:var(--sother);} .ktout{background:var(--s3);}
 .k5{background:var(--s5);} .k6{background:var(--s6);} .k7{background:var(--s7);} .k8{background:var(--s8);} .kother{background:var(--sother);}
 
 .budget-bar{height:12px; background:var(--plane); border:1px solid var(--border); border-radius:7px; overflow:hidden; margin:12px 0;}
@@ -502,6 +528,7 @@ section.card > .note{color:var(--muted); font-size:12px; margin:0 0 14px;}
 .chart-scroll{overflow-x:auto;}
 .seg.s1{fill:var(--s1);} .seg.s2{fill:var(--s2);} .seg.s3{fill:var(--s3);} .seg.s4{fill:var(--s4);}
 .seg.s5{fill:var(--s5);} .seg.s6{fill:var(--s6);} .seg.s7{fill:var(--s7);} .seg.s8{fill:var(--s8);} .seg.sother{fill:var(--sother);}
+.seg.tin{fill:var(--s1);} .seg.tcache{fill:var(--sother);} .seg.tout{fill:var(--s3);}
 .seg.dim{opacity:0.28;}
 .grid-line{stroke:var(--grid); stroke-width:1;}
 .axis-line{stroke:var(--axis); stroke-width:1;}
@@ -594,6 +621,13 @@ const APP_JS = `<script>
     if(v >= 1) return '¥' + Math.round(v).toLocaleString('en-US');
     return '¥' + (Math.round(v * 10) / 10);
   }
+  function formatTok(n){
+    var v = n || 0;
+    if(v < 1000) return String(v);
+    if(v < 1e6) return (v / 1000).toFixed(1) + 'k';
+    if(v < 1e9) return (v / 1e6).toFixed(1) + 'M';
+    return (v / 1e9).toFixed(1) + 'B';
+  }
 
   // ---- 日付/バケット(ローカルTZ)----
   function pad(n){ return (n < 10 ? '0' : '') + n; }
@@ -631,6 +665,9 @@ const APP_JS = `<script>
   // 既定 'all'。sessionStorage に保存し自動リロード(meta refresh)を跨いで維持する(cccn-gran と同じ仕組み)。
   var HAS_CODEX = document.querySelectorAll('[data-src]').length > 0;
   var SRC = ssGet('cccn-src'); if(['all','claude','codex'].indexOf(SRC) < 0) SRC = 'all';
+  // チャートの縦軸メトリクス(金額 / トークン)。他の表示(KPI・内訳・履歴)は常に金額が主役のまま。
+  var MET = ssGet('cccn-metric'); if(['usd','tok'].indexOf(MET) < 0) MET = 'usd';
+  function setMet(m){ MET = m; ssSet('cccn-metric', m); }
   // 述語: claude → sc なし / codex → sc==='codex' / all → 全件。Codex 無し(チップ無し)なら常に全件。
   function activeTurns(){
     if(!HAS_CODEX || SRC === 'all') return turns;
@@ -667,10 +704,13 @@ const APP_JS = `<script>
       var k = bucketKey(tn.t, gran);
       if(k === null) continue;
       var b = map[k];
-      if(!b){ b = map[k] = { key:k, total:0, turns:0, bs:{} }; keys.push(k); }
+      if(!b){ b = map[k] = { key:k, total:0, turns:0, bs:{}, tin:0, tout:0, tcache:0, tokTotal:0 }; keys.push(k); }
       b.turns++;
       var bs = tn.bs || {};
       for(var s in bs){ if(bs.hasOwnProperty(s)){ b.bs[s] = (b.bs[s]||0) + bs[s]; b.total += bs[s]; } }
+      var tk = tn.tk || [0,0,0];
+      b.tin += tk[0]; b.tout += tk[1]; b.tcache += tk[2];
+      b.tokTotal += tk[0] + tk[1];
     }
     keys.sort();
     return keys.map(function(k){ return map[k]; });
@@ -739,8 +779,9 @@ const APP_JS = `<script>
     var plotW = band * n;
     var W = ml + plotW + mr;
 
+    var tokMode = MET === 'tok';
     var maxTotal = 0;
-    buckets.forEach(function(b){ if(b.total > maxTotal) maxTotal = b.total; });
+    buckets.forEach(function(b){ var v = tokMode ? b.tokTotal : b.total; if(v > maxTotal) maxTotal = v; });
     var niceMax = niceCeil(maxTotal);
     var yscale = plotH / niceMax;
     // 選択中バケットが現在の粒度に存在するときだけ他を淡色化する(データ無しの日を選ぶと
@@ -749,7 +790,7 @@ const APP_JS = `<script>
     for(var sp=0; sp<buckets.length; sp++){ if(buckets[sp].key === SEL){ selPresent = true; break; } }
 
     var svg = svgEl('svg', { 'class':'chart', viewBox:'0 0 ' + W + ' ' + H, role:'img',
-      'aria-label':'コスト積み上げ棒グラフ', preserveAspectRatio:'xMidYMid meet' });
+      'aria-label':(tokMode ? 'トークン積み上げ棒グラフ' : 'コスト積み上げ棒グラフ'), preserveAspectRatio:'xMidYMid meet' });
     svg.setAttribute('width', String(W));
     svg.setAttribute('height', String(H));
 
@@ -759,7 +800,7 @@ const APP_JS = `<script>
       var yy = f2(baseY - val * yscale);
       svg.appendChild(svgEl('line', { 'class':'grid-line', x1:ml, y1:yy, x2:W-mr, y2:yy }));
       var lbl = svgEl('text', { 'class':'tick-label', x:ml-8, y:yy+4, 'text-anchor':'end' });
-      lbl.textContent = formatUSD(val);
+      lbl.textContent = tokMode ? formatTok(val) : formatUSD(val);
       svg.appendChild(lbl);
     }
 
@@ -772,9 +813,16 @@ const APP_JS = `<script>
       var x = cx - barW/2;
       var dim = (SEL !== null && selPresent && b.key !== SEL);
       var cumV = 0;
-      for(var j=0;j<slotOrder.length;j++){
-        var slot = slotOrder[j];
-        var v = b.bs[slot] || 0;
+      var segList;
+      if(tokMode){
+        segList = [ ['tcache', b.tcache], ['tin', b.tin - b.tcache], ['tout', b.tout] ];
+      } else {
+        segList = [];
+        for(var j0=0;j0<slotOrder.length;j0++){ segList.push(['s'+slotOrder[j0], b.bs[slotOrder[j0]] || 0]); }
+      }
+      for(var j=0;j<segList.length;j++){
+        var segCls = segList[j][0];
+        var v = segList[j][1];
         if(v <= 0) continue;
         var vTop = cumV + v;
         var yTop = baseY - vTop * yscale;
@@ -783,10 +831,11 @@ const APP_JS = `<script>
         cumV = vTop;
         var h = yBot - yTop;
         if(h <= 0.4) continue;
-        var rect = svgEl('rect', { 'class':'seg s'+slot+(dim?' dim':''), x:f2(x), y:f2(yTop), width:f2(barW), height:f2(h) });
+        var rect = svgEl('rect', { 'class':'seg '+segCls+(dim?' dim':''), x:f2(x), y:f2(yTop), width:f2(barW), height:f2(h) });
         svg.appendChild(rect);
       }
-      if(i % xStep === 0 || i === n-1){
+      // 最終ラベルは常に出す。間引きラベルは最終ラベルと隣接して重ならない位置だけに出す。
+      if(i === n-1 || (i % xStep === 0 && (n-1) - i >= xStep)){
         var xl = svgEl('text', { 'class':'tick-label', x:f2(cx), y:baseY+16, 'text-anchor':'middle' });
         xl.textContent = bucketLabel(b.key, GRAN);
         svg.appendChild(xl);
@@ -823,6 +872,15 @@ const APP_JS = `<script>
     lastRenderedGran = GRAN;
   }
 
+  function tipRow(keyCls, nameText, valText){
+    var row = document.createElement('div'); row.className = 'tip-row';
+    var key = document.createElement('span'); key.className = 'tip-key ' + keyCls;
+    var name = document.createElement('span'); name.className = 'tip-name'; name.textContent = nameText;
+    var val = document.createElement('span'); val.className = 'tip-val'; val.textContent = valText;
+    row.appendChild(key); row.appendChild(name); row.appendChild(val);
+    return row;
+  }
+
   // hover内訳は、選択中の日/週/月における金額の大きい順に読む。積み上げ順・色は
   // slotOrderのまま固定し、同額もslotOrderで決定的に並べる。
   function tooltipSlotOrder(bucket){
@@ -839,19 +897,24 @@ const APP_JS = `<script>
     if(!tip) return;
     clearNode(tip);
     var h = document.createElement('div'); h.className = 'tip-title';
-    h.textContent = periodText(bucket.key, GRAN) + '  合計 ' + formatUSD(bucket.total) + '  ·  ' + bucket.turns + ' ターン';
-    tip.appendChild(h);
-    var tipOrder = tooltipSlotOrder(bucket);
-    for(var j=0;j<tipOrder.length;j++){
-      var slot = tipOrder[j];
-      var v = bucket.bs[slot] || 0;
-      if(v <= 0) continue;
-      var row = document.createElement('div'); row.className = 'tip-row';
-      var key = document.createElement('span'); key.className = 'tip-key k'+slot;
-      var name = document.createElement('span'); name.className = 'tip-name'; name.textContent = slotName[slot] || slot;
-      var val = document.createElement('span'); val.className = 'tip-val'; val.textContent = formatUSD(v);
-      row.appendChild(key); row.appendChild(name); row.appendChild(val);
-      tip.appendChild(row);
+    if(MET === 'tok'){
+      h.textContent = periodText(bucket.key, GRAN) + '  合計 ' + formatTok(bucket.tokTotal) + ' tokens  ·  ' + bucket.turns + ' ターン';
+      tip.appendChild(h);
+      var segs = [ ['ktout', '出力', bucket.tout], ['ktin', '入力(キャッシュ以外)', bucket.tin - bucket.tcache], ['ktcache', 'キャッシュ(read+write)', bucket.tcache] ];
+      for(var j2=0;j2<segs.length;j2++){
+        if(segs[j2][2] <= 0) continue;
+        tip.appendChild(tipRow(segs[j2][0], segs[j2][1], formatTok(segs[j2][2])));
+      }
+    } else {
+      h.textContent = periodText(bucket.key, GRAN) + '  合計 ' + formatUSD(bucket.total) + '  ·  ' + bucket.turns + ' ターン';
+      tip.appendChild(h);
+      var tipOrder = tooltipSlotOrder(bucket);
+      for(var j=0;j<tipOrder.length;j++){
+        var slot = tipOrder[j];
+        var v = bucket.bs[slot] || 0;
+        if(v <= 0) continue;
+        tip.appendChild(tipRow('k'+slot, slotName[slot] || slot, formatUSD(v)));
+      }
     }
     tip.hidden = false;
     positionTip(evt);
@@ -871,23 +934,29 @@ const APP_JS = `<script>
   function renderByModel(sub){
     if(!modelEl) return;
     clearNode(modelEl);
-    var usd = {}, jpy = {}, tcount = {}, total = 0;
+    var usd = {}, jpy = {}, tcount = {}, ttok = {}, total = 0;
     sub.forEach(function(tn){
       var bs = tn.bs || {}, fx = tn.fx || 0;
-      for(var s in bs){ if(bs.hasOwnProperty(s) && bs[s] > 0){
+      var tk = tn.tk || [0,0,0];
+      // 単価不明モデル・料金0のchildは bs の値が 0 のまま登場する。金額 0 でも参加として集計し、
+      // トークンだけの利用がモデル別表から消えないようにする(表示条件側で usd も tok も 0 の行を落とす)。
+      for(var s in bs){ if(bs.hasOwnProperty(s)){
         usd[s] = (usd[s]||0) + bs[s]; jpy[s] = (jpy[s]||0) + bs[s]*fx; total += bs[s];
         tcount[s] = (tcount[s]||0) + 1;
+        // ターン列と同じ参加カウント方式: そのモデルが登場したターンの全量を各モデルへ計上(重複あり)。
+        // レコードにモデル別トークンは無いため、ターン内のモデル間分割はしない。
+        ttok[s] = (ttok[s]||0) + tk[0] + tk[1];
       } }
     });
     var table = document.createElement('table'); table.className = 'data-table';
     var thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">構成比</th></tr>';
+    thead.innerHTML = '<tr><th>モデル / Model</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th><th class="c-num">構成比</th></tr>';
     table.appendChild(thead);
     var tbody = document.createElement('tbody');
     var any = false;
     for(var j=0;j<slotOrder.length;j++){
       var slot = slotOrder[j];
-      if(!(usd[slot] > 0)) continue;
+      if(!(usd[slot] > 0 || (ttok[slot]||0) > 0)) continue;
       any = true;
       var share = total > 0 ? (usd[slot]/total*100) : 0;
       var tr = document.createElement('tr');
@@ -897,8 +966,9 @@ const APP_JS = `<script>
       var c2 = document.createElement('td'); c2.className = 'c-num'; c2.textContent = String(tcount[slot]||0);
       var c3 = document.createElement('td'); c3.className = 'c-num'; c3.textContent = formatUSD(usd[slot]);
       var c4 = document.createElement('td'); c4.className = 'c-num'; c4.textContent = formatJPY(jpy[slot]);
+      var c4t = document.createElement('td'); c4t.className = 'c-num'; c4t.textContent = formatTok(ttok[slot]||0);
       var c5 = document.createElement('td'); c5.className = 'c-num'; c5.textContent = share.toFixed(1) + '%';
-      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c5);
+      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c4t); tr.appendChild(c5);
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -916,15 +986,16 @@ const APP_JS = `<script>
       var bs = tn.bs || {}, fx = tn.fx || 0, total = 0;
       for(var s in bs){ if(bs.hasOwnProperty(s)) total += bs[s]; }
       var name = tn.p || '(unknown)';
-      var a = agg[name] || (agg[name] = { usd:0, jpy:0, turns:0 });
-      a.usd += total; a.jpy += total*fx; a.turns++;
+      var tk = tn.tk || [0,0,0];
+      var a = agg[name] || (agg[name] = { usd:0, jpy:0, turns:0, tok:0 });
+      a.usd += total; a.jpy += total*fx; a.turns++; a.tok += tk[0] + tk[1];
     });
-    var rows = Object.keys(agg).map(function(name){ var a = agg[name]; return { name:name, usd:a.usd, jpy:a.jpy, turns:a.turns }; });
+    var rows = Object.keys(agg).map(function(name){ var a = agg[name]; return { name:name, usd:a.usd, jpy:a.jpy, turns:a.turns, tok:a.tok }; });
     rows.sort(function(a,b){ return b.usd - a.usd || a.name.localeCompare(b.name); });
     if(rows.length === 0){ var p = document.createElement('p'); p.className='empty-hint'; p.textContent='この期間のデータはありません'; projEl.appendChild(p); return; }
     var table = document.createElement('table'); table.className = 'data-table';
     var thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>プロジェクト / Project</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th></tr>';
+    thead.innerHTML = '<tr><th>プロジェクト / Project</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th></tr>';
     table.appendChild(thead);
     var tbody = document.createElement('tbody');
     rows.forEach(function(r){
@@ -933,7 +1004,8 @@ const APP_JS = `<script>
       var c2 = document.createElement('td'); c2.className='c-num'; c2.textContent = String(r.turns);
       var c3 = document.createElement('td'); c3.className='c-num'; c3.textContent = formatUSD(r.usd);
       var c4 = document.createElement('td'); c4.className='c-num'; c4.textContent = formatJPY(r.jpy);
-      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4);
+      var c5 = document.createElement('td'); c5.className='c-num'; c5.textContent = formatTok(r.tok);
+      tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4); tr.appendChild(c5);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -1019,14 +1091,21 @@ const APP_JS = `<script>
   var kpiCards = document.querySelectorAll('.kpi .stat');
   var heroValueEl = document.querySelector('.hero .hero-value');
   var heroMetaEls = document.querySelectorAll('.hero .hero-meta');
-  var heroSaEl = heroMetaEls.length > 1 ? heroMetaEls[1] : null; // SA 行(SA ありのときだけサーバが描画)
+  var heroTokEl = document.querySelector('.hero .hero-tok');
+  var heroSaEl = document.querySelector('.hero .hero-sa'); // SA 行(SA ありのときだけサーバが描画)
   var heroSaPrefix = heroSaEl ? ((heroSaEl.textContent || '').split('$')[0]) : '';
+  function tokLine(tot){
+    var pct = tot.ti > 0 ? Math.round(tot.tc / tot.ti * 100) : 0;
+    return 'in ' + formatTok(tot.ti) + '(cache ' + pct + '%)/ out ' + formatTok(tot.to) + ' tokens';
+  }
   function setKpiCard(card, tot){
     if(!card) return;
     var v = card.querySelector('.stat-value');
     var m = card.querySelector('.stat-meta');
+    var tk = card.querySelector('.stat-tok');
     if(v) v.textContent = formatUSD(tot.usd);
     if(m) m.textContent = formatJPY(tot.jpy) + ' · ' + tot.turns + ' ターン';
+    if(tk) tk.textContent = 'in ' + formatTok(tot.ti) + ' / out ' + formatTok(tot.to);
   }
   function renderKpis(){
     if(!HAS_CODEX) return;
@@ -1034,25 +1113,29 @@ const APP_JS = `<script>
     var now = new Date();
     var y = now.getFullYear(), mo = now.getMonth(), d = now.getDate();
     var weekCutoff = Date.now() - 7*86400000;
-    var today = {usd:0,jpy:0,turns:0}, week = {usd:0,jpy:0,turns:0}, month = {usd:0,jpy:0,turns:0}, all = {usd:0,jpy:0,turns:0};
+    function zero(){ return {usd:0,jpy:0,turns:0,ti:0,to:0,tc:0}; }
+    var today = zero(), week = zero(), month = zero(), all = zero();
     var saUsd = 0, saJpy = 0;
+    function acc(t, u, j, tk){ t.usd+=u; t.jpy+=j; t.turns++; t.ti+=tk[0]; t.to+=tk[1]; t.tc+=tk[2]; }
     for(var i=0;i<src.length;i++){
       var tn = src[i], bs = tn.bs || {}, fx = tn.fx || 0, u = 0;
       for(var s in bs){ if(bs.hasOwnProperty(s)) u += bs[s]; }
       var j = u * fx;
+      var tk = tn.tk || [0,0,0];
       if(tn.sa){ var sau = u - (tn.um || 0); saUsd += sau; saJpy += sau * fx; } // SA 分 = 総額 − メイン
-      all.usd += u; all.jpy += j; all.turns++;
+      acc(all, u, j, tk);
       var dt = new Date(tn.t);
       if(isNaN(dt.getTime())) continue;
-      if(dt.getFullYear()===y && dt.getMonth()===mo && dt.getDate()===d){ today.usd+=u; today.jpy+=j; today.turns++; }
-      if(tn.t >= weekCutoff){ week.usd+=u; week.jpy+=j; week.turns++; }
-      if(dt.getFullYear()===y && dt.getMonth()===mo){ month.usd+=u; month.jpy+=j; month.turns++; }
+      if(dt.getFullYear()===y && dt.getMonth()===mo && dt.getDate()===d){ acc(today, u, j, tk); }
+      if(tn.t >= weekCutoff){ acc(week, u, j, tk); }
+      if(dt.getFullYear()===y && dt.getMonth()===mo){ acc(month, u, j, tk); }
     }
     if(kpiCards.length >= 4){
       setKpiCard(kpiCards[0], today); setKpiCard(kpiCards[1], week); setKpiCard(kpiCards[2], month); setKpiCard(kpiCards[3], all);
     }
     if(heroValueEl) heroValueEl.textContent = formatUSD(all.usd);
     if(heroMetaEls.length > 0) heroMetaEls[0].textContent = formatJPY(all.jpy) + ' · ' + all.turns + ' ターン';
+    if(heroTokEl) heroTokEl.textContent = tokLine(all);
     if(heroSaEl){
       heroSaEl.hidden = !(saUsd > 0);
       if(saUsd > 0) heroSaEl.textContent = heroSaPrefix + formatUSD(saUsd) + '(' + formatJPY(saJpy) + ')';
@@ -1160,6 +1243,15 @@ const APP_JS = `<script>
     if(allBtn) allBtn.classList.toggle('active', SEL === null);
     var sbtns = document.querySelectorAll('[data-src]');
     for(var k=0;k<sbtns.length;k++){ sbtns[k].classList.toggle('active', sbtns[k].getAttribute('data-src') === SRC); }
+    var mbtns = document.querySelectorAll('[data-metric]');
+    for(var mi=0;mi<mbtns.length;mi++){ mbtns[mi].classList.toggle('active', mbtns[mi].getAttribute('data-metric') === MET); }
+    var tokMode = MET === 'tok';
+    var modelLegend = document.getElementById('cccn-model-legend');
+    var tokLegend = document.getElementById('cccn-tok-legend');
+    if(modelLegend) modelLegend.hidden = tokMode;
+    if(tokLegend) tokLegend.hidden = !tokMode;
+    var chartTitle = document.getElementById('cccn-chart-title');
+    if(chartTitle) chartTitle.textContent = tokMode ? 'トークン推移 / Tokens over time' : 'コスト推移 / Cost over time';
   }
 
   // ---- 全体レンダリング ----
@@ -1182,6 +1274,10 @@ const APP_JS = `<script>
   }
   var allBtn = document.getElementById('cccn-all');
   if(allBtn) allBtn.addEventListener('click', function(){ setSel(null); render(); });
+  var metBtns = document.querySelectorAll('[data-metric]');
+  for(var mbi=0;mbi<metBtns.length;mbi++){
+    (function(btn){ btn.addEventListener('click', function(){ setMet(btn.getAttribute('data-metric')); render(); }); })(metBtns[mbi]);
+  }
   var srcBtns = document.querySelectorAll('[data-src]');
   for(var sbi=0;sbi<srcBtns.length;sbi++){
     (function(btn){ btn.addEventListener('click', function(){ setSrc(btn.getAttribute('data-src')); render(); }); })(srcBtns[sbi]);
@@ -1213,6 +1309,7 @@ function statCard(label: string, sub: string, totals: PeriodTotals): string {
     `<div class="stat-label">${esc(label)}<span class="stat-sub">${esc(sub)}</span></div>` +
     `<div class="stat-value">${esc(formatUSD(totals.usd))}</div>` +
     `<div class="stat-meta">${esc(formatJPY(totals.jpy))} · ${totals.turns} ターン</div>` +
+    `<div class="stat-meta stat-tok">in ${esc(formatTokens(totals.tin))} / out ${esc(formatTokens(totals.tout))}</div>` +
     `</div>`
   );
 }
@@ -1222,17 +1319,20 @@ interface SurfaceAgg {
   turns: number;
   usd: number;
   jpy: number;
+  tokens: number;
 }
 
-/** サーフェス別内訳(SA 込み総額)。turns は埋め込み対象期間分(kpi と同じ turns 配列)。 */
+/** サーフェス別内訳(SA 込み総額・総トークン)。turns は埋め込み対象期間分(kpi と同じ turns 配列)。 */
 function computeSurfaceBreakdown(turns: TurnRecord[]): SurfaceAgg[] {
   const map = new Map<string, SurfaceAgg>();
   for (const rec of turns) {
     const surface = effectiveSurface(rec);
-    const agg = map.get(surface) ?? { surface, turns: 0, usd: 0, jpy: 0 };
+    const agg = map.get(surface) ?? { surface, turns: 0, usd: 0, jpy: 0, tokens: 0 };
+    const tk = turnTokenTotals(rec);
     agg.turns += 1;
     agg.usd += turnTotalUSD(rec);
     agg.jpy += turnTotalJPY(rec);
+    agg.tokens += tk.tin + tk.tout;
     map.set(surface, agg);
   }
   return [...map.values()].sort((a, b) => b.usd - a.usd);
@@ -1253,15 +1353,16 @@ function surfaceSection(turns: TurnRecord[]): string {
         `<tr><td>${esc(surfaceLabel(r.surface as Parameters<typeof surfaceLabel>[0]))}</td>` +
         `<td class="c-num">${r.turns}</td>` +
         `<td class="c-num">${esc(formatUSD(r.usd))}</td>` +
-        `<td class="c-num">${esc(formatJPY(r.jpy))}</td></tr>`,
+        `<td class="c-num">${esc(formatJPY(r.jpy))}</td>` +
+        `<td class="c-num">${esc(formatTokens(r.tokens))}</td></tr>`,
     )
     .join("");
   return (
     `<section class="card">` +
     `<h2>サーフェス別内訳 / By surface</h2>` +
-    `<p class="note">CLI 以外(デスクトップアプリ等)からの利用分の内訳(埋め込み対象期間・SA 込み総額)。</p>` +
+    `<p class="note">CLI 以外(デスクトップアプリ等)からの利用分の内訳(埋め込み対象期間・SA 込み総額・総トークン)。モデル不明で金額 $0 の利用分も tokens 列で規模が分かります。</p>` +
     `<div class="table-wrap"><table class="turns"><thead><tr>` +
-    `<th>サーフェス</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th>` +
+    `<th>サーフェス</th><th class="c-num">ターン</th><th class="c-num">$</th><th class="c-num">¥</th><th class="c-num">tokens</th>` +
     `</tr></thead><tbody>${trs}</tbody></table></div>` +
     `</section>`
   );
@@ -1483,8 +1584,9 @@ function renderDashboard(
     `<div class="hero-label">${esc(totalLabel)} / ${esc(totalLabelEn)}</div>` +
     `<div class="hero-value">${esc(formatUSD(kpi.all.usd))}</div>` +
     `<div class="hero-meta">${esc(formatJPY(kpi.all.jpy))} · ${kpi.all.turns} ターン</div>` +
+    `<div class="hero-meta hero-tok">in ${esc(formatTokens(kpi.all.tin))}(cache ${kpi.all.tin > 0 ? Math.round((kpi.all.tcache / kpi.all.tin) * 100) : 0}%)/ out ${esc(formatTokens(kpi.all.tout))} tokens</div>` +
     (anySub
-      ? `<div class="hero-meta">うちサブエージェント ${esc(formatUSD(subUsd))}(${esc(formatJPY(subJpy))})</div>`
+      ? `<div class="hero-meta hero-sa">うちサブエージェント ${esc(formatUSD(subUsd))}(${esc(formatJPY(subJpy))})</div>`
       : "") +
     `</div>` +
     `</div>`;
@@ -1509,19 +1611,28 @@ function renderDashboard(
     : "";
   const chartSection =
     `<section class="card">` +
-    `<h2>コスト推移 / Cost over time</h2>` +
-    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「${esc(totalLabel)}」で${esc(totalSub)}に戻ります。モデル別に色分け。</p>` +
+    `<h2 id="cccn-chart-title">コスト推移 / Cost over time</h2>` +
+    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「${esc(totalLabel)}」で${esc(totalSub)}に戻ります。縦軸は金額とトークンを切り替えられます(金額軸はモデル別に色分け、トークン軸はキャッシュ/入力/出力の3区分)。</p>` +
     `<div class="toolbar-row">` +
     `<div class="seg-toggle">` +
     `<button type="button" data-gran="day">日</button>` +
     `<button type="button" data-gran="week">週</button>` +
     `<button type="button" data-gran="month">月</button>` +
     `</div>` +
+    `<div class="seg-toggle" id="cccn-metric-toggle">` +
+    `<button type="button" data-metric="usd">金額</button>` +
+    `<button type="button" data-metric="tok">トークン</button>` +
+    `</div>` +
     `<button type="button" id="cccn-all" class="btn">${esc(totalLabel)}</button>` +
     srcToggle +
     `<span id="cccn-sel-label" class="sel-label"></span>` +
     `</div>` +
-    renderLegend(map.slots) +
+    `<div id="cccn-model-legend">` + renderLegend(map.slots) + `</div>` +
+    `<div class="legend" id="cccn-tok-legend" hidden>` +
+    `<span class="legend-item"><span class="swatch ktcache"></span>キャッシュ(read+write)</span>` +
+    `<span class="legend-item"><span class="swatch ktin"></span>入力(キャッシュ以外)</span>` +
+    `<span class="legend-item"><span class="swatch ktout"></span>出力</span>` +
+    `</div>` +
     `<div class="chart-scroll"><div id="cccn-chart"></div></div>` +
     `</section>`;
 
@@ -1530,7 +1641,7 @@ function renderDashboard(
     `<div class="grid2">` +
     `<section class="card">` +
     `<h2>モデル別内訳 / By model</h2>` +
-    `<p class="note">選択中の期間(既定は${esc(totalLabel)})のコスト降順。複数モデルのターンは各モデルに1ずつ計上。</p>` +
+    `<p class="note">選択中の期間(既定は${esc(totalLabel)})のコスト降順。複数モデルのターンは、ターン数・tokens 列とも各モデルに全量計上(重複あり。レコードにモデル別トークンが無いためターン内では分割しない)。</p>` +
     `<div class="table-wrap" id="cccn-bymodel"></div>` +
     `</section>` +
     `<section class="card">` +
