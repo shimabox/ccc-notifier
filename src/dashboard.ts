@@ -834,7 +834,8 @@ const APP_JS = `<script>
         var rect = svgEl('rect', { 'class':'seg '+segCls+(dim?' dim':''), x:f2(x), y:f2(yTop), width:f2(barW), height:f2(h) });
         svg.appendChild(rect);
       }
-      if(i % xStep === 0 || i === n-1){
+      // 最終ラベルは常に出す。間引きラベルは最終ラベルと隣接して重ならない位置だけに出す。
+      if(i === n-1 || (i % xStep === 0 && (n-1) - i >= xStep)){
         var xl = svgEl('text', { 'class':'tick-label', x:f2(cx), y:baseY+16, 'text-anchor':'middle' });
         xl.textContent = bucketLabel(b.key, GRAN);
         svg.appendChild(xl);
@@ -1611,7 +1612,7 @@ function renderDashboard(
   const chartSection =
     `<section class="card">` +
     `<h2 id="cccn-chart-title">コスト推移 / Cost over time</h2>` +
-    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「${esc(totalLabel)}」で${esc(totalSub)}に戻ります。モデル別に色分け。</p>` +
+    `<p class="note">粒度を 日 / 週 / 月 で切り替えられます(横スクロールで過去まで)。棒をクリックするとその期間が選択され、下のモデル別・プロジェクト別・履歴が連動します。「${esc(totalLabel)}」で${esc(totalSub)}に戻ります。縦軸は金額とトークンを切り替えられます(金額軸はモデル別に色分け、トークン軸はキャッシュ/入力/出力の3区分)。</p>` +
     `<div class="toolbar-row">` +
     `<div class="seg-toggle">` +
     `<button type="button" data-gran="day">日</button>` +
