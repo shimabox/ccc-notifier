@@ -27,6 +27,8 @@ export function builtinPriceTable(now: Date = new Date()): PriceTable {
     ? price(2, 10, 2.5, 4, 0.2, 'builtin')
     : price(3, 15, 3.75, 6, 0.3, 'builtin');
   return {
+    'claude-fable-5-1': price(10, 50, 12.5, 20, 0.25, 'builtin'),
+    'claude-mythos-5-1': price(10, 50, 12.5, 20, 0.25, 'builtin'),
     'claude-fable-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
     'claude-mythos-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
 
@@ -50,8 +52,13 @@ export function builtinPriceTable(now: Date = new Date()): PriceTable {
     'claude-3-5-haiku': price(0.8, 4, 1.0, 1.6, 0.08, 'builtin'),
     'claude-3-haiku': price(0.25, 1.25, 0.3125, 0.5, 0.025, 'builtin'),
 
-    // OpenAI Codex CLI 対応(公式レートに基づく単価。キャッシュ書き込み課金は無いため 0)
+    // Codex の usage はキャッシュ書き込み数を区別しないため、write 系は 0 とする。
+    'gpt-6-astra': price(10, 50, 0, 0, 1, 'builtin'),
+    'gpt-5.6-sol': price(4, 20, 0, 0, 0.4, 'builtin'),
+    'gpt-5.6-terra': price(2, 12, 0, 0, 0.2, 'builtin'),
+    'gpt-5.6-luna': price(0.2, 1.2, 0, 0, 0.02, 'builtin'),
     'gpt-5.5': price(5, 30, 0, 0, 0.5, 'builtin'),
+    'gpt-5.4': price(2.5, 15, 0, 0, 0.25, 'builtin'),
     'gpt-5.1': price(1.25, 10, 0, 0, 0.125, 'builtin'),
     'gpt-5': price(1.25, 10, 0, 0, 0.125, 'builtin'),
     'gpt-5-codex': price(1.25, 10, 0, 0, 0.125, 'builtin'),
@@ -77,7 +84,7 @@ function normalizeModelId(modelId: string): string {
  * normalize 後の完全一致でモデル単価を解決する。一致なしは null。
  *
  * 日付suffix等の既知の表記差は吸収するが、任意suffixのprefix一致は行わない。
- * これにより、例えば未登録の gpt-5.6-sol を古い gpt-5 の単価で誤計算しない。
+ * これにより、未登録の新版や派生モデルを古いモデルの単価で誤計算しない。
  */
 export function resolvePrice(modelId: string, table: PriceTable): ModelPrice | null {
   const target = normalizeModelId(modelId);
@@ -235,7 +242,7 @@ function convertLiteLLMPayload(payload: unknown): PriceTable {
     const provider = entry.litellm_provider;
 
     // OpenAI(Codex CLI 対応): provider が 'openai' のエントリは gpt-/o3/codex- 系キーのみ採用する。
-    // OpenAI にはキャッシュ書き込み課金が無いため write 系は 0(cacheRead は無ければ 0)。
+    // Codex の usage は書き込み数を区別しないため write 系は 0(cacheRead は無ければ 0)。
     if (provider === 'openai') {
       const key = rawKey.toLowerCase();
       if (!LITELLM_OPENAI_KEY_RE.test(key)) continue;

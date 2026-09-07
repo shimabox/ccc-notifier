@@ -386,11 +386,13 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
   sweep分類を一切作らない。現段階の投影statusは料金を推測せず`unavailable`。
 
 ### src/pricing.ts / src/format.ts
-- `builtinPriceTable()` に追加(USD/1M・write 系 0):
-  `gpt-5.5`(5, 30, cacheRead 0.5)/ `gpt-5.1` `gpt-5` `gpt-5-codex` `gpt-5.1-codex`(1.25, 10, 0.125)/ `o3`(2, 8, 0.5)
+- `builtinPriceTable()` のOpenAI系内蔵単価(USD/1M・入力, 出力, cacheReadの順・write 系 0):
+  `gpt-6-astra`(10, 50, 1) / `gpt-5.6-sol`(4, 20, 0.4) / `gpt-5.6-terra`(2, 12, 0.2) /
+  `gpt-5.6-luna`(0.2, 1.2, 0.02) / `gpt-5.5`(5, 30, 0.5) / `gpt-5.4`(2.5, 15, 0.25) /
+  `gpt-5.1` `gpt-5` `gpt-5-codex` `gpt-5.1-codex`(1.25, 10, 0.125) / `o3`(2, 8, 0.5)
 - LiteLLM 取り込み: 既存 claude フィルタに加え、`litellm_provider === 'openai'` かつキーが `/^(gpt-|o3($|-)|codex-)/` に一致し
   `input_cost_per_token`+`output_cost_per_token` を持つエントリを採用。`cache_read_input_token_cost` → cacheRead、write 系 0
-- モデル単価は正規化後の完全一致のみ。例えば未登録の`gpt-5.6-sol`を`gpt-5`の単価で計算せず、unknown modelとして0円扱いにする。
+- モデル単価は正規化後の完全一致のみ。未登録の新版や派生モデルを古いモデルの単価で計算せず、unknown modelとして0円扱いにする。
 - `modelDisplayName`: `gpt-5.5-codex → GPT-5.5 Codex` / `gpt-5-codex → GPT-5 Codex` / `gpt-5.5 → GPT-5.5` /
   `o3 → o3`。一般規則: `gpt` プレフィックスを `GPT` に、`-codex` サフィックスを ` Codex` に、その他ハイフン区切りは既存 claude 系の流儀に準拠
 
