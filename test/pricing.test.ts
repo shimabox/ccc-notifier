@@ -9,6 +9,29 @@ function fakeResponse(body: unknown, ok = true, status = 200): { ok: boolean; st
   return { ok, status, json: async () => body };
 }
 
+const addedModelRates = [
+  { model: 'claude-fable-5-1', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, expectedUSD: 0.2295 },
+  { model: 'claude-mythos-5-1', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, expectedUSD: 0.2295 },
+  { model: 'gpt-6-astra', input: 10, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 1, expectedUSD: 0.118 },
+  { model: 'gpt-5.6-sol', input: 4, output: 20, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.4, expectedUSD: 0.0472 },
+  { model: 'gpt-5.6-terra', input: 2, output: 12, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.2, expectedUSD: 0.0276 },
+  { model: 'gpt-5.4', input: 2.5, output: 15, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.25, expectedUSD: 0.0345 },
+  { model: 'gpt-5.6-luna', input: 0.2, output: 1.2, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.02, expectedUSD: 0.00276 },
+];
+
+describe('builtin model coverage', () => {
+  it.each(addedModelRates)('$model resolves by its exact ID at standard rates', ({ model, expectedUSD, ...rates }) => {
+    expect(resolvePrice(model, builtinPriceTable())).toEqual({ ...rates, source: 'builtin' });
+  });
+
+  it.each(['fable', 'mythos'])('%s 5.1 uses its own cache read rate and rejects unregistered variants', (family) => {
+    const table = builtinPriceTable();
+    expect(resolvePrice(`claude-${family}-5`, table)?.cacheRead).toBe(1);
+    expect(resolvePrice(`anthropic/claude-${family}-5-1-20260901`, table)?.cacheRead).toBe(0.25);
+    expect(resolvePrice(`claude-${family}-5-1-preview`, table)).toBeNull();
+  });
+});
+
 describe('computeCost against GOLDEN.md bucket values', () => {
   it('fable-5 main / haiku-4-5 sidechain add up to 0.267 USD', () => {
     const table = builtinPriceTable();
@@ -356,14 +379,14 @@ describe('loadPriceTable', () => {
     };
     await fs.writeFile(
       path.join(cacheDir, 'pricing.json'),
-      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'gpt-5.6-sol': exactUnknown } }),
+      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'gpt-unregistered-model': exactUnknown } }),
       'utf8',
     );
 
     const table = await loadPriceTable(cacheDir, { offline: true });
 
-    expect(resolvePrice('gpt-5.6-sol', table)).toEqual(exactUnknown);
-    expect(resolvePrice('gpt-5.6-sol-preview', table)).toBeNull();
+    expect(resolvePrice('gpt-unregistered-model', table)).toEqual(exactUnknown);
+    expect(resolvePrice('gpt-unregistered-model-preview', table)).toBeNull();
   });
 
   it('(d2) offline:true with no cache present returns builtin only', async () => {
@@ -371,6 +394,23 @@ describe('loadPriceTable', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(table).toEqual(builtinPriceTable());
+  });
+
+  it.each(addedModelRates)('$model has nonzero cost offline without a cache', async ({ model, expectedUSD }) => {
+    const table = await loadPriceTable(cacheDir, { offline: true });
+    const isClaude = model.startsWith('claude-');
+    const result = computeCost({
+      [model]: {
+        input: 1000, output: 2000, cacheRead: 8000,
+        cacheWrite5m: isClaude ? 3000 : 0,
+        cacheWrite1h: isClaude ? 4000 : 0,
+      },
+    }, {}, table);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.unknownModels).toEqual([]);
+    expect(result.usd).toBeCloseTo(expectedUSD, 10);
+    expect(result.byModel[model]).toBeCloseTo(expectedUSD, 10);
   });
 
   it('(e) a cache within 24h is used without calling fetch', async () => {
@@ -459,7 +499,7 @@ describe('resolvePrice: OpenAI (Codex) safe exact match', () => {
   const table = builtinPriceTable();
 
   it('does not price a newer or arbitrary-suffixed model as an older gpt-5 model', () => {
-    expect(resolvePrice('gpt-5.6-sol', table)).toBeNull();
+    expect(resolvePrice('gpt-unregistered-model', table)).toBeNull();
     expect(resolvePrice('gpt-5.5-codex-mini', table)).toBeNull();
     expect(resolvePrice('gpt-5.5-xyz', table)).toBeNull();
   });
@@ -472,8 +512,8 @@ describe('resolvePrice: OpenAI (Codex) safe exact match', () => {
   });
 
   it('resolves a new model only when the table contains that exact model', () => {
-    const exact = { ...table, 'gpt-5.6-sol': table['gpt-5.5'] };
-    expect(resolvePrice('gpt-5.6-sol', exact)).toEqual(table['gpt-5.5']);
+    const exact = { ...table, 'gpt-unregistered-model': table['gpt-5.5'] };
+    expect(resolvePrice('gpt-unregistered-model', exact)).toEqual(table['gpt-5.5']);
   });
 
   it('does not accept arbitrary Claude suffixes after preserving known normalization', () => {
