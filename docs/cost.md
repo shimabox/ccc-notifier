@@ -11,7 +11,7 @@
 
 単価は Anthropic / OpenAI の公開レートを内蔵した単価表をベースに、[LiteLLM](https://github.com/BerriAI/litellm) が公開している価格データをキャッシュします。単価の取得は通常の`init`、`doctor`、`sweep`で行います。応答完了ごとのStop hookは、Claude Code / Codexを単価取得で待たせないよう、キャッシュと内蔵表だけを使います。プロンプトキャッシュも「5分保持」か「1時間保持」かで単価が異なる点まで区別して計算しています。
 
-Claude Sonnet 5の内蔵単価は公式の期間限定価格に合わせ、2026年8月31日までは入力`$2/MTok`・出力`$10/MTok`、2026年9月1日以降は入力`$3/MTok`・出力`$15/MTok`を使います。
+Claude Sonnet 5の内蔵単価は入力`$2/MTok`・出力`$10/MTok`です。発表時は2026年8月31日までの導入価格とされていましたが、公式に通常価格となり、9月1日以降の値上げは行われていません。
 
 ## 概算値である理由 / Why the numbers are estimates
 

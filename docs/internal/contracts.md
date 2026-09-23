@@ -10,7 +10,7 @@
 - `resolvePrice(modelId: string, table: PriceTable): ModelPrice | null`
 - `computeCost(main: UsageByModel, sidechain: UsageByModel, table: PriceTable): CostBreakdown`
 - `resolvePrice`はprovider prefix / 日付suffix / `[1m]` を正規化した後の完全一致だけを採用し、新版モデルを似た名前の古い単価へprefix一致させない。
-- fresh cacheはprovider prefix・日付suffix等を除いた正規化ID単位で既知builtinを上書きする。Sonnet 5のbuiltinは2026-08-31まで導入価格、2026-09-01 00:00 UTC以降は通常価格とし、fresh cacheでもこの日付判定を上書きさせない。stale cacheは未知モデルの補完にだけ使い、既知builtinを上書きしない。
+- fresh cacheはprovider prefix・日付suffix等を除いた正規化ID単位で既知builtinを上書きする。stale cacheは未知モデルの補完にだけ使い、既知builtinを上書きしない。
 - Stop hookは`offline:true`を維持し、単価表のネットワーク取得を行わない。通常`init`、`doctor`、`sweep`をbest-effortのcache更新点とし、既存configに対する素の`init --yes --codex`の限定移行ではcacheを変更しない。
 
 ## src/fx.ts (T3)
@@ -387,7 +387,7 @@ interface CodexHookResult { status: 'written' | 'unchanged' | 'manual'; backupPa
 
 ### src/pricing.ts / src/format.ts
 - `builtinPriceTable()` のOpenAI系内蔵単価(USD/1M・入力, 出力, cacheReadの順・write 系 0):
-  `gpt-6-astra`(10, 50, 1) / `gpt-5.6-sol`(4, 20, 0.4) / `gpt-5.6-terra`(2, 12, 0.2) /
+  `gpt-6-astra`(10, 50, 1) / `gpt-6-sol`(2, 10, 0.2) / `gpt-6-luna`(0.1, 0.5, 0.01) / `gpt-5.6-sol`(4, 20, 0.4) / `gpt-5.6-terra`(2, 12, 0.2) /
   `gpt-5.6-luna`(0.2, 1.2, 0.02) / `gpt-5.5`(5, 30, 0.5) / `gpt-5.4`(2.5, 15, 0.25) /
   `gpt-5.1` `gpt-5` `gpt-5-codex` `gpt-5.1-codex`(1.25, 10, 0.125) / `o3`(2, 8, 0.5)
 - LiteLLM 取り込み: 既存 claude フィルタに加え、`litellm_provider === 'openai'` かつキーが `/^(gpt-|o3($|-)|codex-)/` に一致し

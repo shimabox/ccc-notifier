@@ -6,7 +6,6 @@ const LITELLM_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 const LITELLM_FETCH_TIMEOUT_MS = 3000;
 const CACHE_FRESH_MS = 24 * 60 * 60 * 1000;
-const SONNET_5_STANDARD_PRICE_START_MS = Date.UTC(2026, 8, 1);
 
 function price(
   input: number,
@@ -20,18 +19,15 @@ function price(
 }
 
 /** Anthropic / OpenAI の公開単価に基づく組み込み単価表(単位: USD / 100万トークン)。 */
-export function builtinPriceTable(now: Date = new Date()): PriceTable {
-  // Sonnet 5 は 2026-08-31 まで導入価格。2026-09-01 00:00 UTC から通常価格。
-  // cache write/read は公式の 5m=1.25x / 1h=2x / read=0.1x を適用する。
-  const sonnet5 = now.getTime() < SONNET_5_STANDARD_PRICE_START_MS
-    ? price(2, 10, 2.5, 4, 0.2, 'builtin')
-    : price(3, 15, 3.75, 6, 0.3, 'builtin');
+export function builtinPriceTable(): PriceTable {
   return {
     'claude-fable-5-1': price(10, 50, 12.5, 20, 0.25, 'builtin'),
     'claude-mythos-5-1': price(10, 50, 12.5, 20, 0.25, 'builtin'),
     'claude-fable-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
     'claude-mythos-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
 
+    'claude-opus-5-5': price(4, 20, 5, 8, 0.2, 'builtin'),
+    'claude-opus-5': price(5, 25, 6.25, 10, 0.5, 'builtin'),
     'claude-opus-4-8': price(5, 25, 6.25, 10, 0.5, 'builtin'),
     'claude-opus-4-7': price(5, 25, 6.25, 10, 0.5, 'builtin'),
     'claude-opus-4-6': price(5, 25, 6.25, 10, 0.5, 'builtin'),
@@ -41,7 +37,7 @@ export function builtinPriceTable(now: Date = new Date()): PriceTable {
     'claude-opus-4': price(15, 75, 18.75, 30, 1.5, 'builtin'), // 旧 claude-opus-4-20250514 の受け皿
     'claude-3-opus': price(15, 75, 18.75, 30, 1.5, 'builtin'),
 
-    'claude-sonnet-5': sonnet5,
+    'claude-sonnet-5': price(2, 10, 2.5, 4, 0.2, 'builtin'),
     'claude-sonnet-4-6': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-sonnet-4-5': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-sonnet-4': price(3, 15, 3.75, 6, 0.3, 'builtin'),
@@ -54,6 +50,8 @@ export function builtinPriceTable(now: Date = new Date()): PriceTable {
 
     // Codex の usage はキャッシュ書き込み数を区別しないため、write 系は 0 とする。
     'gpt-6-astra': price(10, 50, 0, 0, 1, 'builtin'),
+    'gpt-6-sol': price(2, 10, 0, 0, 0.2, 'builtin'),
+    'gpt-6-luna': price(0.1, 0.5, 0, 0, 0.01, 'builtin'),
     'gpt-5.6-sol': price(4, 20, 0, 0, 0.4, 'builtin'),
     'gpt-5.6-terra': price(2, 12, 0, 0, 0.2, 'builtin'),
     'gpt-5.6-luna': price(0.2, 1.2, 0, 0, 0.02, 'builtin'),
@@ -177,7 +175,6 @@ function isCacheFresh(fetchedAt: string): boolean {
  * cache と builtin のマージ。
  * - fresh cache: LiteLLM を優先して新しい単価を反映する。
  * - stale cache: 未知モデルの補完には使うが、既知モデルは builtin を優先する。
- * - Sonnet 5: 日付境界を builtin が管理するため、cache の鮮度にかかわらず builtin を優先する。
  *
  * provider prefix / 日付suffixなどraw keyが異なっても、normalize後に同じモデルなら
  * builtin側のcanonical keyへ集約する。返すtableには同じ正規化IDの別名を残さず、
@@ -196,9 +193,6 @@ function mergePriceTables(builtin: PriceTable, cached: PriceTable, fresh: boolea
   for (const [model, modelPrice] of Object.entries(cached)) {
     const normalized = normalizeModelId(model);
     if (normalized.length === 0) continue;
-    // Sonnet 5の期間境界と、stale cacheの既知モデルは、
-    // provider prefix・日付付きalias等でもbuiltinより先に解決させない。
-    if (normalized === 'claude-sonnet-5') continue;
 
     const builtinKey = builtinKeyById.get(normalized);
     if (builtinKey !== undefined) {

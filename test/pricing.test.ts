@@ -12,7 +12,11 @@ function fakeResponse(body: unknown, ok = true, status = 200): { ok: boolean; st
 const addedModelRates = [
   { model: 'claude-fable-5-1', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, expectedUSD: 0.2295 },
   { model: 'claude-mythos-5-1', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, expectedUSD: 0.2295 },
+  { model: 'claude-opus-5-5', input: 4, output: 20, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2, expectedUSD: 0.0926 },
+  { model: 'claude-opus-5', input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, expectedUSD: 0.11775 },
   { model: 'gpt-6-astra', input: 10, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 1, expectedUSD: 0.118 },
+  { model: 'gpt-6-sol', input: 2, output: 10, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.2, expectedUSD: 0.0236 },
+  { model: 'gpt-6-luna', input: 0.1, output: 0.5, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.01, expectedUSD: 0.00118 },
   { model: 'gpt-5.6-sol', input: 4, output: 20, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.4, expectedUSD: 0.0472 },
   { model: 'gpt-5.6-terra', input: 2, output: 12, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.2, expectedUSD: 0.0276 },
   { model: 'gpt-5.4', input: 2.5, output: 15, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.25, expectedUSD: 0.0345 },
@@ -86,25 +90,14 @@ describe('resolvePrice: normalized exact match specificity', () => {
   });
 });
 
-describe('builtin Claude Sonnet 5 promotional pricing', () => {
-  it('uses the introductory price through 2026-08-31 UTC', () => {
-    expect(builtinPriceTable(new Date('2026-08-31T23:59:59.999Z'))['claude-sonnet-5']).toEqual({
+describe('builtin Claude Sonnet 5 pricing', () => {
+  it('uses $2 / $10 as the standard price', () => {
+    expect(builtinPriceTable()['claude-sonnet-5']).toEqual({
       input: 2,
       output: 10,
       cacheWrite5m: 2.5,
       cacheWrite1h: 4,
       cacheRead: 0.2,
-      source: 'builtin',
-    });
-  });
-
-  it('switches to the standard price at 2026-09-01 00:00 UTC', () => {
-    expect(builtinPriceTable(new Date('2026-09-01T00:00:00.000Z'))['claude-sonnet-5']).toEqual({
-      input: 3,
-      output: 15,
-      cacheWrite5m: 3.75,
-      cacheWrite1h: 6,
-      cacheRead: 0.3,
       source: 'builtin',
     });
   });
@@ -343,28 +336,6 @@ describe('loadPriceTable', () => {
     expect(table['claude-sonnet-4-6']).toEqual(freshAlias);
     expect(table['anthropic/claude-sonnet-4-6-20260101']).toBeUndefined();
     expect(resolvePrice('anthropic.claude-sonnet-4-6[1m]', table)).toEqual(freshAlias);
-  });
-
-  it('(d1b) Sonnet 5 date-aware builtin wins even over a fresh cached price', async () => {
-    const freshFetchedAt = new Date().toISOString();
-    const wrongSonnet = {
-      input: 999,
-      output: 999,
-      cacheWrite5m: 999,
-      cacheWrite1h: 999,
-      cacheRead: 999,
-      source: 'litellm' as const,
-    };
-    await fs.writeFile(
-      path.join(cacheDir, 'pricing.json'),
-      JSON.stringify({ fetchedAt: freshFetchedAt, table: { 'anthropic/claude-sonnet-5-20260617': wrongSonnet } }),
-      'utf8',
-    );
-
-    const table = await loadPriceTable(cacheDir, { offline: true });
-
-    expect(table['claude-sonnet-5']).toEqual(builtinPriceTable()['claude-sonnet-5']);
-    expect(table['anthropic/claude-sonnet-5-20260617']).toBeUndefined();
   });
 
   it('(d1c) fresh unknown model remains exact-match only', async () => {
