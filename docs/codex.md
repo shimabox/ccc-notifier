@@ -120,7 +120,7 @@ backupは作りません。元JSONLの消失・移動・破損行は復元でき
 
 単価は Anthropic 系と同じ仕組み(内蔵表 + [LiteLLM](https://github.com/BerriAI/litellm) のキャッシュ)で管理されます。通常の`init`、`doctor`、`sweep`がキャッシュを更新し、Stop hookはネットワーク取得を行いません。内蔵表には次のモデルの単価が入っています。
 
-- `gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.5` / `gpt-5.4` / `gpt-5.1` / `gpt-5` / `gpt-5-codex` / `gpt-5.1-codex` / `o3`
+- `gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.5` / `gpt-5.4` / `gpt-5.1` / `gpt-5` / `gpt-5-codex` / `gpt-5.1-codex` / `o3`
 
 これ以外の新しいモデルは、LiteLLM側に完全に一致するモデルIDのレートがある場合だけ計算します。似た名前の古いモデル単価は使わず、取得できない未知モデルは通知・`doctor`に unknown model として表示します。
 
