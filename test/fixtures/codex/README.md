@@ -138,3 +138,17 @@ ts は draft の endTs(そのターン最後のイベント timestamp)。
 - 期待動作: **レコードを作らずカーソルだけ進める**(ingest / sweep とも)。fork 後の増分(この
   フィクスチャでは input +500 / output +200)を切り出す基準点は rollout 内から機械的に判定できない
   ため、安全側(計上しない)に倒す
+
+## rollout-paginated.jsonl(history_mode=paginated・2ターン)
+
+- `event_msg/user_message` を持たず、ユーザー入力は `event_msg/item_completed`(`item.type:"UserMessage"`)にだけ残る形式
+- prompt: turn1 = `"テストを直して"` / turn2 = `"[Image #1] この画面どう？"`(`local_image` 部分は無視)
+- `response_item` の user メッセージ(`<environment_context>` などの注入を含む)と `AgentMessage` の item_completed はプロンプトに使わない
+- turn2 には `<send_user_message_question_reply>` で包まれた制御用の UserMessage が続くが、プロンプトには使わない(空・`<` 始まりは除外)
+
+## rollout-aborted.jsonl(中断ターン + usage ゼロの完了ターン)
+
+- turn1: 入力 `"全テストを流して"` → token_count `{1000,400,50}` → `turn_aborted`
+- turn2: 入力 `"やっぱり止めて"` → 同じ total の token_count(step=0)→ `task_complete`
+- `turn_aborted` もターン境界。ドラフトは turn1 の1件だけ(prompt = `"全テストを流して"`、endTs = `2026-09-21T09:00:20.000Z`)
+- aggregateCodexTurn の prompt も usage のある最後のターンの入力 = `"全テストを流して"`

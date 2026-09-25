@@ -52,6 +52,31 @@ function strOrNull(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
+/** item_completed の UserMessage item からテキスト部分を連結して取り出す(local_image 等は無視)。 */
+function userMessageItemText(item: unknown): string | null {
+  if (!isRecord(item) || item.type !== "UserMessage" || !Array.isArray(item.content)) return null;
+  const texts = item.content.flatMap((c) =>
+    isRecord(c) && c.type === "text" && typeof c.text === "string" ? [c.text] : [],
+  );
+  return texts.length > 0 ? texts.join("\n") : null;
+}
+
+const CHROME_TABS_HEADER = "# Chrome tabs:";
+const CHROME_REQUEST_HEADING = /^## My request[^\n]*:[ \t]*$/m;
+
+/** Chrome 拡張経由の入力は、先頭に付くタブ情報を除いて依頼文だけにする。 */
+function withoutChromeTabs(text: string): string {
+  if (!text.startsWith(CHROME_TABS_HEADER)) return text;
+  const m = CHROME_REQUEST_HEADING.exec(text);
+  return m === null ? text : text.slice(m.index + m[0].length);
+}
+
+/** プロンプトとして採れる入力か。空や <command-name> 等の擬似メッセージは除く(Claude 側と同じ規則)。 */
+function promptOf(text: string | null): string | null {
+  const t = withoutChromeTabs(text?.trim() ?? "").trim();
+  return t.length > 0 && !t.startsWith("<") ? t : null;
+}
+
 function zeroTotals(): CodexTotals {
   return { input: 0, cached: 0, output: 0 };
 }
@@ -156,11 +181,11 @@ function readSessionMetaSeed(buffer: Buffer): SessionMetaSeed | null {
 
 // ============ ウィンドウスキャン(aggregate / split 共通コア) ============
 
-/** task_complete で確定した(または EOF で打ち切られた)1セグメント分のスキャン結果。 */
+/** task_complete / turn_aborted で確定した(または EOF で打ち切られた)1セグメント分のスキャン結果。 */
 interface Segment {
   acc: CodexTotals; // このセグメントに帰属した step の合計
   apiCalls: number; // info あり・step≠0 の token_count 件数
-  prompt: string | null; // セグメント内最後の user_message.message
+  prompt: string | null; // セグメント内最後のユーザー入力(user_message / UserMessage item)
   model: string | null; // セグメント内最後の turn_context.model(無ければ直前セグメントから持ち回り)
   cwd: string | null; // セグメント内最後の turn_context.cwd → session_meta.cwd
   firstTs: string | null;
@@ -171,7 +196,7 @@ interface Segment {
   eventKeys: string[]; // このセグメントで計上した token_count イベントの指紋
 }
 
-/** スキャン中の現セグメントのバッファ。task_complete で Segment に確定して作り直す。 */
+/** スキャン中の現セグメントのバッファ。task_complete / turn_aborted で Segment に確定して作り直す。 */
 interface SegmentBuf {
   acc: CodexTotals;
   apiCalls: number;
@@ -198,13 +223,13 @@ function newSegmentBuf(): SegmentBuf {
 
 /** ウィンドウ(カーソル位置〜EOF)全体のスキャン結果。 */
 interface WindowScan {
-  segments: Segment[]; // task_complete で確定したセグメント(usage ゼロも含む)
-  open: Segment | null; // 最後の task_complete 以降に処理した行があればその残り
+  segments: Segment[]; // task_complete / turn_aborted で確定したセグメント(usage ゼロも含む)
+  open: Segment | null; // 最後のターン終端以降に処理した行があればその残り
   acc: CodexTotals; // ウィンドウ全体の合計(= 各セグメント acc の合計)
   prev: CodexTotals; // 最後に観測した total_token_usage(フォールバック発生時も実カウンタ)
   apiCalls: number;
   model: string | null; // ウィンドウ内最後の turn_context.model
-  prompt: string | null; // ウィンドウ内最後の user_message.message
+  prompt: string | null; // usage のある最後のセグメントの入力
   cwd: string | null; // 最後の turn_context.cwd → session_meta.cwd
   sessionId: string; // session_meta の id(旧 session_id)→ ファイル名の uuid 部 → ""
   eventKeys: string[]; // ウィンドウ全体で計上した token_count イベントの指紋
@@ -260,7 +285,6 @@ async function scanWindow(
   // ウィンドウ全体のコンテキスト。lastModel は「直前セグメントからの持ち回り」も兼ねる。
   // ターン境界より後ろから再開した窓には turn_context が無いため、カーソル側の値を初期値にする。
   let lastModel: string | null = cursor?.codexModel ?? null;
-  let windowPrompt: string | null = null;
   let windowTurnCtxCwd: string | null = null;
   let sessionMetaCwd: string | null = null;
   let sessionMetaSid: string | null = null;
@@ -363,12 +387,12 @@ async function scanWindow(
     if (type !== "event_msg") return; // response_item ほかは usage を運ばない
 
     const kind = payload.type;
-    if (kind === "user_message") {
-      const msg = strOrNull(payload.message);
-      if (msg !== null) {
-        seg.prompt = msg;
-        windowPrompt = msg;
-      }
+    // history_mode="legacy" は user_message、"paginated" は item_completed(UserMessage)だけに入力が残る。
+    if (kind === "user_message" || kind === "item_completed") {
+      const msg = promptOf(
+        kind === "user_message" ? strOrNull(payload.message) : userMessageItemText(payload.item),
+      );
+      if (msg !== null) seg.prompt = msg;
       return;
     }
     if (kind === "token_count") {
@@ -408,8 +432,9 @@ async function scanWindow(
       }
       return;
     }
-    if (kind === "task_complete") {
-      // task_complete 行自身は現セグメントに属する(endTs はこの行)。ここでターンを確定する。
+    if (kind === "task_complete" || kind === "turn_aborted") {
+      // 終端行自身は現セグメントに属する(endTs はこの行)。ここでターンを確定する。
+      // 中断ターンも区切らないと、その usage が次ターンの入力と同じセグメントに入ってしまう。
       segments.push(snapshotSegment(endOffset));
       seg = newSegmentBuf();
     }
@@ -425,8 +450,13 @@ async function scanWindow(
   }
   const newOffset = lineStart;
 
-  // 最後の task_complete 以降に処理した行が残っていれば「未確定セグメント」として持ち帰る。
+  // 最後のターン終端以降に処理した行が残っていれば「未確定セグメント」として持ち帰る。
   const open = seg.hasLines ? snapshotSegment(newOffset) : null;
+
+  // usage のある最後のターンの入力(split の最終ドラフトと同じ値)。usage ゼロのターン
+  // (中断直後に送った入力など)の入力では上書きしない。
+  const windowPrompt =
+    [...segments, ...(open === null ? [] : [open])].filter((s) => !isZeroTotals(s.acc)).at(-1)?.prompt ?? null;
 
   return {
     segments,
@@ -586,7 +616,7 @@ export async function codexResumePointAtTs(rolloutPath: string, floorTs: string)
 }
 
 /**
- * 同じウィンドウを task_complete 境界でターンに分割する(sweep の過去分回収用)。
+ * 同じウィンドウを task_complete / turn_aborted 境界でターンに分割する(sweep の過去分回収用)。
  * prev はセグメントを跨いで持ち回るため、全ドラフトの acc 合計と最後のドラフトの newCursor は
  * 同一ウィンドウに対する aggregateCodexTurn の結果と一致する(hook ↔ sweep 相互運用の不変条件)。
  * usage ゼロのセグメントはドラフトにしない。ファイルが読めない/新規 usage が無ければ null。
@@ -601,12 +631,12 @@ export async function splitIntoCodexTurnDrafts(
   return draftsFromScan(scan);
 }
 
-/** 走査結果を task_complete 境界のドラフト列にする(acc が非ゼロであること)。 */
+/** 走査結果を task_complete / turn_aborted 境界のドラフト列にする(acc が非ゼロであること)。 */
 function draftsFromScan(scan: WindowScan): CodexTurnDraft[] {
   // usage を持つ確定セグメントだけがターンになる(ゼロのセグメントは境界ごと読み捨て)。
   const picked = scan.segments.filter((s) => !isZeroTotals(s.acc));
 
-  // 末尾(最後の task_complete 以降)に usage が残った場合は独立したドラフトにする。
+  // 末尾(最後のターン終端以降)に usage が残った場合は独立したドラフトにする。
   // 直前の完了ターンへ混ぜると、進行中の次ターンでモデルが変わったときに前モデルの単価で
   // 計算されるため。独立させても acc 合計と最終 cursor の不変条件は維持できる。
   if (scan.open !== null && !isZeroTotals(scan.open.acc)) {

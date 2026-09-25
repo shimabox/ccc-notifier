@@ -12,6 +12,8 @@ import type { Cursor, TokenBuckets, TurnAggregate } from "../src/types";
 const FX_BASIC = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
 const FX_MULTI = fileURLToPath(new URL("./fixtures/codex/rollout-multiturn.jsonl", import.meta.url));
 const FX_RESET = fileURLToPath(new URL("./fixtures/codex/rollout-reset.jsonl", import.meta.url));
+const FX_PAGINATED = fileURLToPath(new URL("./fixtures/codex/rollout-paginated.jsonl", import.meta.url));
+const FX_ABORTED = fileURLToPath(new URL("./fixtures/codex/rollout-aborted.jsonl", import.meta.url));
 
 // ---- ヘルパー ---------------------------------------------------------------
 
@@ -33,6 +35,43 @@ function sumMain(aggs: TurnAggregate[]): TokenBuckets {
     }
   }
   return total;
+}
+
+/** paginated 形式の1ターン(UserMessage 入力 → 累積カウンタ total → task_complete)の行を作る。 */
+function paginatedTurn(n: number, text: string, total: number): string[] {
+  const ts = (sec: number): string => `2026-09-22T10:0${n}:0${sec}.000Z`;
+  const usage = { input_tokens: total, cached_input_tokens: 0, output_tokens: 10 * n, total_tokens: total + 10 * n };
+  return [
+    { timestamp: ts(0), type: "turn_context", payload: { turn_id: `t${n}`, cwd: "/home/user/proj-r", model: "gpt-5.5" } },
+    {
+      timestamp: ts(1),
+      type: "event_msg",
+      payload: { type: "item_completed", item: { type: "UserMessage", id: `u${n}`, content: [{ type: "text", text }] } },
+    },
+    {
+      timestamp: ts(2),
+      type: "event_msg",
+      payload: { type: "token_count", info: { total_token_usage: usage, last_token_usage: usage } },
+    },
+    { timestamp: ts(3), type: "event_msg", payload: { type: "task_complete", turn_id: `t${n}` } },
+  ].map((o) => JSON.stringify(o));
+}
+
+/** paginated 形式の rollout を dir に書き出してパスを返す。 */
+function writePaginatedRollout(dir: string, turns: string[][]): string {
+  const meta = {
+    timestamp: "2026-09-22T10:00:00.000Z",
+    type: "session_meta",
+    payload: {
+      id: "01234567-aaaa-7000-8000-000000000011",
+      cwd: "/home/user/proj-r",
+      originator: "codex-tui",
+      history_mode: "paginated",
+    },
+  };
+  const f = join(dir, "rollout-2026-09-22T10-00-00-01234567-aaaa-7000-8000-000000000011.jsonl");
+  writeFileSync(f, [JSON.stringify(meta), ...turns.flat()].join("\n") + "\n");
+  return f;
 }
 
 // ---- suite ------------------------------------------------------------------
@@ -483,5 +522,56 @@ describe("codex transcript (aggregateCodexTurn / splitIntoCodexTurnDrafts)", () 
     // 下限がファイル末尾より後なら、消費し切って新規ターンは出ない。
     const after = await codexResumePointAtTs(f, "2026-07-10T19:00:00.000Z");
     expect(await splitIntoCodexTurnDrafts(f, after)).toBeNull();
+  });
+
+  // 17. history_mode="paginated" の rollout は user_message を持たず、入力は item_completed の
+  //     UserMessage item にだけ残る。そこからプロンプトを採り、画像部分や注入された
+  //     response_item の user メッセージ、タグで包まれた制御用の UserMessage は使わない。
+  it("17. paginated rollout の UserMessage item からプロンプトを拾う", async () => {
+    const whole = await aggregateCodexTurn(FX_PAGINATED, null);
+    expect(whole?.prompt).toBe("[Image #1] この画面どう？");
+
+    const drafts = await splitIntoCodexTurnDrafts(FX_PAGINATED, null);
+    expect(drafts?.map((d) => d.agg.prompt)).toEqual(["テストを直して", "[Image #1] この画面どう？"]);
+  });
+  // 18. 中断(turn_aborted)したターンの usage は、そのターン自身の入力で記録する。
+  //     直後に usage ゼロで完了したターンの入力を付けない(hook・sweep の両経路)。
+  it("18. 中断ターンの usage に次ターンの入力を付けない", async () => {
+    const whole = await aggregateCodexTurn(FX_ABORTED, null);
+    expect(whole?.main).toEqual({ "gpt-5.5": buckets(600, 400, 50) });
+    expect(whole?.prompt).toBe("全テストを流して");
+
+    const drafts = await splitIntoCodexTurnDrafts(FX_ABORTED, null);
+    expect(drafts?.map((d) => d.agg.prompt)).toEqual(["全テストを流して"]);
+    expect(drafts?.[0].endTs).toBe("2026-09-21T09:00:20.000Z"); // turn_aborted がターンの終端
+    expect(drafts?.[0].agg.newCursor).toEqual(whole?.newCursor);
+  });
+  // 19. Chrome 拡張経由の入力は、先頭のタブ情報を除いて依頼文だけをプロンプトにする。
+  it("19. Chrome 拡張のタブ情報を除いた依頼文をプロンプトにする", async () => {
+    const chrome = [
+      "# Chrome tabs:",
+      "- Current URL: https://example.com/",
+      "- Selected tab:",
+      "  - [selected] Tab ID 1: https://example.com/",
+      "",
+      "## My request for Codex:",
+      "このページを要約して",
+      "",
+    ].join("\n");
+    const f = writePaginatedRollout(dir, [paginatedTurn(1, chrome, 1000)]);
+    expect((await aggregateCodexTurn(f, null))?.prompt).toBe("このページを要約して");
+  });
+
+  // 20. 最後の usage ありターンの入力が除外対象なら、aggregate も前ターンの入力へ戻さず null にする
+  //     (split の最終ドラフトと同じ値。hook と sweep で記録内容を食い違わせない)。
+  it("20. 最後のターンの入力が除外対象なら aggregate も split も null", async () => {
+    const f = writePaginatedRollout(dir, [
+      paginatedTurn(1, "通常の依頼", 1000),
+      paginatedTurn(2, "<task>\n委譲された依頼\n</task>", 2000),
+    ]);
+    const whole = await aggregateCodexTurn(f, null);
+    const drafts = await splitIntoCodexTurnDrafts(f, null);
+    expect(drafts?.map((d) => d.agg.prompt)).toEqual(["通常の依頼", null]);
+    expect(whole?.prompt).toBeNull();
   });
 });
