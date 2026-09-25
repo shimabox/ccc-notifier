@@ -318,12 +318,12 @@ interface CodexTurnDraft {
 - TokenBuckets 写像(acc に適用): `input = max(0, acc.input − acc.cached)` / `cacheRead = acc.cached` /
   `output = acc.output` / `cacheWrite5m = cacheWrite1h = 0`
 - モデル: ウィンドウ内最後の `turn_context.payload.model`。無ければ `"unknown"`(呼び出し側 track は hook payload の `model` を優先できるよう、TurnAggregate.main のキーに使う)
-- プロンプト: ウィンドウ内最後の `event_msg/user_message` の `message`。cwd: 最後の `turn_context.payload.cwd` → `session_meta.payload.cwd`
+- プロンプト: usage のある最後のターン(セグメント)のユーザー入力。入力は `event_msg/user_message` の `message`(history_mode=legacy)、または `event_msg/item_completed` で `item.type==="UserMessage"` の `content[].type==="text"` を改行連結したもの(history_mode=paginated)。Chrome 拡張が先頭に付ける `# Chrome tabs:` のタブ情報は、`## My request…:` 見出しより後ろの依頼文だけに切り詰める。trim 後に空、または `<` で始まる擬似メッセージ(`<command-name>` や `<send_user_message_question_reply>` など)は採らない(Claude 側と同じ規則)。usage ゼロのターン(中断直後の入力など)の入力でも上書きせず、最後の usage ありターンの入力が採れなければ null(split の最終ドラフトと同じ値)。cwd: 最後の `turn_context.payload.cwd` → `session_meta.payload.cwd`
 - `sessionId`: `session_meta.payload.session_id` → 無ければファイル名の uuid 部
 - sidechain = `{}`、gitBranch = null、apiCalls = ウィンドウ内 token_count(info あり・step≠0)件数
 - newCursor: `offset` = 処理済み末尾、`codexTotals` = prev(最後に観測した total_token_usage。フォールバック発生時も同じ)、
   `lastTs` = 最後のイベント timestamp、`lastUuid` = null、`seenMessageKeys` = []
-- `splitIntoCodexTurnDrafts` は同じウィンドウを `task_complete` 境界で分割し、**各セグメントに同じ逐次ステップ規約**を適用
+- `splitIntoCodexTurnDrafts` は同じウィンドウを `task_complete` / `turn_aborted` 境界で分割し、**各セグメントに同じ逐次ステップ規約**を適用
   (prev はセグメントを跨いで持ち回る。末尾に task_complete 後のusageが残る場合は、進行中ターン自身のmodel/prompt/cwdを持つ独立ドラフトにする)。
   **全ドラフトの acc 合計・適用後の newCursor は、同一ウィンドウに対する aggregateCodexTurn の結果と一致**(hook ↔ sweep 相互運用)
 
