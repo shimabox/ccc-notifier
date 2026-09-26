@@ -61,12 +61,14 @@ function asst(o: {
 function userLine(o: {
   content: unknown;
   sidechain?: boolean;
+  meta?: boolean;
   uuid?: string;
   ts?: string;
 }): Record<string, unknown> {
   return {
     type: 'user',
     isSidechain: o.sidechain ?? false,
+    ...(o.meta === true ? { isMeta: true } : {}),
     uuid: o.uuid ?? 'u',
     timestamp: o.ts ?? '2026-07-06T00:00:00.000Z',
     message: { role: 'user', content: o.content },
@@ -336,6 +338,27 @@ describe('aggregateNewTurn', () => {
 
     const { drafts } = await splitIntoTurnDrafts(f, null);
     expect(drafts.map((d) => d.prompt)).toEqual(['最初の依頼', '貼り付けた文章']);
+  });
+
+  // 6d. isMeta rows are injected by Claude Code (e.g. a loaded skill body); they
+  //     are neither the prompt nor a turn boundary.
+  it('6d. ignores isMeta rows such as loaded skill bodies', async () => {
+    const f = path.join(dir, 't.jsonl');
+    await writeJsonl(f, [
+      userLine({ content: 'スキルを使って直して', uuid: 'u1', ts: '2026-07-06T00:00:01.000Z' }),
+      asst({ id: 'msg_A', req: 'req_A', usage: usageNew(1, 1), ts: '2026-07-06T00:00:02.000Z' }),
+      userLine({
+        content: [{ type: 'text', text: 'Base directory for this skill: /skills/fix\n\n# Fix skill' }],
+        meta: true,
+        uuid: 'u2',
+        ts: '2026-07-06T00:00:03.000Z',
+      }),
+      asst({ id: 'msg_B', req: 'req_B', usage: usageNew(1, 1), ts: '2026-07-06T00:00:04.000Z' }),
+    ]);
+
+    expect((await aggregateNewTurn(f, null))?.prompt).toBe('スキルを使って直して');
+    const { drafts } = await splitIntoTurnDrafts(f, null);
+    expect(drafts.map((d) => [d.prompt, d.apiCalls])).toEqual([['スキルを使って直して', 2]]);
   });
 
   // 7. resilience: empty file / missing path -> null; a corrupt JSON line is

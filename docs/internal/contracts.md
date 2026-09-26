@@ -168,7 +168,8 @@ sweep がメイン(aggregateNewTurn)とパース規約を完全に踏襲する�
 `extractBucket` / `promptCandidate` を export に変更した(**実装・シグネチャは不変**)。
 プロンプトの採否は `promptFromText` に一本化している(aggregateNewTurn・splitIntoTurnDrafts・Codex 解析で共通):
 `<pasted_content …>` / `</pasted_content …>` タグを外して中身を残し、trim 後に空、または貼り付け部分の外側が `<` で始まる
-擬似メッセージ(`<command-name>` など)は採らない。
+擬似メッセージ(`<command-name>` など)は採らない。`isMeta: true` の user 行(読み込んだスキル本文など Claude Code が自動で入れる行)は、
+プロンプトにもターン境界(sweep の分割)にもしない。
 
 ### src/sweep.ts(2026-07-07 追加)
 - `runSweep(argv: string[]): Promise<number>`
