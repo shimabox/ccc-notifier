@@ -251,7 +251,7 @@ async function readAll(path: string): Promise<Buffer | null> {
  * 戻り値の newCursor は同一ウィンドウに対する aggregateNewTurn の newCursor と互換。
  *
  * ターン境界の規則:
- *  - 「実ユーザープロンプト行」= type==="user" && isSidechain!==true && promptCandidate が非 null
+ *  - 「実ユーザープロンプト行」= type==="user" && isSidechain!==true && isMeta!==true && promptCandidate が非 null
  *    && promptFromText が非 null(<pasted_content> タグを外した後が非空で、貼り付け部分の外側が
  *    "<" 始まりでない)。
  *  - 境界に達したら、それまでのバッファに assistant usage が1件以上あればターンとして flush してから
@@ -349,7 +349,7 @@ export async function splitIntoTurnDrafts(
     // 実ユーザープロンプト行の検出(= ターン境界)。規則は aggregateNewTurn の prompt 抽出と同一。
     let isBoundary = false;
     let boundaryPrompt = "";
-    if (type === "user" && !isSide && message !== null) {
+    if (type === "user" && !isSide && obj.isMeta !== true && message !== null) {
       const cand = promptCandidate(message.content);
       const p = cand === null ? null : promptFromText(cand);
       if (p !== null) {

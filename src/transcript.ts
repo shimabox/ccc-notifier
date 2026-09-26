@@ -211,8 +211,9 @@ export async function aggregateNewTurn(
     const type = obj.type;
     const message = isRecord(obj.message) ? obj.message : null;
 
-    // 4. prompt extraction: real user prompts only (never sub-agent instructions)
-    if (type === 'user' && !isSide && message !== null) {
+    // 4. prompt extraction: real user prompts only (never sub-agent instructions,
+    //    nor isMeta rows that Claude Code injects, such as loaded skill bodies)
+    if (type === 'user' && !isSide && obj.isMeta !== true && message !== null) {
       const cand = promptCandidate(message.content);
       const p = cand === null ? null : promptFromText(cand);
       if (p !== null) prompt = p;
