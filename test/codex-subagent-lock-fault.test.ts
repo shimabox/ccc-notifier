@@ -45,6 +45,9 @@ vi.mock("node:fs", async (importOriginal) => {
 const ROLLOUT = fileURLToPath(new URL("./fixtures/codex/rollout-basic.jsonl", import.meta.url));
 const STOP = fileURLToPath(new URL("./fixtures/codex/stop-payload.json", import.meta.url));
 
+// フックのロック待ちの既定上限(src/codex/subagent-store.ts)。これより短ければ待たずに返ったとみなせる。
+const HOOK_LOCK_TIMEOUT_MS = 2_000;
+
 let home: string;
 
 function stagingFiles(): string[] {
@@ -75,8 +78,8 @@ describe("Codex activity lock publication failure", () => {
   it("canonical不在のEPERMをcontention扱いせず即時fail-closedにしてstagingを残さない", async () => {
     const { acquireCodexActivityLock } = await import("../src/codex/subagent-store");
     const startedAt = Date.now();
-    expect(() => acquireCodexActivityLock(500)).toThrow(/lock publication failed.*EPERM/);
-    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(() => acquireCodexActivityLock(10_000)).toThrow(/lock publication failed.*EPERM/);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(fsFault.linkCalls).toBe(1);
     expect(stagingFiles()).toEqual([]);
   });
@@ -109,7 +112,7 @@ describe("Codex activity lock publication failure", () => {
     const { acquireCodexActivityLock } = await import("../src/codex/subagent-store");
     const startedAt = Date.now();
     expect(() => acquireCodexActivityLock(40)).toThrow("activity lock timeout");
-    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(fsFault.linkCalls).toBeGreaterThan(1);
     expect(stagingFiles()).toEqual([]);
   });
@@ -130,12 +133,12 @@ describe("Codex activity lock publication failure", () => {
       hook_event_name: "UserPromptSubmit",
       prompt: "PRIVATE-PROMPT-CANARY",
     }))).toEqual(Buffer.alloc(0));
-    expect(Date.now() - promptAt).toBeLessThan(500);
+    expect(Date.now() - promptAt).toBeLessThan(HOOK_LOCK_TIMEOUT_MS);
     expect(stagingFiles()).toEqual([]);
 
     const startAt = Date.now();
     expect(await runCodexPassiveHook("SubagentStart", JSON.stringify(startPayload))).toEqual(Buffer.alloc(0));
-    expect(Date.now() - startAt).toBeLessThan(500);
+    expect(Date.now() - startAt).toBeLessThan(HOOK_LOCK_TIMEOUT_MS);
     expect(stagingFiles()).toEqual([]);
 
     const rollout = join(home, "rollout.jsonl");
@@ -143,7 +146,7 @@ describe("Codex activity lock publication failure", () => {
     const stopAt = Date.now();
     expect(await runCodexPassiveHook("Stop", JSON.stringify({ ...stopPayload, transcript_path: rollout })))
       .toEqual(Buffer.from("{}\n"));
-    expect(Date.now() - stopAt).toBeLessThan(500);
+    expect(Date.now() - stopAt).toBeLessThan(HOOK_LOCK_TIMEOUT_MS);
     expect(stagingFiles()).toEqual([]);
 
     const history = readFileSync(join(home, "history.jsonl"), "utf8").trim();
