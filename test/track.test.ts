@@ -993,25 +993,31 @@ describe("runTrack: surface / originator recording", () => {
 });
 
 describe("runTrack: ingest piggyback (best-effort, hook 非依存の取りこぼし回収)", () => {
-  it("5. track 実行時に CCCN_CLAUDE_PROJECTS 配下の未追跡ファイルも便乗り取込される", async () => {
+  it("5. track 実行時にデスクトップ配下の未追跡ファイルは便乗り取込し、Claude CLI 配下は各セッションの hook に任せる", async () => {
     const prevProjects = process.env.CCCN_CLAUDE_PROJECTS;
     const prevDesktopRoots = process.env.CCCN_CLAUDE_DESKTOP_ROOTS;
     const projects = join(tmpHome, "claude-projects");
+    const desktopRoot = join(tmpHome, "claude-desktop");
     mkdirSync(join(projects, "proj"), { recursive: true });
-    // transcriptPath(track の直接対象)とは別セッションの、便乗り取込だけが拾うはずのファイル。
+    mkdirSync(join(desktopRoot, "proj"), { recursive: true });
+    // transcriptPath(track の直接対象)とは別セッションのファイル。
     // sessionId は必ず変える: ingest は「history に記録済みの ts」を下限に既取り込み分を弾くため、
     // 同一 sessionId のコピーは(パスが違っても)同じセッションの再取り込みとして正しく抑止される。
-    writeFileSync(
-      join(projects, "proj", "other-session.jsonl"),
-      readFileSync(FIXTURE_TRANSCRIPT, "utf8")
-        .replaceAll('"sessionId":"sess-1"', '"sessionId":"sess-other"')
-        .replaceAll('"msg_', '"msg_other_')
-        .replaceAll('"req_', '"req_other_')
-        .replaceAll('"requestId":"req_', '"requestId":"req_other_'),
-      "utf8",
-    );
+    const writeSession = (file: string, sessionId: string, tag: string): void => {
+      writeFileSync(
+        file,
+        readFileSync(FIXTURE_TRANSCRIPT, "utf8")
+          .replaceAll('"sessionId":"sess-1"', `"sessionId":"${sessionId}"`)
+          .replaceAll('"msg_', `"msg_${tag}_`)
+          .replaceAll('"req_', `"req_${tag}_`)
+          .replaceAll('"requestId":"req_', `"requestId":"req_${tag}_`),
+        "utf8",
+      );
+    };
+    writeSession(join(desktopRoot, "proj", "desktop-session.jsonl"), "sess-desktop", "desktop");
+    writeSession(join(projects, "proj", "cli-session.jsonl"), "sess-cli", "cli");
     process.env.CCCN_CLAUDE_PROJECTS = projects;
-    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = join(tmpHome, "no-desktop-roots");
+    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = desktopRoot;
     try {
       await runTrack(stdinFor(transcriptPath));
     } finally {
@@ -1022,11 +1028,12 @@ describe("runTrack: ingest piggyback (best-effort, hook 非依存の取りこぼ
     }
 
     const rows = readHistory();
-    // メイン(transcriptPath)1件 + 便乗り取込(other-session.jsonl)1件。
+    // メイン(transcriptPath)1件 + 便乗り取込(desktop-session.jsonl)1件。
     expect(rows).toHaveLength(2);
     const ingested = rows.find((r) => r.ingest === "scan");
-    expect(ingested).toBeDefined();
-    expect(ingested?.sessionId).toBe("sess-other");
+    expect(ingested?.sessionId).toBe("sess-desktop");
+    expect(ingested?.surface).toBe("desktop");
+    expect(rows.some((r) => r.sessionId === "sess-cli")).toBe(false);
     const main = rows.find((r) => r.ingest === undefined);
     expect(main).toBeDefined();
   });

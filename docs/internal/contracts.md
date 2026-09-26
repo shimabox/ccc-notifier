@@ -36,6 +36,10 @@
 
 ## src/track.ts (T6)
 - `runTrack(stdinText: string): Promise<void>`  // 例外を絶対に外へ出さない
+- 記録後の便乗り取込は `runIngest({ skipClaudeCli: true })` で呼び、CLI と判定される Claude transcript
+  (`surfaceForClaudePath` の最長一致分類。CLI とデスクトップの root が同じ・入れ子でも hook と同じ判定)を走査しない
+  (Claude CLI の transcript は各セッションの hook が記録する。応答中の別セッションを途中で取り込まない)。
+  Claude デスクトップと Codex rollout は従来どおり対象。手動 `scan` と `sweep` は変えない。
 
 ## src/setup.ts (T7)
 - `runInit(argv: string[]): Promise<number>`      // 非対話用フラグ --yes --os-only --no-notify を必ずサポート

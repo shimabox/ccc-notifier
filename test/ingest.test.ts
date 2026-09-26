@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // 既定(unreadablePath === null)は完全パススルー。テストごとに対象パスだけを指定する。
@@ -271,6 +271,15 @@ describe("runIngest", () => {
     // カーソルが保存され、増分に使われる(冪等性は次のテストで検証)。
     const cursor = sanitizeCursor(loadCursor(join(desktopRoot, "proj-desktop", "session.jsonl")));
     expect(cursor).not.toBeNull();
+  });
+
+  it("2b. skipClaudeCli は CLI と判定される transcript を、同じパスを指すデスクトップ root 経由でも走査しない", async () => {
+    process.env.CCCN_CLAUDE_DESKTOP_ROOTS = [cliProjects, desktopRoot].join(delimiter);
+    const result = await runIngest({ dryRun: true, offlinePricing: true, skipClaudeCli: true });
+
+    const claudeSessions = result.records.filter((r) => r.source !== "codex").map((r) => r.sessionId);
+    expect(claudeSessions).toEqual(["desktop-sess-1"]);
+    expect(result.records.some((r) => r.source === "codex")).toBe(true);
   });
 
   it("3. 2回目の実行では新規に何も取り込まない(mtime プリフィルタ + カーソルで冪等)", async () => {
@@ -931,6 +940,8 @@ describe("runIngest", () => {
     it("18. track が複数ターンをまとめて記録した後にカーソルを失っても、再分割で二重計上しない", async () => {
       const sessionId = "01234567-eeee-7000-8000-000000000018";
       const rolloutPath = join(rolloutDir(), "rollout-multiturn-track.jsonl");
+      // 事前に置いた他のファイルは先に取り込んでおく(track の便乗り取込は Claude CLI を読まない)。
+      await runIngest({ dryRun: false, offlinePricing: true });
       writeFileSync(rolloutPath, multiTurnRollout(sessionId), "utf8");
 
       // track は Stop 時点のカーソル位置から EOF までを「1ターン」としてまとめて記録する。

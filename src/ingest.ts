@@ -318,6 +318,11 @@ export interface IngestOptions {
   claudeRoots?: ClaudeTranscriptRoot[];
   /** Codex rollout も走査するか(既定 true)。 */
   includeCodex?: boolean;
+  /**
+   * CLI と判定される Claude transcript(track と同じ最長一致の root 分類)を走査しない。
+   * CLI のセッションは各自の Stop hook が記録するため、便乗り取込で応答中のターンを途中で取り込まない。
+   */
+  skipClaudeCli?: boolean;
 }
 
 export interface IngestSurfaceTotal {
@@ -411,7 +416,9 @@ export async function runIngest(opts: IngestOptions): Promise<IngestResult> {
   const claudeRoots = opts.claudeRoots ?? (await claudeTranscriptRoots());
   const includeCodex = opts.includeCodex ?? true;
 
-  const claudeFiles = await discoverClaudeFiles(claudeRoots);
+  const claudeFiles = (await discoverClaudeFiles(claudeRoots)).filter(
+    (file) => opts.skipClaudeCli !== true || surfaceForClaudePath(file, claudeRoots) !== "cli",
+  );
   const codexFiles = includeCodex ? await discoverCodexFiles() : [];
 
   if (dryRun) {
