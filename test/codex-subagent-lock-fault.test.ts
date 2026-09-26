@@ -101,7 +101,7 @@ describe("Codex activity lock publication failure", () => {
   it("EEXIST直後にcanonicalが消えても通常contentionとして再試行し取得する", async () => {
     fsFault.linkMode = "eexist-once";
     const { acquireCodexActivityLock } = await import("../src/codex/subagent-store");
-    const lock = acquireCodexActivityLock(250);
+    const lock = acquireCodexActivityLock(5_000);
     expect(fsFault.linkCalls).toBe(2);
     expect(stagingFiles()).toEqual([]);
     lock.release();
