@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { aggregateNewTurn } from '../src/transcript';
+import { splitIntoTurnDrafts } from '../src/sweep';
 import type { Cursor, TokenBuckets } from '../src/types';
 
 // Shared golden fixture (read-only). Anything that mutates a transcript works on
@@ -277,6 +278,64 @@ describe('aggregateNewTurn', () => {
     if (r === null) return;
     expect(r.apiCalls).toBe(1);
     expect(r.prompt).toBe('新しい\nプロンプト');
+  });
+
+  // 6b. pasted text is wrapped in <pasted_content> tags; the tags are removed and
+  //     the pasted contents plus the typed text become the prompt.
+  it('6b. keeps pasted contents instead of rejecting them as a pseudo message', async () => {
+    const f = path.join(dir, 't.jsonl');
+    await writeJsonl(f, [
+      userLine({
+        content: '\n\n<pasted_content id="1a2b">\n貼り付けた文章\n</pasted_content id="1a2b">\n\nこれを要約して',
+        uuid: 'u1',
+        ts: '2026-07-06T00:00:01.000Z',
+      }),
+      asst({ id: 'msg_P', req: 'req_P', usage: usageNew(1, 1), ts: '2026-07-06T00:00:02.000Z' }),
+    ]);
+
+    const r = await aggregateNewTurn(f, null);
+    expect(r?.prompt).toBe('貼り付けた文章\n\n\nこれを要約して');
+  });
+
+  // 6b'. pasted HTML/XML is still a real prompt; only text starting with "<"
+  //      outside the pasted blocks is treated as a pseudo message.
+  it("6b'. keeps a prompt whose pasted contents start with a tag", async () => {
+    const f = path.join(dir, 't.jsonl');
+    await writeJsonl(f, [
+      userLine({
+        content: '<pasted_content id="a">\n<div>本文</div>\n</pasted_content id="a">\nこれを説明して',
+        uuid: 'u1',
+        ts: '2026-07-06T00:00:01.000Z',
+      }),
+      userLine({
+        content: '<command-name>/foo</command-name>\n<pasted_content id="b">\n貼り付け\n</pasted_content id="b">',
+        uuid: 'u2',
+        ts: '2026-07-06T00:00:02.000Z',
+      }),
+      asst({ id: 'msg_P', req: 'req_P', usage: usageNew(1, 1), ts: '2026-07-06T00:00:03.000Z' }),
+    ]);
+
+    const r = await aggregateNewTurn(f, null);
+    expect(r?.prompt).toBe('<div>本文</div>\n\nこれを説明して');
+  });
+
+  // 6c. sweep's turn splitting applies the same rule: a prompt that starts with
+  //     pasted text still opens a new turn.
+  it('6c. treats a pasted-text prompt as a turn boundary when splitting', async () => {
+    const f = path.join(dir, 't.jsonl');
+    await writeJsonl(f, [
+      userLine({ content: '最初の依頼', uuid: 'u1', ts: '2026-07-06T00:00:01.000Z' }),
+      asst({ id: 'msg_A', req: 'req_A', usage: usageNew(1, 1), ts: '2026-07-06T00:00:02.000Z' }),
+      userLine({
+        content: '<pasted_content id="1a2b">\n貼り付けた文章\n</pasted_content id="1a2b">',
+        uuid: 'u2',
+        ts: '2026-07-06T00:00:03.000Z',
+      }),
+      asst({ id: 'msg_B', req: 'req_B', usage: usageNew(1, 1), ts: '2026-07-06T00:00:04.000Z' }),
+    ]);
+
+    const { drafts } = await splitIntoTurnDrafts(f, null);
+    expect(drafts.map((d) => d.prompt)).toEqual(['最初の依頼', '貼り付けた文章']);
   });
 
   // 7. resilience: empty file / missing path -> null; a corrupt JSON line is

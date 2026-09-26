@@ -171,7 +171,7 @@ export async function runHistory(
       } else {
         const out = lines.map((l, i) => {
           if (!targetSet.has(i) || l.rec === null) return l.raw;
-          return JSON.stringify({ ...l.rec, prompt: "" });
+          return JSON.stringify({ ...l.rec, prompt: "", promptRedacted: true });
         });
         atomicWrite(file, out.join("\n") + "\n");
         console.log(

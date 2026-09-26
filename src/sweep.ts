@@ -15,7 +15,7 @@ import { readFile } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 
-import { extractBucket, promptCandidate } from "./transcript";
+import { extractBucket, promptCandidate, promptFromText } from "./transcript";
 import { addCountedCalls, anyOf, callFingerprints, setCountedCalls } from "./counted-calls";
 import type { MessageKeyFilter } from "./counted-calls";
 import { computeCost, loadPriceTable } from "./pricing";
@@ -252,7 +252,8 @@ async function readAll(path: string): Promise<Buffer | null> {
  *
  * ターン境界の規則:
  *  - 「実ユーザープロンプト行」= type==="user" && isSidechain!==true && promptCandidate が非 null
- *    && trim 後が非空 && "<" 始まりでない。
+ *    && promptFromText が非 null(<pasted_content> タグを外した後が非空で、貼り付け部分の外側が
+ *    "<" 始まりでない)。
  *  - 境界に達したら、それまでのバッファに assistant usage が1件以上あればターンとして flush してから
  *    新しいバッファを開始し、そのプロンプトを新ターンのプロンプトにする。
  *  - 窓の先頭からの assistant 群(先行プロンプトなし)は prompt="" の1ターンとして扱う。
@@ -350,12 +351,10 @@ export async function splitIntoTurnDrafts(
     let boundaryPrompt = "";
     if (type === "user" && !isSide && message !== null) {
       const cand = promptCandidate(message.content);
-      if (cand !== null) {
-        const t = cand.trim();
-        if (t.length > 0 && !t.startsWith("<")) {
-          isBoundary = true;
-          boundaryPrompt = t;
-        }
+      const p = cand === null ? null : promptFromText(cand);
+      if (p !== null) {
+        isBoundary = true;
+        boundaryPrompt = p;
       }
     }
 

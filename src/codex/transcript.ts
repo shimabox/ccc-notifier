@@ -13,6 +13,7 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { codexEventFingerprint } from "../counted-calls";
+import { promptFromText } from "../transcript";
 import type { MessageKeyFilter } from "../counted-calls";
 import type { Cursor, TokenBuckets, TurnAggregate } from "../types";
 
@@ -71,10 +72,9 @@ function withoutChromeTabs(text: string): string {
   return m === null ? text : text.slice(m.index + m[0].length);
 }
 
-/** プロンプトとして採れる入力か。空や <command-name> 等の擬似メッセージは除く(Claude 側と同じ規則)。 */
+/** プロンプトとして採れる入力か。Chrome 拡張のタブ情報を除いてから Claude 側と同じ規則で判定する。 */
 function promptOf(text: string | null): string | null {
-  const t = withoutChromeTabs(text?.trim() ?? "").trim();
-  return t.length > 0 && !t.startsWith("<") ? t : null;
+  return text === null ? null : promptFromText(withoutChromeTabs(text.trim()));
 }
 
 function zeroTotals(): CodexTotals {

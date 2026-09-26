@@ -176,6 +176,8 @@ describe("runHistory redact", () => {
     const recs = readRecs();
     expect(recs).toHaveLength(2);
     expect(recs.every((r) => r.prompt === "")).toBe(true);
+    // 取得できなかった空と区別できるよう、消した印を残す。
+    expect(recs.every((r) => r.promptRedacted === true)).toBe(true);
     // コスト等のフィールドは保持される。
     expect(recs.map((r) => r.costUSD)).toEqual([0.1, 0.2]);
     expectCanonicalInvalidated(custom);

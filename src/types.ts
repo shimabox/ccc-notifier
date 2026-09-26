@@ -88,6 +88,7 @@ export interface TurnRecord {
   fxRate: number;
   fxSource: 'live' | 'cache' | 'fixed';
   prompt: string;            // 全文(ローカルのみ)。null 時は ""
+  promptRedacted?: true;     // history redact でプロンプトを消した印(取得できなかった空と区別する)
   ingest?: 'sweep' | 'scan'; // sweep(全リセット再構築)/ scan(hook非依存の増分取り込み)由来の記録の目印。hook 経由は付与しない(undefined)
   source?: 'codex';          // 無し = Claude Code(後方互換)。ingest と同じ流儀
   /** 利用元。欠損(旧レコード) = cli として読み取り側で解釈する(マイグレーション不要)。 */

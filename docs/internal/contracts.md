@@ -59,6 +59,9 @@
   sessions/rollout/usage不在、読取・解析・pricing失敗、unknown modelは警告止まりで、それだけではdoctorをexit 1にしない。
   unknown modelは`Cc`/`Cf`/`Zl`/`Zp`除去・長さ/件数制限した名前と過少計上の可能性を表示する。
   model別集計はnull-prototype/own-property確認を使い、`__proto__`/`constructor`等をデータkeyとして安全に扱う。
+- プロンプト取得状況: history のうち `apiCalls > 0` かつ `promptRedacted !== true` の記録を、ソース別(Claude Code / Codex)に
+  ts 降順で直近20件見る。10件以上あって1件もプロンプトが無ければ ⚠️(ログ形式の変化で読めなくなった可能性)、
+  それ以外は ✅ で件数を表示する。10件未満のソースは表示しない。警告止まりで exit code には影響しない。
 
 ## TurnRecord.models の定義
 main のモデル → sidechain のみのモデル の順、重複排除。
@@ -159,6 +162,9 @@ TurnRecord に optional の `ingest?: 'sweep'` を追加した(schemaVersion は
 ### src/transcript.ts — export 追加(挙動不変)
 sweep がメイン(aggregateNewTurn)とパース規約を完全に踏襲するため、既存 private ヘルパー
 `extractBucket` / `promptCandidate` を export に変更した(**実装・シグネチャは不変**)。
+プロンプトの採否は `promptFromText` に一本化している(aggregateNewTurn・splitIntoTurnDrafts・Codex 解析で共通):
+`<pasted_content …>` / `</pasted_content …>` タグを外して中身を残し、trim 後に空、または貼り付け部分の外側が `<` で始まる
+擬似メッセージ(`<command-name>` など)は採らない。
 
 ### src/sweep.ts(2026-07-07 追加)
 - `runSweep(argv: string[]): Promise<number>`
@@ -224,7 +230,8 @@ sweep がメイン(aggregateNewTurn)とパース規約を完全に踏襲する�
 ダッシュボードが全履歴(プロンプト全文含む)を埋め込むため、ユーザーが履歴を整理できる CLI を追加。
 
 - `src/history.ts`(新規): `runHistory(argv): Promise<number>`。`clear`(レコード削除)/`redact`(プロンプトのみ空に)、
-  `--days N`(N 日より前だけ)、`--yes`(確認省略)。history.jsonl を tmp + rename で原子的に書き換える。
+  `--days N`(N 日より前だけ)、`--yes`(確認省略)。redact した記録には `promptRedacted: true` を付ける(取得できなかった空と区別する)。
+  history.jsonl を tmp + rename で原子的に書き換える。
   壊れた行・ts 不正な行は触らない。変更成功後は両canonical dashboardと日次stateを削除する（所有中lockはfinallyでtoken一致解除）。cli.ts に `history` を配線。
 
 ## 2026-07-09 追加: 月予算(monthlyBudgetUSD)
@@ -318,7 +325,7 @@ interface CodexTurnDraft {
 - TokenBuckets 写像(acc に適用): `input = max(0, acc.input − acc.cached)` / `cacheRead = acc.cached` /
   `output = acc.output` / `cacheWrite5m = cacheWrite1h = 0`
 - モデル: ウィンドウ内最後の `turn_context.payload.model`。無ければ `"unknown"`(呼び出し側 track は hook payload の `model` を優先できるよう、TurnAggregate.main のキーに使う)
-- プロンプト: usage のある最後のターン(セグメント)のユーザー入力。入力は `event_msg/user_message` の `message`(history_mode=legacy)、または `event_msg/item_completed` で `item.type==="UserMessage"` の `content[].type==="text"` を改行連結したもの(history_mode=paginated)。Chrome 拡張が先頭に付ける `# Chrome tabs:` のタブ情報は、`## My request…:` 見出しより後ろの依頼文だけに切り詰める。trim 後に空、または `<` で始まる擬似メッセージ(`<command-name>` や `<send_user_message_question_reply>` など)は採らない(Claude 側と同じ規則)。usage ゼロのターン(中断直後の入力など)の入力でも上書きせず、最後の usage ありターンの入力が採れなければ null(split の最終ドラフトと同じ値)。cwd: 最後の `turn_context.payload.cwd` → `session_meta.payload.cwd`
+- プロンプト: usage のある最後のターン(セグメント)のユーザー入力。入力は `event_msg/user_message` の `message`(history_mode=legacy)、または `event_msg/item_completed` で `item.type==="UserMessage"` の `content[].type==="text"` を改行連結したもの(history_mode=paginated)。Chrome 拡張が先頭に付ける `# Chrome tabs:` のタブ情報は、`## My request…:` 見出しより後ろの依頼文だけに切り詰める。その後は Claude 側と同じ `promptFromText` で判定する(`<command-name>` や `<send_user_message_question_reply>` などは採らない)。usage ゼロのターン(中断直後の入力など)の入力でも上書きせず、最後の usage ありターンの入力が採れなければ null(split の最終ドラフトと同じ値)。cwd: 最後の `turn_context.payload.cwd` → `session_meta.payload.cwd`
 - `sessionId`: `session_meta.payload.session_id` → 無ければファイル名の uuid 部
 - sidechain = `{}`、gitBranch = null、apiCalls = ウィンドウ内 token_count(info あり・step≠0)件数
 - newCursor: `offset` = 処理済み末尾、`codexTotals` = prev(最後に観測した total_token_usage。フォールバック発生時も同じ)、
