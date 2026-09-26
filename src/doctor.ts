@@ -835,6 +835,41 @@ function checkDuplicateHistoryTurns(): boolean {
   return true;
 }
 
+// ---- 10. プロンプトの取得状況 ----
+// プロンプトが空の記録は正常にも生じるため、ログ形式が変わって読めなくなってもエラーにならない。
+// 直近の記録が1件もプロンプトを持たないときだけ、形式の変化を疑って知らせる。
+const PROMPT_CHECK_RECENT = 20;
+const PROMPT_CHECK_MIN = 10;
+
+function checkPromptCapture(): boolean {
+  // サブエージェントだけの記録は元々プロンプトを持たず、redact 済みの記録は意図して消したもの。
+  const turns = readTurns().filter((r) => r.apiCalls > 0 && r.promptRedacted !== true);
+  const sources: [string, (r: TurnRecord) => boolean][] = [
+    ["Claude Code", (r) => r.source === undefined],
+    ["Codex", (r) => r.source === "codex"],
+  ];
+  for (const [label, isSource] of sources) {
+    const recent = turns
+      .filter(isSource)
+      .sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
+      .slice(0, PROMPT_CHECK_RECENT);
+    if (recent.length < PROMPT_CHECK_MIN) continue;
+    const captured = recent.filter((r) => r.prompt.trim().length > 0).length;
+    if (captured === 0) {
+      log(
+        "warn",
+        `${label} のプロンプト取得: 直近${recent.length}件の記録にプロンプトが1件もありません。` +
+          "ログ形式が変わって読めていない可能性があります。ccc-notifier を最新版に更新し、" +
+          "更新後の記録でも続く場合は Issue で報告してください。history redact で消した場合は無視してかまいません" +
+          "(sweep で取り直すと、redact で消したプロンプトも元のログから復活します)",
+      );
+    } else {
+      log("ok", `${label} のプロンプト取得: 直近${recent.length}件中${captured}件にプロンプトがあります`);
+    }
+  }
+  return true;
+}
+
 export async function runDoctor(): Promise<number> {
   const results: boolean[] = [];
 
@@ -867,6 +902,7 @@ export async function runDoctor(): Promise<number> {
   results.push(await safeRun("desktop-scan", () => checkDesktopScan()));
   results.push(await safeRun("pending-append", () => Promise.resolve(checkPendingAppendMarker())));
   results.push(await safeRun("duplicate-history", () => Promise.resolve(checkDuplicateHistoryTurns())));
+  results.push(await safeRun("prompt-capture", () => Promise.resolve(checkPromptCapture())));
 
   const hasFailure = results.some((ok) => ok === false);
   return hasFailure ? 1 : 0;

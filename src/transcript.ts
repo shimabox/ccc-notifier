@@ -76,6 +76,24 @@ export function extractBucket(usage: Record<string, unknown>): TokenBuckets {
  * Exported so src/sweep.ts can reuse the exact same prompt rule (behaviour and
  * signature unchanged).
  */
+const PASTED_CONTENT_TAG = /<\/?pasted_content(?:\s[^>]*)?>/g;
+const PASTED_CONTENT_BLOCK = /<pasted_content(?:\s[^>]*)?>[\s\S]*?<\/pasted_content(?:\s[^>]*)?>/g;
+
+/**
+ * Turn a prompt candidate into the recorded prompt, or null if it is not one.
+ * <pasted_content> wrappers around pasted text are removed (their contents are
+ * kept). Empties are rejected, and so are pseudo-messages such as
+ * <command-name>…</command-name>: text that starts with "<" outside the pasted
+ * blocks (pasted HTML/XML is still a real prompt). Shared by src/sweep.ts and
+ * the Codex parser.
+ */
+export function promptFromText(text: string): string | null {
+  const t = text.replace(PASTED_CONTENT_TAG, '').trim();
+  if (t.length === 0) return null;
+  const typed = text.replace(PASTED_CONTENT_BLOCK, '').trim();
+  return typed.startsWith('<') ? null : t;
+}
+
 export function promptCandidate(content: unknown): string | null {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
@@ -196,11 +214,8 @@ export async function aggregateNewTurn(
     // 4. prompt extraction: real user prompts only (never sub-agent instructions)
     if (type === 'user' && !isSide && message !== null) {
       const cand = promptCandidate(message.content);
-      if (cand !== null) {
-        const t = cand.trim();
-        // Reject empties and pseudo-messages such as <command-name>…</command-name>.
-        if (t.length > 0 && !t.startsWith('<')) prompt = t;
-      }
+      const p = cand === null ? null : promptFromText(cand);
+      if (p !== null) prompt = p;
     }
 
     // 3. assistant usage accounting
