@@ -401,7 +401,13 @@ export async function runTrack(stdinText: string, opts?: { codex?: boolean }): P
         //   (offlinePricing)で毎 hook のネット待ちを避ける。新規に取り込んだターン群の合計が
         //   minNotifyUSD 以上ならまとめて1通通知する(notifyIngestSummary はミュート・しきい値を尊重)。
         try {
-          const result = await runIngest({ dryRun: false, offlinePricing: true });
+          const result = await runIngest({
+            dryRun: false,
+            offlinePricing: true,
+            // Claude CLI の transcript は各セッションの hook が記録する。ここで読むと応答中の
+            // 別セッションのターンを途中で取り込み、1ターンが複数の記録に分かれる。
+            skipClaudeCli: true,
+          });
           if (result.records.length > 0) {
             await notifyIngestSummary(result, cfg);
           }
