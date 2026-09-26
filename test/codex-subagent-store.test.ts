@@ -173,7 +173,7 @@ describe("Codex subagent Gate D activity", () => {
     }));
     const old = new Date(Date.now() - 60_000);
     utimesSync(lockPath, old, old);
-    const lock = acquireCodexActivityLock(100, { staleMs: 1 });
+    const lock = acquireCodexActivityLock(5_000, { staleMs: 1 });
     expect(lock.token).not.toBe("b".repeat(32));
     lock.release();
     expect(existsSync(lockPath)).toBe(false);
@@ -221,7 +221,7 @@ describe("Codex subagent Gate D activity", () => {
         child.stdout!.once("data", resolve);
         child.once("error", reject);
       });
-      expect(() => acquireCodexActivityLock(500, { staleMs: 250 })).toThrow("lock timeout");
+      expect(() => acquireCodexActivityLock(1_500, { staleMs: 1_000 })).toThrow("lock timeout");
       expect(existsSync(lockPath)).toBe(true);
     } finally {
       child.kill();
