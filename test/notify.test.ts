@@ -119,6 +119,7 @@ describe("modelDisplayName", () => {
     ["claude-fable-5", "Fable 5"],
     ["claude-haiku-4-5", "Haiku 4.5"],
     ["claude-opus-4-8", "Opus 4.8"],
+    ["claude-sonnet-5-5", "Sonnet 5.5"],
     ["claude-sonnet-4-5-20250929", "Sonnet 4.5"],
     ["claude-3-5-haiku", "Haiku 3.5"],
     ["claude-fable-5[1m]", "Fable 5"],

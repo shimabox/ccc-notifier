@@ -37,6 +37,7 @@ export function builtinPriceTable(): PriceTable {
     'claude-opus-4': price(15, 75, 18.75, 30, 1.5, 'builtin'), // 旧 claude-opus-4-20250514 の受け皿
     'claude-3-opus': price(15, 75, 18.75, 30, 1.5, 'builtin'),
 
+    'claude-sonnet-5-5': price(2, 10, 2.5, 4, 0.2, 'builtin'),
     'claude-sonnet-5': price(2, 10, 2.5, 4, 0.2, 'builtin'),
     'claude-sonnet-4-6': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-sonnet-4-5': price(3, 15, 3.75, 6, 0.3, 'builtin'),
