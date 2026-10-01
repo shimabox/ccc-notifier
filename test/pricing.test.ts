@@ -16,6 +16,7 @@ const addedModelRates = [
   { model: 'claude-opus-5', input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, expectedUSD: 0.11775 },
   { model: 'claude-sonnet-5-5', input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2, expectedUSD: 0.0471 },
   { model: 'gpt-6-astra', input: 10, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 1, expectedUSD: 0.118 },
+  { model: 'gpt-6.1-sol', input: 2, output: 10, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.1, expectedUSD: 0.0228 },
   { model: 'gpt-6-sol', input: 2, output: 10, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.2, expectedUSD: 0.0236 },
   { model: 'gpt-6-luna', input: 0.1, output: 0.5, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.01, expectedUSD: 0.00118 },
   { model: 'gpt-5.6-sol', input: 4, output: 20, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.4, expectedUSD: 0.0472 },
