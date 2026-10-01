@@ -51,6 +51,7 @@ export function builtinPriceTable(): PriceTable {
 
     // Codex の usage はキャッシュ書き込み数を区別しないため、write 系は 0 とする。
     'gpt-6-astra': price(10, 50, 0, 0, 1, 'builtin'),
+    'gpt-6.1-sol': price(2, 10, 0, 0, 0.1, 'builtin'),
     'gpt-6-sol': price(2, 10, 0, 0, 0.2, 'builtin'),
     'gpt-6-luna': price(0.1, 0.5, 0, 0, 0.01, 'builtin'),
     'gpt-5.6-sol': price(4, 20, 0, 0, 0.4, 'builtin'),
