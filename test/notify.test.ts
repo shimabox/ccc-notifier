@@ -118,6 +118,7 @@ describe("modelDisplayName", () => {
   it.each<[string, string]>([
     ["claude-fable-5", "Fable 5"],
     ["claude-haiku-4-5", "Haiku 4.5"],
+    ["claude-haiku-5-5", "Haiku 5.5"],
     ["claude-opus-4-8", "Opus 4.8"],
     ["claude-sonnet-5-5", "Sonnet 5.5"],
     ["claude-sonnet-4-5-20250929", "Sonnet 4.5"],
