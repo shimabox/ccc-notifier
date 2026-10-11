@@ -49,6 +49,7 @@
 - `main(argv: string[]): Promise<number>`
 - `runDoctor(): Promise<number>`
 - `runReport(argv: string[]): Promise<number>`
+- `ui`は`dashboard`の別名。同じ`runDashboard(rest)`へ配線し、optionとexit codeは`dashboard`と同一。
 - doctorの直近額はソース別で、Claudeは`Claude Code 直近セッション合計`、Codexは`Codex 最新rollout合計`
   と表示し、両者を合算しない。Codex行は常に
   `API換算・単一rolloutのみ・親/子未分類/非合算・Claude Code分とは別集計`を明示する。

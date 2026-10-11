@@ -126,7 +126,7 @@ ccc-notifier init
 | `ccc-notifier init` | 通知や連携を設定する |
 | `ccc-notifier doctor` | 設定と通知を診断する |
 | `ccc-notifier report [--days N]` | コスト集計をターミナルに表示する |
-| `ccc-notifier dashboard` | 直近のHTMLダッシュボードを開く |
+| `ccc-notifier dashboard` | 直近のHTMLダッシュボードを開く（`ccc-notifier ui`でも同じ） |
 | `ccc-notifier dashboard --all` | 保存済みの全履歴版を開く |
 | `ccc-notifier budget [<USD>]` | 月予算を確認・設定する（`0`で解除） |
 | `ccc-notifier mute [30m\|2h\|1d]` | 通知を一時停止する（期間省略で無期限） |

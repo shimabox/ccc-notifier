@@ -23,6 +23,8 @@ npx ccc-notifier dashboard --refresh 10   # 自動リロード間隔を10秒に�
 npx ccc-notifier dashboard --no-refresh   # 自動リロードを無効化して生成
 ```
 
+`dashboard`は`ui`と書いても同じです。オプションもそのまま使えます(例: `npx ccc-notifier ui --all`)。
+
 検索・行クリックでプロンプト全文を確認できます([ページ全体のスクリーンショット](images/dashboard-full.png)):
 
 ![ターン履歴(検索と全文展開)](images/history-expand.png)

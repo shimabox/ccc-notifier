@@ -131,8 +131,45 @@ describe("main", () => {
     expect(code).toBe(0);
     expect(output).toContain("Usage");
     expect(output).toContain("dashboard [--all|--days N]");
+    expect(output).toContain("alias: ui");
     expect(output).toContain("sweep [--dry-run] [--days N]");
     expect(output).toContain("scan [--dry-run] [--json]");
+  });
+});
+
+// ============ main dashboard 配線 ============
+// main() が "dashboard" と別名 "ui" を runDashboard に配線し、rest 引数を渡すことを検証する。
+
+describe("main dashboard", () => {
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "cccn-cli-test-dashboard-"));
+    process.env.CCCN_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    delete process.env.CCCN_HOME;
+    vi.restoreAllMocks();
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it.each(["dashboard", "ui"])("main(['%s','--no-open','--out',path]) は 0 を返し HTML を書く", async (cmd) => {
+    const { main } = await import("../src/cli");
+    const out = join(tmpHome, "custom.html");
+    const { code } = await captureLogs(() => main([cmd, "--no-open", "--out", out]));
+
+    expect(code).toBe(0);
+    expect(readFileSync(out, "utf8")).toContain("<html");
+  });
+
+  it("main(['ui','--all','--days','7']) は dashboard と同じ引数エラーで 1 を返し、help は表示しない", async () => {
+    const { main } = await import("../src/cli");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { code, output } = await captureLogs(() => main(["ui", "--all", "--days", "7"]));
+
+    expect(code).toBe(1);
+    expect(output).not.toContain("使い方 / Usage: ccc-notifier <command>");
   });
 });
 
