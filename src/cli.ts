@@ -31,8 +31,8 @@ const COMMANDS: ReadonlyArray<{ cmd: string; ja: string; en: string }> = [
   },
   {
     cmd: "dashboard [--all|--days N] [--no-open] [--out <path>] [--refresh <sec>|--no-refresh]",
-    ja: "HTMLダッシュボードを生成してブラウザで開く",
-    en: "Generate and open the HTML dashboard",
+    ja: "HTMLダッシュボードを生成してブラウザで開く(別名: ui)",
+    en: "Generate and open the HTML dashboard (alias: ui)",
   },
   {
     cmd: "reset-cursors",
@@ -224,7 +224,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runDoctor();
       case "report":
         return await runReport(rest);
-      case "dashboard": {
+      case "dashboard":
+      case "ui": {
         const { runDashboard } = await import("./dashboard");
         return await runDashboard(rest);
       }
