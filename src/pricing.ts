@@ -45,6 +45,7 @@ export function builtinPriceTable(): PriceTable {
     'claude-3-7-sonnet': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-3-5-sonnet': price(3, 15, 3.75, 6, 0.3, 'builtin'),
 
+    'claude-haiku-5-5': price(0.1, 0.5, 0.125, 0.2, 0.01, 'builtin'), // プロンプト10万トークン以下の単価
     'claude-haiku-4-5': price(1, 5, 1.25, 2, 0.1, 'builtin'),
     'claude-3-5-haiku': price(0.8, 4, 1.0, 1.6, 0.08, 'builtin'),
     'claude-3-haiku': price(0.25, 1.25, 0.3125, 0.5, 0.025, 'builtin'),
