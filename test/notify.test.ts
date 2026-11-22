@@ -117,6 +117,7 @@ describe("formatTokens", () => {
 describe("modelDisplayName", () => {
   it.each<[string, string]>([
     ["claude-fable-5", "Fable 5"],
+    ["claude-fable-5-2", "Fable 5.2"],
     ["claude-haiku-4-5", "Haiku 4.5"],
     ["claude-haiku-5-5", "Haiku 5.5"],
     ["claude-opus-4-8", "Opus 4.8"],

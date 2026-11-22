@@ -21,6 +21,8 @@ function price(
 /** Anthropic / OpenAI の公開単価に基づく組み込み単価表(単位: USD / 100万トークン)。 */
 export function builtinPriceTable(): PriceTable {
   return {
+    'claude-fable-5-2': price(8, 40, 10, 16, 0.2, 'builtin'),
+    'claude-mythos-5-2': price(8, 40, 10, 16, 0.2, 'builtin'),
     'claude-fable-5-1': price(10, 50, 12.5, 20, 0.25, 'builtin'),
     'claude-mythos-5-1': price(10, 50, 12.5, 20, 0.25, 'builtin'),
     'claude-fable-5': price(10, 50, 12.5, 20, 1.0, 'builtin'),
@@ -37,7 +39,7 @@ export function builtinPriceTable(): PriceTable {
     'claude-opus-4': price(15, 75, 18.75, 30, 1.5, 'builtin'), // 旧 claude-opus-4-20250514 の受け皿
     'claude-3-opus': price(15, 75, 18.75, 30, 1.5, 'builtin'),
 
-    'claude-sonnet-5-5': price(2, 10, 2.5, 4, 0.2, 'builtin'),
+    'claude-sonnet-5-5': price(2, 10, 2.5, 4, 0.1, 'builtin'),
     'claude-sonnet-5': price(2, 10, 2.5, 4, 0.2, 'builtin'),
     'claude-sonnet-4-6': price(3, 15, 3.75, 6, 0.3, 'builtin'),
     'claude-sonnet-4-5': price(3, 15, 3.75, 6, 0.3, 'builtin'),
@@ -51,9 +53,12 @@ export function builtinPriceTable(): PriceTable {
     'claude-3-haiku': price(0.25, 1.25, 0.3125, 0.5, 0.025, 'builtin'),
 
     // Codex の usage はキャッシュ書き込み数を区別しないため、write 系は 0 とする。
+    'gpt-6.2-astra': price(8, 40, 0, 0, 0.4, 'builtin'),
+    'gpt-6.2-sol': price(2, 10, 0, 0, 0.1, 'builtin'),
     'gpt-6-astra': price(10, 50, 0, 0, 1, 'builtin'),
     'gpt-6.1-sol': price(2, 10, 0, 0, 0.1, 'builtin'),
     'gpt-6-sol': price(2, 10, 0, 0, 0.2, 'builtin'),
+    'gpt-6.1-terra': price(1, 5, 0, 0, 0.05, 'builtin'),
     'gpt-6-luna': price(0.1, 0.5, 0, 0, 0.01, 'builtin'),
     'gpt-5.6-sol': price(4, 20, 0, 0, 0.4, 'builtin'),
     'gpt-5.6-terra': price(2, 12, 0, 0, 0.2, 'builtin'),
