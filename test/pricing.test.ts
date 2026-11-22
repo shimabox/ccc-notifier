@@ -10,15 +10,20 @@ function fakeResponse(body: unknown, ok = true, status = 200): { ok: boolean; st
 }
 
 const addedModelRates = [
+  { model: 'claude-fable-5-2', input: 8, output: 40, cacheWrite5m: 10, cacheWrite1h: 16, cacheRead: 0.2, expectedUSD: 0.1836 },
+  { model: 'claude-mythos-5-2', input: 8, output: 40, cacheWrite5m: 10, cacheWrite1h: 16, cacheRead: 0.2, expectedUSD: 0.1836 },
   { model: 'claude-fable-5-1', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, expectedUSD: 0.2295 },
   { model: 'claude-mythos-5-1', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25, expectedUSD: 0.2295 },
   { model: 'claude-opus-5-5', input: 4, output: 20, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2, expectedUSD: 0.0926 },
   { model: 'claude-opus-5', input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, expectedUSD: 0.11775 },
-  { model: 'claude-sonnet-5-5', input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2, expectedUSD: 0.0471 },
+  { model: 'claude-sonnet-5-5', input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.1, expectedUSD: 0.0463 },
   { model: 'claude-haiku-5-5', input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01, expectedUSD: 0.002355 },
+  { model: 'gpt-6.2-astra', input: 8, output: 40, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.4, expectedUSD: 0.0912 },
+  { model: 'gpt-6.2-sol', input: 2, output: 10, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.1, expectedUSD: 0.0228 },
   { model: 'gpt-6-astra', input: 10, output: 50, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 1, expectedUSD: 0.118 },
   { model: 'gpt-6.1-sol', input: 2, output: 10, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.1, expectedUSD: 0.0228 },
   { model: 'gpt-6-sol', input: 2, output: 10, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.2, expectedUSD: 0.0236 },
+  { model: 'gpt-6.1-terra', input: 1, output: 5, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.05, expectedUSD: 0.0114 },
   { model: 'gpt-6-luna', input: 0.1, output: 0.5, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.01, expectedUSD: 0.00118 },
   { model: 'gpt-5.6-sol', input: 4, output: 20, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.4, expectedUSD: 0.0472 },
   { model: 'gpt-5.6-terra', input: 2, output: 12, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0.2, expectedUSD: 0.0276 },
